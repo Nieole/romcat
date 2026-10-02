@@ -32,7 +32,7 @@ use shared::画出来的字;
 /// 合成数据的规模。**照真库的形状来**：`demo::BROWSE_VARIANTS` 个变体收敛成
 /// `demo::BROWSE_LINES` 行主列表（`docs/library-facts.md`）。
 ///
-/// 从前这儿写死 46,483（变体数对了），可作品数是合成数据里那二十个写死的名字，
+/// 从前这儿写死一个四万多的变体数（变体数对得上真库，见台账 `docs/library-facts.md`），可作品数是合成数据里那二十个写死的名字，
 /// 收出来只有 3,596 行——量出来的帧率与面板行数都不是维护者真会遇到的那个（挂单 `Q156`）。
 const ROWS: u64 = demo::BROWSE_VARIANTS;
 
@@ -117,7 +117,7 @@ fn 五个维度都有得选而且各自带着条数() {
 
 #[test]
 fn 主列表按作品出行而且行数与库里的作品数对得上() {
-    // 「主列表一个游戏一行——不是 46,428 个变体」。合成数据里
+    // 「主列表一个游戏一行——不是四万多个变体」（真库的数见台账 `docs/library-facts.md`）。合成数据里
     // `demo::BROWSE_WORKS` 个作品，外加每十三个留一个**压根没识别过**的变体
     // ——那些认不出作品，各自一行，一条都不许被吞掉（与导出那一侧同一条口径）。
     // （从前这儿是写死的二十个，收出来 3,596 行；挂单 `Q156`。）
@@ -857,7 +857,7 @@ fn 详情面板列得出全部变体每个带置信度与依据() {
 #[test]
 fn 详情面板列得出选中变体的全部文件含附属文件与内部资源() {
     // 「一个变体不等于一个文件」（`CONTEXT.md` 的「变体」词条）：真库里主文件之外
-    // 还有 142 个附属文件与 158,641 个内部资源。
+    // 还有一百多个附属文件与十五万多个内部资源（见台账 `docs/library-facts.md`）。
     let mut app = 界面(4_000);
     let key = 一条带附属文件的(&mut app);
     {
@@ -1982,21 +1982,22 @@ fn 刮削走任务台而且裁决与手工写的元数据一个字都没动() {
     browse.scrape_mut().start(site, tasks);
     let 任务号 = browse.scrape().running().expect("该排上一趟活");
 
-    // **活走的是任务台**：跑完之后台上留着一条带耗时的历史。
+    // **活走的是任务台**：跑完之后台上留着一条带耗时的历史，怎么收的场也记在那一条上
+    // （回执交给任务台，不画回弹层——票 `gui-draws-the-rest-of-the-design/13`）。
     跑(&ctx, &mut app, 4);
-    assert!(
-        app.tasks()
-            .history()
-            .iter()
-            .any(|record| record.id == 任务号),
-        "刮削那一趟没进任务台的历史",
+    let 那一趟 = app
+        .tasks()
+        .history()
+        .iter()
+        .find(|record| record.id == 任务号)
+        .expect("刮削那一趟没进任务台的历史");
+    assert_eq!(
+        那一趟.ending,
+        romcat_core::task::Ending::Done(()),
+        "刮削出错了：{}",
+        那一趟.ending.render(),
     );
     assert!(app.browse().scrape().running().is_none(), "跑完了该销号");
-    assert!(
-        app.browse().scrape().error().is_none(),
-        "刮削出错了：{:?}",
-        app.browse().scrape().error(),
-    );
 
     // **面板上那句「裁决与你手工维护的元数据不会被动」，行为上也成立。**
     let (_, site) = app.browse_and_site();
@@ -2012,6 +2013,136 @@ fn 刮削走任务台而且裁决与手工写的元数据一个字都没动() {
         "重采一趟数据源把人手写的元数据冲掉了——{}",
         romcat_gui::scrape::UNTOUCHED,
     );
+}
+
+#[test]
+fn 按开始刮削排上就关_那一趟在任务台上_回执不画回弹层() {
+    // 票 `gui-draws-the-rest-of-the-design/13`（收挂单 `Q664`）：从前排上之后这一层还开着、底下写「这一趟在任务屏里
+    // 跑着。」，跑完的回执也画在这一层里——挡着屏。排上就关，回执交给任务台（任务屏历史现成）。
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    跑(&ctx, &mut app, 2);
+    let 台上原来的 = app.tasks().history().len();
+
+    // **按的是屏上那一颗**：页脚上的「开始刮削」。
+    let _ = shared::点正好(&ctx, "开始刮削", |ui| app.ui(ui));
+    assert!(
+        !app.browse().scrape().is_open(),
+        "按了「开始刮削」，这一层该当场关上"
+    );
+    // 合成数据只活在内存里，那一趟就地跑完（`Panel::start` 那条退路）：任务台历史上多了它。
+    跑(&ctx, &mut app, 2);
+    let 那一趟 = app.tasks().history()[台上原来的..]
+        .iter()
+        .find(|record| record.name.starts_with("刮削 · "))
+        .unwrap_or_else(|| panic!("任务台上没有那一趟刮削：{:?}", app.tasks().history()));
+    assert_eq!(
+        那一趟.ending,
+        romcat_core::task::Ending::Done(()),
+        "那一趟没跑完：{}",
+        那一趟.ending.render(),
+    );
+    assert!(app.browse().scrape().running().is_none(), "跑完了该销号");
+
+    // 回执交给任务台：再摊开这一层，里头没有上一趟的回执。
+    摊开刮削面板(&ctx, &mut app);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    let 屏上 = 屏上 + &画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(app.browse().scrape().is_open(), "前提：又摊开了");
+    for 不该有 in ["刮削跑完了", "刮削部分完成", "这一趟在任务屏里跑着"] {
+        assert!(
+            !屏上.contains(不该有),
+            "回执又画回了弹层里：「{不该有}」\n{屏上}"
+        );
+    }
+}
+
+#[test]
+fn 上一趟还没收场时再按开始刮削被拒下_说得出为什么_不再排一趟() {
+    // 弹层排上就关之后，人会关了它去挑下一批、再摊开（挂单 `Q1538`）。「开始刮削」画灰着，屏上常驻那句理由；
+    // 绕过界面直接调那个唯一的入口也得听见同一句（ADR-0005「不禁按钮」那条的再修订）。
+    //
+    // 合成数据只活在内存里，那一趟就地跑完，**主窗口下一帧就认领了它**——所以这里只画刮削这一层、不画主窗口，
+    // 「上一趟还没收场」就停在那儿。
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    let (browse, site, tasks) = app.browse_site_and_tasks();
+    browse.scrape_mut().start(site, tasks);
+    assert!(browse.scrape().running().is_some(), "前提：上一趟还没销号");
+    assert!(!browse.scrape().is_open(), "前提：排上就关了");
+    let 排过的 = tasks.history().len() + tasks.queued().len();
+    browse.open_scrape(&site.catalog);
+    assert!(browse.scrape().is_open(), "前提：又摊开了");
+
+    let mut 屏上 = String::new();
+    for _ in 0..3 {
+        屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+            browse.scrape_mut().show(ui.ctx(), site, tasks);
+        }));
+    }
+    assert!(
+        屏上.contains(romcat_gui::scrape::STILL_RUNNING),
+        "屏上没常驻那句为什么按不动：\n{屏上}"
+    );
+
+    browse.scrape_mut().start(site, tasks);
+    assert_eq!(
+        browse.scrape().error(),
+        Some(romcat_gui::scrape::STILL_RUNNING),
+        "守卫拒下要带着理由，不许是光秃的 return"
+    );
+    assert!(browse.scrape().is_open(), "拒下了，这一层该留着");
+    assert_eq!(
+        tasks.history().len() + tasks.queued().len(),
+        排过的,
+        "拒下了却又排了一趟"
+    );
+    // 那句话屏上只画一处：守卫记下的与常驻的是同一句。
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+        browse.scrape_mut().show(ui.ctx(), site, tasks);
+    }));
+    assert_eq!(
+        屏上.matches(romcat_gui::scrape::STILL_RUNNING).count(),
+        1,
+        "{屏上}"
+    );
+}
+
+#[test]
+fn 刮削弹层的采法照稿两行_名字底下一行核心库那句() {
+    // 拿主意的人 2026-10-01 裁（票 gd-01 人的关，岔路口 5）：两颗单选照稿各是两行——名字，底下一行小字。
+    // 小字取核心库 `Gather::why` 那一句，不抄稿上那两句。这一层没有截图基线，靠这一条钉住两行都画出来。
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    跑(&ctx, &mut app, 2);
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    for gather in Gather::all() {
+        let 名字 = shared::画着的每一处(&out, &|text| text == gather.label());
+        let 小字 = shared::画着的每一处(&out, &|text| text == gather.why());
+        assert!(
+            名字.len() == 1 && 小字.len() == 1,
+            "「{}」那一颗该是名字一行、底下「{}」一行：\n{屏上}",
+            gather.label(),
+            gather.why(),
+        );
+        assert!(
+            小字[0].top() >= 名字[0].bottom() && 小字[0].left() == 名字[0].left(),
+            "「{}」底下那句没摆在名字底下、与名字左对齐：名字 {:?}，小字 {:?}",
+            gather.label(),
+            名字[0],
+            小字[0],
+        );
+    }
+    // 两颗照旧是两颗单选：点小字那一行也换得过去。
+    let _ = shared::点正好(&ctx, Gather::Refresh.why(), |ui| app.ui(ui));
+    assert_eq!(app.browse().scrape().sweep(), Gather::Refresh);
 }
 
 // ── 收藏与合集（票 `gui-redesign/06`） ────────────────────────────────────────

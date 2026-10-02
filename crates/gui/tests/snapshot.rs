@@ -4158,11 +4158,14 @@ fn 停在逐条(app: &mut App) {
     app.queue_and_site().0.show_multiple();
 }
 
-/// 裁决记录那一块要有东西可画：整批通过最小的那一批能整批通过的、整批拒绝最小的那一批没有候选的，再撤掉头一批——
-/// 抽屉里在册的与撤过的各一行。走的是界面上按下去的那几条路（`pass` / `reject` / `commit` / `undo`）。
+/// 裁决记录那一块要有东西可画：先在另一批能整批通过、又切得出好几项的里**就地**通过头一项（那一行的副行接着
+/// 作用范围，票 `gui-draws-the-rest-of-the-design/13`），再整批通过最小的那一批能整批通过的、整批拒绝最小的那一批
+/// 没有候选的，最后撤掉整批通过的那一批——抽屉里就地落下的、在册的与撤过的各一行。走的是界面上按下去的那几条路
+/// （`pass` / `reject` / `commit` / `undo`）。挑哪一批、哪个轴由数据当场定（切得出不止一项的头一个轴、头一项），
+/// 合成数据是定值，挑出来的那一组就是定值。
 #[cfg(feature = "demo")]
-fn 落两批撤一批(app: &mut App) {
-    use romcat_core::triage::{Fanout, Scope};
+fn 落三批撤一批(app: &mut App) {
+    use romcat_core::triage::{Axis, Fanout, Scope};
 
     let batches = app.queue().queue().batches().to_vec();
     let 能过 = batches
@@ -4177,7 +4180,21 @@ fn 落两批撤一批(app: &mut App) {
         .min_by_key(|batch| batch.count)
         .cloned()
         .expect("合成数据里该有一批没有候选的");
+    let 就地那一组 = batches
+        .iter()
+        .filter(|batch| batch.passable() && batch.shape != 能过.shape)
+        .find_map(|batch| {
+            Axis::ALL.into_iter().find_map(|axis| {
+                let scope = Scope::whole(batch.shape.clone());
+                let rows = app.queue().queue().drill(&scope, axis).rows;
+                (rows.len() > 1).then(|| Scope::under(batch.shape.clone(), axis, &rows[0].label))
+            })
+        })
+        .expect("合成数据里该有另一批能整批通过、又切得出好几项的");
     let (screen, site) = app.queue_and_site();
+    screen.pass(site, &就地那一组);
+    screen.commit(site);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
     screen.pass(site, &Scope::whole(能过.shape));
     screen.commit(site);
     let 头一批 = screen.applied().expect("整批通过该落下一批").batch;
@@ -4330,16 +4347,16 @@ fn 待确认_下钻_暗色() {
     );
 }
 
-/// 落两批、撤一批，点屏头那颗「裁决记录 1」（数的是还在册的）打开右边那块抽屉，再拍。
+/// 落三批、撤一批，点屏头那颗「裁决记录 2」（数的是还在册的）打开右边那块抽屉，再拍。
 #[cfg(feature = "demo")]
 fn 拍裁决记录(名字: &str, 主题: Theme, 临时目录名: &str) {
     if 该跳过(名字) {
         return;
     }
     let mut app = 待确认屏(临时目录名);
-    落两批撤一批(&mut app);
+    落三批撤一批(&mut app);
     let mut harness = 开一个(主题, move |ui| app.ui(ui));
-    按(&mut harness, "裁决记录 1");
+    按(&mut harness, "裁决记录 2");
     拍下(harness, 名字);
 }
 

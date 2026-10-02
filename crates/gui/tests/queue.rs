@@ -1483,15 +1483,41 @@ fn 就地落下的那一批裁决在记录上认得出是哪一组() {
     );
     assert_eq!(那一批.note, None, "作用范围不该再塞进备注那句人话里");
 
-    // ⚠️ **只钉到这里**：裁决记录那一行眼下把作用范围画在**悬停**里（`records_drawer` 里那个
-    // `悬停`），屏上那两行字是「第 N 批裁决 · M 条」与「时刻 · summary」——`画出来的字`
-    // 读不到悬停，所以「人在屏上认不认得出是哪一组」这一半没法在这一层钉。
-    // 副行照稿接「· 作用范围」是票 `gui-draws-the-rest-of-the-design/13` 的活（挂单 `Q966`）。
+    // **屏上那一行就认得出**，不用逐行悬停（票 `gui-draws-the-rest-of-the-design/13`，收挂单 `Q966`）：
+    // 副行照稿在「时刻 · 裁成什么」后头接「· 作用范围」，那一句就是核心库折的那一句。
     打开裁决记录(&ctx, &mut app);
     let 屏上 = 画一帧(&ctx, &mut app);
     assert!(
         屏上.contains(&在册那一行(&那一批)),
         "就地落下的那一批没进裁决记录：\n{屏上}",
+    );
+    let 该有 = format!("{} · {}", 副行(&那一批), 一部分.label());
+    assert!(
+        屏上.lines().any(|line| line == 该有),
+        "裁决记录那一行的副行没接上作用范围「{该有}」：\n{屏上}",
+    );
+}
+
+#[test]
+fn 人写的备注接在裁决记录那一行的副行上_没有备注的那一行不变() {
+    // 「手工指定」表单里那一格备注（命令行 `--note`）：人真的会写，屏上那一行就该看得见，不只在悬停里。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    let 备注 = "群里说这是同人移植，不是正式发行";
+    let 带备注的 = 带备注落一批(&ctx, &mut app, 备注);
+    let 那一批 = 册子上的(&app, 带备注的);
+    assert_eq!(那一批.note.as_deref(), Some(备注));
+    assert!(
+        triage::Part::of(&那一批).is_none(),
+        "前提：按选择器落下的不是一部分"
+    );
+
+    打开裁决记录(&ctx, &mut app);
+    let 屏上 = 画一帧(&ctx, &mut app);
+    let 该有 = format!("{} · {备注}", 副行(&那一批));
+    assert!(
+        屏上.lines().any(|line| line == 该有),
+        "裁决记录那一行的副行没接上人写的备注「{该有}」：\n{屏上}",
     );
 }
 
@@ -2850,6 +2876,29 @@ fn 逐条拒(ctx: &egui::Context, app: &mut App, key: &str) -> i64 {
     app.queue().applied().expect("落下了就该有账").batch
 }
 
+/// 按选择器挑出合成库 `GoodNES3.1` 那个目录，整批说它「没有发行版」，带着 `备注`（「手工指定」表单里那一格、
+/// 命令行 `--note`）落下，交回落下的那一批裁决的编号。按选择器落下的不是一部分，副行上接的只有备注。
+fn 带备注落一批(ctx: &egui::Context, app: &mut App, 备注: &str) -> i64 {
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.pick(Axis::Directory, "合成库/GoodNES3.1");
+    }
+    跑(ctx, app, 1);
+    let (screen, site) = app.queue_and_site();
+    screen.preview(
+        site,
+        &Draft {
+            no_release: true,
+            work: Some("某同人移植".to_string()),
+            note: Some(备注.to_string()),
+            ..Draft::default()
+        },
+    );
+    screen.commit(site);
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    screen.applied().expect("落下了就该有账").batch
+}
+
 /// 点一下顶栏上那颗「裁决记录」，再跑两帧让那一块摆稳。
 fn 打开裁决记录(ctx: &egui::Context, app: &mut App) {
     let _ = 点一下(ctx, app, "裁决记录");
@@ -3306,6 +3355,97 @@ fn 屏头右侧照稿_三枚置信度标签_按批逐条那一对_裁决记录()
     }
     let _ = 点正好那一颗(&ctx, &mut app, "按批");
     assert_eq!(app.queue().mode(), Mode::Batches, "按了「按批」");
+}
+
+#[test]
+fn 裁决记录攒了几十批_各行上下不叠_滚得到最早那一批() {
+    // 裁决记录那一块的行是虚拟化的（只画看得见的那几行）；副行照稿折行之后各行不再一样高
+    // （票 `gui-draws-the-rest-of-the-design/13`）。造几十批、最新那一批带一句折得成两行的备注：
+    // 画出来的各行上下不叠，滚到底照样画得到最早落下的那一批。
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    let 头一条 = app.queue().queue().selected()[0].variant.key.clone();
+    停在(&ctx, &mut app, &头一条);
+    按(&ctx, &mut app, egui::Key::N);
+    let 最早那一批 = app.queue().applied().expect("按 N 该落下一批").batch;
+    for _ in 0..40 {
+        按(&ctx, &mut app, egui::Key::N);
+    }
+    let 备注 = "这一句备注故意写得长一些，长到裁决记录那一块里一行排不下、要折成两行，\
+                看折行之后底下那几行有没有被它压住";
+    let 最新那一批 = 带备注落一批(&ctx, &mut app, 备注);
+    打开裁决记录(&ctx, &mut app);
+
+    // **各行上下不叠**：每一行的主行都在上一行副行的底下。
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    let 主行在 = |out: &egui::FullOutput, id: i64| {
+        shared::画着的每一处(out, &|text| text.starts_with(&format!("第 {id} 批裁决 · ")))
+    };
+    let 最新的副行 = shared::画着的每一处(&out, &|text| text.ends_with(备注));
+    assert_eq!(最新的副行.len(), 1, "最新那一批的副行没画出来：\n{屏上}");
+    let 下一行 = 主行在(&out, 最新那一批 - 1);
+    assert_eq!(
+        下一行.len(),
+        1,
+        "第 {} 批那一行没画出来：\n{屏上}",
+        最新那一批 - 1
+    );
+    let 下一行的副行文字 = 副行(&册子上的(&app, 最新那一批 - 1));
+    let 一行高的副行 = shared::画着的每一处(&out, &|text| text == 下一行的副行文字);
+    // 逐条落下的那几批副行一字不差（同一刻、同一句裁成什么），取哪一处都一样高。
+    assert!(!一行高的副行.is_empty(), "{屏上}");
+    assert!(
+        最新的副行[0].height() > 1.5 * 一行高的副行[0].height(),
+        "前提：带长备注的那一行副行该折成不止一行（{:?} 对 {:?}）",
+        最新的副行[0],
+        一行高的副行[0],
+    );
+    assert!(
+        下一行[0].top() >= 最新的副行[0].bottom(),
+        "折成几行的副行压住了底下那一行：副行 {:?}，下一行主行 {:?}",
+        最新的副行[0],
+        下一行[0],
+    );
+    assert!(
+        主行在(&out, 最早那一批).is_empty(),
+        "前提：最早那一批该在视口之外（不然测不到滚动）：\n{屏上}"
+    );
+
+    // **滚到底**：指针停在抽屉里，滚轮一直往下，滚到画出来的字不再变。
+    let 抽屉里 = egui::pos2(
+        headless::VIEWPORT[0] - Tokens::builtin().layout.drawer_width / 2.0,
+        headless::VIEWPORT[1] / 2.0,
+    );
+    let mut 上一帧 = String::new();
+    for _ in 0..200 {
+        let mut input = headless::input();
+        input.events.push(egui::Event::PointerMoved(抽屉里));
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -headless::VIEWPORT[1]),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let 这一帧 = 画出来的字(&headless::frame(&ctx, input, |ui| app.ui(ui)));
+        if 这一帧 == 上一帧 {
+            break;
+        }
+        上一帧 = 这一帧;
+    }
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 最早的 = 主行在(&out, 最早那一批);
+    assert_eq!(
+        最早的.len(),
+        1,
+        "滚到底了，最早那一批还是没画出来：\n{}",
+        画出来的字(&out)
+    );
+    assert!(
+        最早的[0].bottom() <= headless::VIEWPORT[1],
+        "最早那一批画在了视口外头：{:?}",
+        最早的[0]
+    );
 }
 
 #[test]
