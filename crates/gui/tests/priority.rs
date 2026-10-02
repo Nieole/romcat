@@ -249,6 +249,126 @@ fn 恢复默认回到内置那一份_没列出的数据源怎么排屏上说明(
     );
 }
 
+/// 工作目录里那份优先级表，连同它旁边写到一半的临时文件，一样都不剩。
+fn 那份表不在了(工作目录: &std::path::Path) -> bool {
+    let 那份 = workspace::priorities_path(工作目录);
+    let mut 临时的 = 那份.as_os_str().to_os_string();
+    临时的.push(".tmp");
+    !那份.exists() && !std::path::Path::new(&临时的).exists()
+}
+
+#[test]
+fn 恢复默认之后保存删掉工作目录那份_不写一份与内置相同的表() {
+    // 挂单 `Q785`：从前「恢复默认」再「保存」写出一份与今天内置一模一样的表——它把今天的内置顺序冻在
+    // 工作目录里，日后内置那份改了（升级），这个人永远看不见。删掉那份才是「回到默认」。
+    let ctx = 上下文();
+    let 工作目录 = temp_dir("优先级-恢复默认删掉");
+    let mut 改过的 = Priorities::builtin();
+    assert!(改过的.lower("简介", None, 3));
+    改过的
+        .save(&workspace::priorities_path(工作目录.path()))
+        .expect("写得进去");
+    let catalog = Catalog::open_in_memory().expect("开得出中立库");
+    let mut editor = Editor::new(工作目录.path().to_path_buf());
+    editor.open();
+    for _ in 0..2 {
+        跑一帧(&ctx, |ui| editor.show(ui.ctx(), &catalog));
+    }
+
+    // **按的是屏上那两颗**：页脚上的「恢复默认」与「保存」。
+    正好点一下(&ctx, "恢复默认", |ui| editor.show(ui.ctx(), &catalog));
+    assert_eq!(editor.draft(), &Priorities::builtin(), "按了「恢复默认」");
+    正好点一下(&ctx, "保存", |ui| editor.show(ui.ctx(), &catalog));
+    assert!(
+        !editor.is_open(),
+        "保存之后这一层该关上：{:?}",
+        editor.error()
+    );
+    assert!(
+        那份表不在了(工作目录.path()),
+        "恢复默认再保存，工作目录里那份该删掉，而不是写一份与内置相同的"
+    );
+    assert_eq!(
+        sync::prepare::priorities(None, 工作目录.path()).expect("读得动"),
+        Priorities::builtin(),
+        "删掉之后读的那一侧该回到内置那一份"
+    );
+    assert_eq!(
+        editor.take_saved(),
+        Some(Priorities::builtin()),
+        "主窗口该取走内置那一份换进浏览屏"
+    );
+}
+
+#[test]
+fn 工作目录那份与内置一样时也按得下保存_保存就是删掉它() {
+    // 从前「恢复默认」再「保存」留下的那种：内容与内置一模一样。打开时草稿就等于内置，
+    // 「保存」从前按不动（草稿与眼下生效的那份一样），那份冻住的表也就永远删不掉。
+    let ctx = 上下文();
+    let 工作目录 = temp_dir("优先级-与内置一样");
+    Priorities::builtin()
+        .save(&workspace::priorities_path(工作目录.path()))
+        .expect("写得进去");
+    let catalog = Catalog::open_in_memory().expect("开得出中立库");
+    let mut editor = Editor::new(工作目录.path().to_path_buf());
+    editor.open();
+    assert_eq!(editor.draft(), &Priorities::builtin());
+    let 屏上 = 画(&ctx, &mut editor, &catalog);
+    assert!(
+        屏上.contains(priority::REMOVES),
+        "屏上没说保存会删掉工作目录那份：\n{屏上}"
+    );
+
+    正好点一下(&ctx, "保存", |ui| editor.show(ui.ctx(), &catalog));
+    assert!(
+        !editor.is_open(),
+        "保存之后这一层该关上：{:?}",
+        editor.error()
+    );
+    assert!(那份表不在了(工作目录.path()), "与内置一样的那份该删掉");
+
+    // 删掉之后再打开：工作目录里什么都没有，「保存」回到按不动——没有什么可存的。
+    editor.open();
+    assert!(
+        !editor.can_save(),
+        "工作目录里没有那份、草稿又是内置的，保存不该按得动"
+    );
+    let 屏上 = 画(&ctx, &mut editor, &catalog);
+    assert!(!屏上.contains(priority::REMOVES), "{屏上}");
+}
+
+#[test]
+fn 工作目录那份读不动时原样保存就是删掉它() {
+    // 读不动那一份照样打开、摆的是内置那一份（挂单 `Q787`）。这时草稿就是内置那一份，按「保存」删掉坏的那份——
+    // 屏上那两句（读不动的那句、保存后的变化底下那句）说的是同一件事。
+    let ctx = 上下文();
+    let 工作目录 = temp_dir("优先级-读不动");
+    std::fs::write(
+        workspace::priorities_path(工作目录.path()),
+        "这不是一份优先级表 = [",
+    )
+    .expect("写得进去");
+    let catalog = Catalog::open_in_memory().expect("开得出中立库");
+    let mut editor = Editor::new(工作目录.path().to_path_buf());
+    editor.open();
+    let 读不动那句 = editor.error().expect("读不动该说出来").to_string();
+    assert!(读不动那句.contains("删掉它"), "{读不动那句}");
+    let 屏上 = 画(&ctx, &mut editor, &catalog);
+    assert!(屏上.contains(priority::REMOVES), "{屏上}");
+
+    正好点一下(&ctx, "保存", |ui| editor.show(ui.ctx(), &catalog));
+    assert!(
+        !editor.is_open(),
+        "保存之后这一层该关上：{:?}",
+        editor.error()
+    );
+    assert!(那份表不在了(工作目录.path()), "读不动的那份该删掉");
+    assert_eq!(
+        sync::prepare::priorities(None, 工作目录.path()).expect("删掉之后读得动"),
+        Priorities::builtin()
+    );
+}
+
 /// 屏上**正好**写着 `那一段`、而且**画在最上面**的那一处（中心点）。
 ///
 /// 两样都要：页脚那颗「保存」也出现在说明那句话里，按「含有」找会点到说明上去；而
