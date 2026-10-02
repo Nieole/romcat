@@ -120,7 +120,7 @@ pub struct Rule {
 pub struct Platform {
     /// 规范名，报告与中立库里用它。
     pub name: String,
-    /// **全名**：作品详情页头上那一格照稿写它（`Game Boy`、`超级任天堂`）。表里没写是 `None`，屏上退回规范名。
+    /// **全名**：作品详情页头上那一格写它（`Nintendo Game Boy`、`Sega Mega Drive`，一律带厂名）。表里没写是 `None`，屏上退回规范名。
     /// 只给人看，**不进指纹**（[`Manifest::fingerprint`]）：改它不该让已经成型的库作废。
     pub full_name: Option<String>,
     /// 认哪些顶层目录名（已折成小写并规范化成 NFC）。
@@ -900,11 +900,75 @@ mod tests {
     }
 
     #[test]
+    fn 平台表里每个平台都写了带厂名的英文全名() {
+        // 拿主意的人 2026-10-02 裁（票 `gui-draws-the-rest-of-the-design/04`，接着 2026-09-23 那条 `Q962`）：
+        // 三十四个平台**全部**写英文全名、**一律带厂名**，连设计稿给过的那十个也改；街机写 Arcade。
+        // 这张表就是那条裁定，逐行比，多一个、少一个、写法不一样都红。
+        const 那一张表: [(&str, &str); 34] = [
+            ("FC", "Nintendo Family Computer"),
+            ("FDS", "Nintendo Family Computer Disk System"),
+            ("SFC", "Nintendo Super Famicom"),
+            ("GB", "Nintendo Game Boy"),
+            ("GBC", "Nintendo Game Boy Color"),
+            ("GBA", "Nintendo Game Boy Advance"),
+            ("NDS", "Nintendo DS"),
+            ("3DS", "Nintendo 3DS"),
+            ("N64", "Nintendo 64"),
+            ("NGC", "Nintendo GameCube"),
+            ("WII", "Nintendo Wii"),
+            ("WIIU", "Nintendo Wii U"),
+            ("MD", "Sega Mega Drive"),
+            ("Mega-CD", "Sega Mega-CD"),
+            ("SMS", "Sega Master System"),
+            ("GG", "Sega Game Gear"),
+            ("32X", "Sega 32X"),
+            ("SS", "Sega Saturn"),
+            ("DC", "Sega Dreamcast"),
+            ("PCE", "NEC PC Engine"),
+            ("PS1", "Sony PlayStation"),
+            ("PS2", "Sony PlayStation 2"),
+            ("PS3", "Sony PlayStation 3"),
+            ("PSP", "Sony PlayStation Portable"),
+            ("PSV", "Sony PlayStation Vita"),
+            ("VB", "Nintendo Virtual Boy"),
+            ("WS", "Bandai WonderSwan"),
+            ("NGPC", "SNK Neo Geo Pocket Color"),
+            ("Lynx", "Atari Lynx"),
+            ("MSX", "Microsoft MSX"),
+            ("3DO", "Panasonic 3DO"),
+            ("SWITCH", "Nintendo Switch"),
+            ("XBOX360", "Microsoft Xbox 360"),
+            ("街机", "Arcade"),
+        ];
+        let manifest = Manifest::builtin();
+        let 表里的: Vec<(&str, Option<&str>)> = manifest
+            .platforms()
+            .iter()
+            .map(|one| (one.name.as_str(), one.full_name.as_deref()))
+            .collect();
+        let 该是: Vec<(&str, Option<&str>)> = 那一张表
+            .iter()
+            .map(|(code, name)| (*code, Some(*name)))
+            .collect();
+        assert_eq!(表里的, 该是, "平台表里的全名与裁定那一张表对不上");
+    }
+
+    #[test]
     fn 平台表里有全名的交回全名_没写的是空_全名不进指纹() {
         let manifest = Manifest::builtin();
-        assert_eq!(manifest.full_name("GB"), Some("Game Boy"));
-        assert_eq!(manifest.full_name("SFC"), Some("超级任天堂"));
-        assert_eq!(manifest.full_name("FDS"), None, "表里没写全名的平台交回空");
+        assert_eq!(manifest.full_name("GB"), Some("Nintendo Game Boy"));
+        assert_eq!(manifest.full_name("SFC"), Some("Nintendo Super Famicom"));
+        let 添一个没全名的 = format!(
+            "{}\n\n[[\"平台\"]]\n\"名\" = \"新机器\"\n\"目录\" = [\"newbox\"]\n",
+            Manifest::builtin_text()
+        );
+        assert_eq!(
+            Manifest::parse(&添一个没全名的, "内置")
+                .expect("编得出来")
+                .full_name("新机器"),
+            None,
+            "表里没写全名的平台交回空"
+        );
         assert_eq!(manifest.full_name("没这个平台"), None);
         let 去掉全名: String = Manifest::builtin_text()
             .lines()

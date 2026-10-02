@@ -36,6 +36,10 @@
 //! 两对都把**「看得全」写成断言**（[`拍超限`]、[`拍下钻`]）：该在画面里的每一样都得整个在视口内，
 //! 哪天那一屏长高把它们挤出去，这里当场红，不会悄悄拍一张截掉半截的基线。
 //!
+//! **第三对反过来是矮的**：作品详情页吸顶那两张（`work/sticky-*`）开 1280×600（[`吸顶那一态的画面`]）——
+//! 合成夹具里那部作品哪一面都不够长，800 高的窗滚不过头上那一块，拍不出吸顶（票
+//! `gui-draws-the-rest-of-the-design/04`）。同样写成断言（[`拍详情页滚过`]）：头上那一块真滚出去了、六个面那一排还在。
+//!
 //! **浅色与暗色各拍一张**：两套主题各取令牌里的一套，只拍一套的话，另一套颜色接错了没人看得见。
 //!
 //! ## 往后每一屏加一张
@@ -1716,6 +1720,19 @@ fn 摆上第几版子库与导出(app: &mut App) {
 /// 自己，拍错了屏它看不出来。
 #[track_caller]
 fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
+    拍详情页滚过(名字, 主题, 面, None);
+}
+
+/// 吸顶那一态（[`拍详情页滚过`]）开多大的窗：比 [`headless::VIEWPORT`] 矮。合成夹具里点开的那部作品只有两个变体，
+/// 哪一面在 800 高的窗里都滚不过头上那一块（实测最多滚一百三十多点，头上那一块近三百点高）。
+const 吸顶那一态的画面: [f32; 2] = [1280.0, 600.0];
+
+/// 同 [`拍详情页`]，拍之前把正文**往下滚 `滚过` 那么多**（点）：吸顶那一态（挂单 `Q926`），窗开 [`吸顶那一态的画面`] 那么大。
+///
+/// **先认一眼真滚过了头上那一块**：头上那一块那颗「编辑元数据」不在可见区里，六个面那一排还在——不然拍下来的
+/// 只是没滚的那一张，基线比的是自己，看不出来。
+#[track_caller]
+fn 拍详情页滚过(名字: &str, 主题: Theme, 面: Tab, 滚过: Option<f32>) {
     if 该跳过(名字) {
         return;
     }
@@ -1723,6 +1740,7 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
     挂上媒体池(&mut app, 目录.path());
     摆上第几版子库与导出(&mut app);
     摆上官方名称与别名(&mut app);
+    摆上收藏与合集(&mut app);
     // 打开与换面走的是界面上「查看详情」、点一面的同一个入口（`Screen::open_page`）；交给画帧那个闭包在下一帧开头办。
     let 换面 = std::rc::Rc::new(std::cell::Cell::new(None::<Tab>));
     let 要换 = std::rc::Rc::clone(&换面);
@@ -1732,7 +1750,7 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
     // 等不到时得说得出是哪一项不满足：跑着几件、解出几张、有没有「没装 ffmpeg」那一档。
     let 图况 = std::rc::Rc::new(std::cell::Cell::new((usize::MAX, usize::MAX, false)));
     let 报况 = std::rc::Rc::clone(&图况);
-    let mut harness = 开一个(主题, move |ui| {
+    let 画一帧 = move |ui: &mut egui::Ui| {
         if let Some(面) = 要换.take() {
             app.browse_and_site().0.open_page(面);
         }
@@ -1740,7 +1758,13 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
         let gallery = app.browse().gallery();
         报况.set((gallery.busy(), gallery.ready(), gallery.lacks_ffmpeg()));
         报图.set(gallery.busy() == 0 && gallery.ready() >= 1 && gallery.lacks_ffmpeg());
-    });
+    };
+    // 吸顶那一态开矮一截的窗（模块文档「视口定死」那一节的第三对例外）。
+    let mut harness = if 滚过.is_some() {
+        开一扇(主题, 吸顶那一态的画面, 画一帧)
+    } else {
+        开一个(主题, 画一帧)
+    };
     // 点一下那一行（同 [`按`]，但先不跑到停：后台解图时一直要重画，等图齐了再跑）。
     let Some(那一行) = 最后一处正好画着(harness.output(), 点开的作品那一行)
     else {
@@ -1788,6 +1812,36 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
         harness.step();
         harness.run_steps(5);
         harness.run();
+    }
+    if let Some(滚过) = 滚过 {
+        // 指针停在正文里：矮窗底边就在 600，停在那儿滚轮落空。
+        harness.event(egui::Event::PointerMoved(egui::pos2(800.0, 400.0)));
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -滚过),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.event(egui::Event::PointerGone);
+        harness.step();
+        harness.run_steps(5);
+        harness.run();
+        let 顶条底 = 正好画着的每一处(harness.output(), "← 返回浏览")
+            .first()
+            .map_or(0.0, |rect| rect.bottom());
+        assert!(
+            正好画着的每一处(harness.output(), "编辑元数据")
+                .iter()
+                .all(|rect| rect.bottom() < 顶条底),
+            "{名字}：头上那一块没滚出去（「编辑元数据」画在 {:?}，顶条底在 {顶条底}），拍下来的不是吸顶那一态",
+            正好画着的每一处(harness.output(), "编辑元数据")
+        );
+        assert!(
+            正好画着的每一处(harness.output(), "识别依据")
+                .iter()
+                .any(|rect| rect.top() >= 顶条底),
+            "{名字}：滚过头上那一块之后六个面那一排不在可见区里"
+        );
     }
     assert!(
         最后一处正好画着(harness.output(), "← 返回浏览").is_some(),
@@ -1855,6 +1909,22 @@ fn 详情页_识别依据_浅色() {
 #[test]
 fn 详情页_识别依据_暗色() {
     拍详情页("work/evidence-dark", Theme::Dark, Tab::Evidence);
+}
+
+/// **吸顶那一态**（挂单 `Q926`）：变体与文件那一面往下滚过头上那一块，六个面那一排贴在可见区的顶上。
+#[test]
+fn 详情页_往下滚之后标签吸顶_浅色() {
+    拍详情页滚过(
+        "work/sticky-light",
+        Theme::Light,
+        Tab::Variants,
+        Some(600.0),
+    );
+}
+
+#[test]
+fn 详情页_往下滚之后标签吸顶_暗色() {
+    拍详情页滚过("work/sticky-dark", Theme::Dark, Tab::Variants, Some(600.0));
 }
 
 // ——— 合并作品与移出此作品 ———
@@ -1935,6 +2005,27 @@ fn 摆上官方名称与别名(app: &mut App) {
             ),
         ])
         .expect("写得进标题集合");
+}
+
+/// 详情页那几张里点开的那个作品**收藏了、进了一个合集**（挂单 `Q961` `Q1108`，设计稿 `renderWD` 那一态）：
+/// 头上多一枚「★ 已收藏」、那颗按钮写「★ 已收藏」，状态块「合集」那一行有一枚带「×」的标签——
+/// 这几样新画的东西基线里都看得见。合集名照稿（`通关过的`）。
+fn 摆上收藏与合集(app: &mut App) {
+    use romcat_core::catalog::browse::{Scope, WorkAnchor, WorkQuery};
+
+    let (_, site) = app.browse_and_site();
+    let id = site
+        .catalog
+        .work_named(点开的作品)
+        .expect("读得动")
+        .expect("夹具里有这部作品");
+    let keys = site
+        .catalog
+        .scoped_variants(&WorkQuery::default(), Scope::Rows(&[WorkAnchor::Work(id)]))
+        .expect("展得开");
+    romcat_core::collection::add(site, romcat_core::collection::FAVORITE, &keys)
+        .expect("收得进收藏");
+    romcat_core::collection::add(site, "通关过的", &keys).expect("加得进合集");
 }
 
 /// 勾上 [`合并的那三个`]，不经表格——表上勾选框那一格在基线里是个小方块，

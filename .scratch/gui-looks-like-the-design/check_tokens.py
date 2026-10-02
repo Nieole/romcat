@@ -766,6 +766,10 @@ work_literals = [
     (r"\.mrow \.v\{[^}]*?line-height:([\d.]+)", [(1, "font", "meta-value-line-height", None)]),
     (r"\.mrow \.v\.clamp\{[^}]*?-webkit-line-clamp:(\d+)", [(1, "layout", "meta-clamp-rows", None)]),
     (r"\.mrow\.dirty\{[^}]*?var\(--accent\) (\d+%)", [(1, "mix", "dirty-row-tint", None)]),
+    # 状态块「合集」那一行里一个合集的「×」（票 gui-draws-the-rest-of-the-design/04）：.tag 里一颗压成 16 见方、11 号字的 .iconbtn。
+    (r'class="iconbtn" style="width:(\d+)px;height:(\d+)px;font-size:(\d+)px" data-cl=', [(1, "layout", "tag-close", None), (2, "layout", "tag-close", None), (3, "font", "size-caption", None)]),
+    # 元数据那一面帮助里那颗行内「数据源优先级」（票 gui-draws-the-rest-of-the-design/04）：行内样式压成 20 高、左右 4。
+    (r'class="btn ghost sm" style="height:(\d+)px;padding:0 (\d+)px;vertical-align:baseline" data-dg="open:prio\|简介">数据源优先级', [(1, "layout", "help-button-height", None), (2, "layout", "help-button-padding", None)]),
     (r"\.alts\{[^}]*?gap:(\d+)px", [(1, "space", "alts-gap", None)]),
     (r"\.alt\{[^}]*?gap:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "alt-gap", None), (2, "space", "alt-padding", 0), (3, "space", "alt-padding", 1)]),
     (r"\.pickchips\{[^}]*?gap:(\d+)px", [(1, "space", "pick-chip-gap", None)]),

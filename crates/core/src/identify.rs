@@ -3585,7 +3585,7 @@ fn candidate_of(unit: &ContentUnit, hit: &Hit, hashed_as: Convention) -> Candida
     // 若干 dataarea，一条 `rom` 是**一颗芯片**的内容。单芯片卡上它恰好等于去头哈希，
     // 多芯片卡上「对上了一颗芯片」离「这个文件就是那次发行」还差着别的芯片
     // （`dat::Convention::PerChip` 的文档说的就是这件事）。所以它降一档：
-    // 通过但标记，等裁决（ADR-0002 的中置信那一档）。
+    // 不自动通过，进待确认队列等人裁（ADR-0002 的中置信那一档，见它 2026-10-02 那段再修订）。
     let per_chip = hit.convention == Convention::PerChip;
     let exact = hit.is_exact() && !nkit && !per_chip && !unverified;
     let mut evidence = format!(

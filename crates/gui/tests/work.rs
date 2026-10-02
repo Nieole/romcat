@@ -11,7 +11,9 @@ use romcat_gui::browse::work::Tab;
 use romcat_gui::{demo, headless};
 
 mod shared;
-use shared::{正好那一段画在哪儿, 点一下, 画出来的字, 等任务台空了};
+use shared::{
+    按在, 正好那一段画在哪儿, 点一下, 画出来的字, 画着的每一处, 等任务台空了
+};
 
 /// 六个面，照稿上的次序。
 const 六个面: [&str; 6] = ["概览", "变体与文件", "元数据", "标题", "媒体", "识别依据"];
@@ -411,9 +413,16 @@ fn 识别依据那一面逐变体列出候选来源与置信度_一条候选都�
         头一条.source,
         头一条.confidence.label()
     );
+    // **后半句照识别那一侧真正的判据写**（拿主意的人 2026-10-02 裁，挂单 `Q922` `Q1447`；ADR-0002 补了修订）：
+    // 只有高置信自动通过，中置信与低置信一样进待确认队列。稿上那半句「中、低置信进入待确认队列」与
+    // 2026-09-23 那一版「中置信通过但标记」都不许再在屏上。
     assert!(
-        屏上.contains("高置信自动通过；中、低置信进入待确认队列。"),
-        "识别依据那一面的帮助没照稿说全：\n{屏上}"
+        屏上.contains("高置信自动通过；中置信与低置信进入待确认队列，等人裁决。"),
+        "识别依据那一面的帮助后半句不是新那一句：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("中、低置信进入待确认队列") && !屏上.contains("中置信通过但标记"),
+        "识别依据那一面还印着旧那半句：\n{屏上}"
     );
     // 「判定依据：」后头照依据形状各段排：来源 / DAT / 哈希口径 · 依据 · 候选数（核心库 `WorkVariant::basis_line`）。
     let 那一句 = format!(
@@ -525,7 +534,7 @@ fn 元数据那一面每个字段写着用的是哪个源的值_一键改用另�
         "简介那一格没写眼下用的是「{源}」说的「{}」：\n{屏上}",
         用的.values[0]
     );
-    let 其他 = format!("其他 {} 个来源 ▾", 眼下.offered.len() - 1);
+    let 其他 = format!("其他 {} 个来源", 眼下.offered.len() - 1);
     assert!(有这一段(&屏上, &其他), "简介那一格没有「{其他}」：\n{屏上}");
 
     let 屏上 = 按正好(&ctx, &mut app, &其他);
@@ -574,7 +583,7 @@ fn 元数据那一面每个字段写着用的是哪个源的值_一键改用另�
         .expect("合成数据里有另一种名称")
         .clone();
     let 标题其他 = format!(
-        "其他 {} 个来源 ▾",
+        "其他 {} 个来源",
         标题集
             .iter()
             .filter(|row| !标题原来.values.contains(&row.value))
@@ -600,6 +609,47 @@ fn 元数据那一面每个字段写着用的是哪个源的值_一键改用另�
         Some(标题原来),
         "撤销显示标题的裁决后没有回到标题集合原来的选择"
     );
+}
+
+/// **六个面上一个豆腐块都没有**（挂单 `Q1437`）：「其他 N 个来源」后头那个展开标从前写的是 `▾` / `▴` 两个字，
+/// 打包的字形子集里没有它们，屏上画成两个空方块。展开标改成画出来的三角，按钮上只剩那几个字。
+///
+/// 摊开前后各看一遍：摊开那一档从前是 `▴`。
+#[test]
+fn 作品详情页六个面画出来的字一个豆腐块都没有_其他几个来源那颗的展开标是画的() {
+    use romcat_core::scrape::Field;
+
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 3);
+    let work_id = 一个有得挑首选的作品(&mut app);
+    let 这个条目 = 条目(&mut app, work_id);
+    给简介摆两家说法(&mut app, &这个条目);
+    for 面 in Tab::ALL {
+        let 屏上 = 打开详情页(&ctx, &mut app, work_id, 面);
+        // 换行是「画出来的字」一段一行时加的，不是屏上的字。
+        let 缺 = romcat_gui::font::missing(&ctx, &屏上.replace('\n', ""));
+        assert!(
+            缺.is_empty(),
+            "「{}」那一面画出了豆腐块 {缺:?}：\n{屏上}",
+            面.label()
+        );
+    }
+    let 其他 = format!(
+        "其他 {} 个来源",
+        核心库说的(&mut app, &这个条目, Field::Description)
+            .offered
+            .len()
+            - 1
+    );
+    打开详情页(&ctx, &mut app, work_id, Tab::Metadata);
+    let 摊开了 = 按正好(&ctx, &mut app, &其他);
+    assert!(
+        有这一段(&摊开了, "使用这个值"),
+        "按「{其他}」没摊开别家的说法：\n{摊开了}"
+    );
+    let 缺 = romcat_gui::font::missing(&ctx, &摊开了.replace('\n', ""));
+    assert!(缺.is_empty(), "摊开之后画出了豆腐块 {缺:?}：\n{摊开了}");
 }
 
 /// 一个源在这个作品上说了一句简介：写进中立库的样子与刮削写的一样（`put_scraped` 按「锚点 × 源」整份换掉）。
@@ -654,6 +704,39 @@ fn 带着事件跑一帧(ctx: &egui::Context, app: &mut App, events: Vec<egui::E
     let mut input = headless::input();
     input.events = events;
     画出来的字(&headless::frame(ctx, input, |ui| app.ui(ui)))
+}
+
+/// **元数据那一面帮助里的「数据源优先级」是一颗行内按钮**（挂单 `Q925`，设计稿 `metaTab` 那一句里
+/// `data-dg="open:prio|简介"`）：按下去打开优先级那一层，停在简介那一栏——不是设置屏那颗按钮开的标题那一栏。
+///
+/// 断的是屏上真画出来的：那一层的说明在、简介那一栏的「没列出的怎么排」在（标题那一栏说的是另一句）。
+#[test]
+fn 元数据帮助里按数据源优先级_打开优先级那一层停在简介那一栏() {
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 3);
+    let work_id = 一个有得挑首选的作品(&mut app);
+    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Metadata);
+    assert!(
+        !屏上.contains(romcat_gui::priority::NOTE),
+        "还没按，优先级那一层就开着：\n{屏上}"
+    );
+
+    按正好(&ctx, &mut app, "数据源优先级");
+    // 弹层头一帧只量尺寸、不画（egui 的区域都这样），再跑一帧才看得见。
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        屏上.contains(romcat_gui::priority::NOTE),
+        "按「数据源优先级」没打开优先级那一层：\n{屏上}"
+    );
+    assert!(
+        屏上.contains(romcat_gui::priority::UNLISTED)
+            && !屏上.contains(romcat_gui::priority::TITLE_UNLISTED),
+        "优先级那一层没停在简介那一栏（照稿 `open:prio|简介`）：\n{屏上}"
+    );
+    let 优先级 = app.browse().priority();
+    assert!(优先级.is_open(), "屏上画着，那一层却说自己关着");
+    assert_eq!(优先级.field(), "简介", "停的不是简介那一栏");
 }
 
 #[test]
@@ -1005,6 +1088,44 @@ fn 滚到看得见(ctx: &egui::Context, app: &mut App, 那几个字: &str) -> St
     );
 }
 
+/// 把指针停在屏上**正好**写着 `那几个字` 的地方，停够 egui 那道悬停延迟（同 `shared::悬停在`，九十帧），
+/// 交出停住之后那一帧画出来的字（含悬停那一句）。`shared::悬停在` 按「含有」找，同一串字是别的标签的一截时会停错地方。
+fn 悬停在正好(ctx: &egui::Context, app: &mut App, 那几个字: &str) -> String {
+    let 头一帧 = headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+    let Some(停在) = 正好那一段画在哪儿(&头一帧, 那几个字) else {
+        panic!(
+            "屏上没有正好写着「{那几个字}」的地方，指针没处停：\n{}",
+            画出来的字(&头一帧)
+        );
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(停在));
+    let mut out = headless::frame(ctx, input, |ui| app.ui(ui));
+    for _ in 0..90 {
+        out = headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+    }
+    画出来的字(&out)
+}
+
+/// 指针停进详情页正文，往下滚一截（两百点），再跑两帧等它停稳。
+fn 往下滚一截(ctx: &egui::Context, app: &mut App) {
+    let mut input = headless::input();
+    input
+        .events
+        .push(egui::Event::PointerMoved(egui::pos2(800.0, 500.0)));
+    input.events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -200.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    headless::frame(ctx, input, |ui| app.ui(ui));
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerGone);
+    headless::frame(ctx, input, |ui| app.ui(ui));
+    headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+}
+
 /// 一张纯色 PNG 的字节。
 fn png(width: u32, height: u32) -> Vec<u8> {
     let buf = image::RgbImage::from_pixel(width, height, image::Rgb([30, 90, 160]));
@@ -1194,6 +1315,59 @@ fn 媒体那一面_没有ffmpeg时视频占位并说明原因_播放交给系统
     );
 }
 
+/// **六个面那一排吸顶**（挂单 `Q926`，设计稿 `.tabs{position:sticky;top:0}`）：往下滚到头上那一块整个滚出去，
+/// 那一排还贴在正文的顶上，按得到别的面。
+///
+/// 先断「头上那一块真滚出去了」（它那颗「编辑元数据」在顶条底下、看不见的地方）——不然这一条只是在验「没滚」。
+#[test]
+fn 往下滚过头上那一块之后六个面那一排还在顶上_按得到别的面() {
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 3);
+    let work_id = 一个有得挑首选的作品(&mut app);
+    打开详情页(&ctx, &mut app, work_id, Tab::Variants);
+    let 正文里 = egui::pos2(800.0, 600.0);
+    for _ in 0..6 {
+        let mut input = headless::input();
+        input.events.push(egui::Event::PointerMoved(正文里));
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        headless::frame(&ctx, input, |ui| app.ui(ui));
+    }
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerGone);
+    headless::frame(&ctx, input, |ui| app.ui(ui));
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 顶条底 = 每一处画在哪儿(&这一帧, "← 返回浏览")
+        .first()
+        .expect("顶条在")
+        .bottom();
+    let 编辑元数据 = 每一处画在哪儿(&这一帧, "编辑元数据");
+    assert!(
+        编辑元数据.iter().all(|rect| rect.bottom() < 顶条底),
+        "头上那一块没滚出去（「编辑元数据」还在 {编辑元数据:?}，顶条底在 {顶条底}）——这一面不够长，验不了吸顶"
+    );
+    for 面 in 六个面 {
+        let 在 = 每一处画在哪儿(&这一帧, 面);
+        assert!(
+            在.iter()
+                .any(|rect| rect.top() >= 顶条底 && rect.bottom() <= 顶条底 + 60.0),
+            "滚过头上那一块之后「{面}」不在正文顶上（顶条底在 {顶条底}，它画在 {在:?}）"
+        );
+    }
+
+    let 屏上 = 按正好(&ctx, &mut app, "识别依据");
+    assert_eq!(
+        app.browse().page().map(romcat_gui::browse::work::Page::tab),
+        Some(Tab::Evidence),
+        "按吸在顶上的「识别依据」没换过去：\n{屏上}"
+    );
+}
+
 #[test]
 fn 头上那一块与概览照稿_简介基本信息媒体状态四块_编辑元数据进编辑态() {
     use romcat_core::report::capacity;
@@ -1280,6 +1454,8 @@ fn 头上那一块与概览照稿_简介基本信息媒体状态四块_编辑元
     };
 
     // 收藏：头一个变体收进收藏，状态块里「收藏」那一行照核心库那一问写（只读，拿主意的人 2026-09-15 定）。
+    // **那一行只写结论，为什么挪进悬停**（拿主意的人 2026-10-02 裁）：从前接一句「：变体没有内容判据，文件改名或
+    // 移动后会丢失」，窄的那一栏里一折行，下一行就以「，」打头。
     let 收藏那一句 = {
         use romcat_core::collection::{self, FAVORITE};
 
@@ -1297,7 +1473,7 @@ fn 头上那一块与概览照稿_简介基本信息媒体状态四块_编辑元
         match collection::favorite_of(site, &keys).expect("问得出") {
             None => panic!("头一个变体刚收进收藏，核心库却说没收藏"),
             Some(romcat_core::verdict::ANCHOR_CONTENT) => "已收藏 · 按文件内容记录",
-            Some(_) => "已收藏 · 只按路径记录：变体没有内容判据，文件改名或移动后会丢失",
+            Some(_) => "已收藏 · 只按路径记录",
         }
     };
 
@@ -1372,6 +1548,25 @@ fn 头上那一块与概览照稿_简介基本信息媒体状态四块_编辑元
         有这一段(&屏上, "收藏") && 有这一段(&屏上, 收藏那一句),
         "状态块里没写收藏那一行「{收藏那一句}」：\n{屏上}"
     );
+    assert!(
+        !屏上.contains("文件改名或移动后会丢失") && !屏上.contains("重扫、改名、挪目录"),
+        "收藏那一行后头还接着说明句：\n{屏上}"
+    );
+    // 说明在悬停里：停在那一行上看得见为什么。
+    // 头上那枚标签也含这几个字（「★ 已收藏 · 只按路径记录」），按「正好」找，停的才是状态块那一行。
+    let 悬停 = 悬停在正好(&ctx, &mut app, 收藏那一句);
+    let 说明 = if 收藏那一句.ends_with("只按路径记录") {
+        "变体没有内容判据，收藏只能按路径记录，文件改名或移动后会丢失"
+    } else {
+        "删掉中立库重扫、改名、挪目录都还认得出"
+    };
+    assert!(
+        悬停.contains(说明),
+        "停在收藏那一行上，悬停里没说「{说明}」：\n{悬停}"
+    );
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerGone);
+    headless::frame(&ctx, input, |ui| app.ui(ui));
     let 屏上 = 滚到看得见(&ctx, &mut app, "首选变体");
     // 基本信息里带来源徽标的那几行：名与值按头一行对齐（岔路口 3 选 A）。挑一格合成数据里有值的。
     let (那一格, 那一格的值) = [
@@ -1684,7 +1879,9 @@ fn 状态块上子库与导出两行照核心库写_都答不出时说没有() {
     let work_id = 一个有得挑首选的作品(&mut app);
 
     // 一、一个子库都没有、一趟也没导过：两行照实说。
-    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Overview);
+    // 状态块在右栏最底下，「导出」那一行可能落在首屏以外（「合集」那一行照稿多了一颗按钮），滚到看得见再读。
+    打开详情页(&ctx, &mut app, work_id, Tab::Overview);
+    let 屏上 = 滚到看得见(&ctx, &mut app, "还没导出");
     assert!(
         有这一段(&屏上, "子库"),
         "状态块该有「子库」那一行：\n{屏上}"
@@ -1739,12 +1936,6 @@ fn 状态块上子库与导出两行照核心库写_都答不出时说没有() {
             )
             .expect("记得下");
     }
-    // 重开一次详情页：`open_page` 造的是一份新的 `Page`，于是这一帧照库里现在的样子重读。
-    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Overview);
-    assert!(
-        有这一段(&屏上, "掌机"),
-        "规则收得住它，「子库」那一行就该列出这个子库：\n{屏上}"
-    );
     let 那一趟 = {
         let (_, site) = app.browse_and_site();
         site.catalog.exported_at().expect("读得出").expect("打上了")
@@ -1752,6 +1943,13 @@ fn 状态块上子库与导出两行照核心库写_都答不出时说没有() {
     let 导出那一句 = format!(
         "已导出到 Pegasus · {}",
         romcat_core::report::human_time(那一趟)
+    );
+    // 重开一次详情页：`open_page` 造的是一份新的 `Page`，于是这一帧照库里现在的样子重读。
+    打开详情页(&ctx, &mut app, work_id, Tab::Overview);
+    let 屏上 = 滚到看得见(&ctx, &mut app, &导出那一句);
+    assert!(
+        有这一段(&屏上, "掌机"),
+        "规则收得住它，「子库」那一行就该列出这个子库：\n{屏上}"
     );
     assert!(
         有这一段(&屏上, &导出那一句),
@@ -2027,6 +2225,126 @@ fn 点最后一个(ctx: &egui::Context, app: &mut App, 那一段: &str) -> Strin
     画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)))
 }
 
+/// 表上头四十行里**一部收藏与合集都没进的作品**：它在 `work` 表里的行号，与它底下那几个变体的键
+/// （照浏览屏眼下的筛选展开，与屏上收藏、加入合集那几下排活用的是同一份）。照核心库的公开查询找。
+fn 一部一个合集都没进的作品(app: &mut App) -> (i64, Vec<String>) {
+    let (browse, site) = app.browse_and_site();
+    for row in site
+        .catalog
+        .work_page(browse.query(), 0, 40)
+        .expect("取得出几行")
+    {
+        let WorkAnchor::Work(id) = row.anchor else {
+            continue;
+        };
+        let keys: Vec<String> = site
+            .catalog
+            .scoped_variants(
+                browse.query(),
+                romcat_core::catalog::browse::Scope::Rows(std::slice::from_ref(&row.anchor)),
+            )
+            .expect("展得开");
+        if romcat_core::collection::standing_of_work(site, &keys)
+            .expect("读得到")
+            .is_empty()
+        {
+            return (id, keys);
+        }
+    }
+    panic!("四十行里该有一部一个合集都没进的作品");
+}
+
+/// 这几个变体眼下在哪几个合集里（收藏也算一个，名字是 `collection::FAVORITE`）。读的是沉淀库那本账。
+fn 在哪几个合集里(app: &mut App, keys: &[String]) -> Vec<String> {
+    let (_, site) = app.browse_and_site();
+    romcat_core::collection::standing_of_work(site, keys)
+        .expect("读得到")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// **详情页头上那颗「☆ 收藏」与「加入合集…」**（挂单 `Q961` `Q1108`，设计稿 `renderWD` 头上那一排与状态块
+/// 「合集」那一行）：按收藏，沉淀库里记下这部作品、屏上那颗换成「★ 已收藏」、头上多一枚标签；再按一下就拿出来。
+/// 按「加入合集…」弹出的是浏览屏上现成那一层，说的是**这一部作品**，加进去的也只是它——勾选一行都不动。
+#[test]
+fn 详情页上按收藏记进沉淀库再按拿出来_按加入合集开现成那一层只加这一部() {
+    let ctx = headless::context();
+    let mut app = 界面(2_000);
+    跑(&ctx, &mut app, 3);
+    let (work_id, keys) = 一部一个合集都没进的作品(&mut app);
+
+    let 屏上 = 打开详情页(&ctx, &mut app, work_id, Tab::Overview);
+    assert!(
+        有这一段(&屏上, "☆ 收藏") && !屏上.contains("★ 已收藏"),
+        "没收藏时头上那一颗该写「☆ 收藏」：\n{屏上}"
+    );
+
+    // 一、按收藏：排一趟活，跑完认领才落库。
+    按正好(&ctx, &mut app, "☆ 收藏");
+    等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+    assert!(
+        在哪几个合集里(&mut app, &keys).contains(&romcat_core::collection::FAVORITE.to_owned()),
+        "按了「☆ 收藏」，沉淀库里没有这部作品"
+    );
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&这一帧);
+    assert_eq!(
+        每一处画在哪儿(&这一帧, "★ 已收藏").len(),
+        2,
+        "收藏之后头上那枚标签与那颗按钮都该写「★ 已收藏」：\n{屏上}"
+    );
+    assert!(
+        那一行的值(&屏上, "收藏").is_some_and(|值| 值.starts_with("已收藏")),
+        "状态块「收藏」那一行没跟着变：\n{屏上}"
+    );
+
+    // 二、再按一下（按钮是后画的那一处）就拿出来。
+    let 按钮 = *每一处画在哪儿(&这一帧, "★ 已收藏").last().expect("那颗在");
+    按在(&ctx, 按钮.center(), |ui| app.ui(ui));
+    等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+    assert!(
+        !在哪几个合集里(&mut app, &keys).contains(&romcat_core::collection::FAVORITE.to_owned()),
+        "按了「★ 已收藏」，沉淀库里还收着"
+    );
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        有这一段(&屏上, "☆ 收藏"),
+        "拿出来之后没换回「☆ 收藏」：\n{屏上}"
+    );
+
+    // 三、按「加入合集…」：开的是现成那一层，说的是这一部作品。
+    let 显示标题 = app.browse().page_title().expect("详情页开着");
+    按正好(&ctx, &mut app, "加入合集…");
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        屏上.contains(&format!("把「{显示标题}」加入合集。")),
+        "按「加入合集…」没开那一层，或者那一层说的不是这一部作品：\n{屏上}"
+    );
+    // 合成数据里本来就有几个合集，那一层默认选头一个；加进去的是这部作品，勾选那一批一个没动。
+    let 屏上 = 按正好(&ctx, &mut app, "加入");
+    等任务台空了(&mut app);
+    跑(&ctx, &mut app, 2);
+    let 进了 = 在哪几个合集里(&mut app, &keys);
+    assert!(
+        进了
+            .iter()
+            .any(|name| name != romcat_core::collection::FAVORITE),
+        "按了「加入」，这部作品一个合集都没进：\n{屏上}"
+    );
+    assert!(
+        app.browse().picked().is_empty(1),
+        "从详情页加入合集，不该动表上的勾选"
+    );
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        那一行的值(&屏上, "合集").is_some_and(|值| 值 != "—"),
+        "加进合集之后状态块「合集」那一行还空着：\n{屏上}"
+    );
+}
+
 /// **状态块「合集」那一行：列得出它在哪几个合集里，「×」就地移出**
 /// （票 `gui-looks-like-the-design/13`，稿上夹在「收藏」与「子库」中间那一行）。
 ///
@@ -2044,34 +2362,7 @@ fn 详情页状态块那一行列得出合集_按叉就地移出() {
     跑(&ctx, &mut app, 3);
 
     // **挑一部一个合集都没进的作品**：不然屏上好几颗「×」，点头一颗点到的是别人。
-    let (work_id, keys) = {
-        let (browse, site) = app.browse_and_site();
-        let mut 挑中的 = None;
-        for row in site
-            .catalog
-            .work_page(browse.query(), 0, 40)
-            .expect("取得出几行")
-        {
-            let WorkAnchor::Work(id) = row.anchor else {
-                continue;
-            };
-            let keys: Vec<String> = site
-                .catalog
-                .scoped_variants(
-                    browse.query(),
-                    romcat_core::catalog::browse::Scope::Rows(std::slice::from_ref(&row.anchor)),
-                )
-                .expect("展得开");
-            if romcat_core::collection::standing_of_work(site, &keys)
-                .expect("读得到")
-                .is_empty()
-            {
-                挑中的 = Some((id, keys));
-                break;
-            }
-        }
-        挑中的.expect("四十行里该有一部一个合集都没进的作品")
-    };
+    let (work_id, keys) = 一部一个合集都没进的作品(&mut app);
 
     // 一、一个合集都没进：那一行照别处的规矩写「—」。
     //
@@ -2248,12 +2539,12 @@ fn 详情页改过的字段_关掉窗口再打开值照旧_撤掉的也不回来
     let ctx = headless::context();
     let (mut app, 屏上) = 开窗(&ctx, 工作区.path(), &库文件);
     assert!(
-        有这一段(&屏上, "一句简介。") && 有这一段(&屏上, "其他 1 个来源 ▾"),
+        有这一段(&屏上, "一句简介。") && 有这一段(&屏上, "其他 1 个来源"),
         "前提：元数据那一面摆着简介，类型那一格还有另一家说法：\n{屏上}"
     );
 
     // 一、类型那一格「使用这个值」：改用另一家说的那一句，记为手动修改。
-    按正好(&ctx, &mut app, "其他 1 个来源 ▾");
+    按正好(&ctx, &mut app, "其他 1 个来源");
     按正好(&ctx, &mut app, "使用这个值");
     let 改用的 = 这一格(&mut app, Field::Genre);
     assert!(
@@ -2322,8 +2613,19 @@ fn 详情页改过的字段_关掉窗口再打开值照旧_撤掉的也不回来
         .expect("类型那一格写着改用的那一句");
     跑(&ctx, &mut app, 2);
     按正好(&ctx, &mut app, "编辑");
-    // 头上那一块信息里也写着类型，先画的是它；编辑框在底下，点屏上最后一处。
-    点最后一个(&ctx, &mut app, &类型写着);
+    // 编辑框在首屏以外（帮助那一句里多了一颗行内按钮，那一行高了一点）：往下滚一截，让它露出来。
+    往下滚一截(&ctx, &mut app);
+    // 头上那一块信息里也写着类型，编辑框底下那一排可点的来源也写着它：点帮助那一句底下的头一处——编辑框。
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 帮助底 = 每一处画在哪儿(&这一帧, "数据源优先级")
+        .first()
+        .expect("帮助那一句看得见")
+        .bottom();
+    let 编辑框 = 画着的每一处(&这一帧, &|text: &str| text.contains(类型写着.as_str()))
+        .into_iter()
+        .find(|rect| rect.top() > 帮助底)
+        .expect("类型那一框看得见");
+    按在(&ctx, 编辑框.center(), |ui| app.ui(ui));
     let 全选再删 = |key: egui::Key, modifiers: egui::Modifiers| egui::Event::Key {
         key,
         physical_key: None,

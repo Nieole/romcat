@@ -1492,10 +1492,11 @@ fn 第二步组头写平台全名_一行变体竖直居中_路径写根名与相
     let ctx = headless::context();
     let mut app = 界面("romcat-测试-合并-第二步照稿");
     let 屏上 = 走到第几步(&ctx, &mut app, 2);
-    // 组头：平台色标之后是**全名**（核心库平台表 `Manifest::full_name`；GB 写着「Game Boy」）。
+    // 组头：平台色标之后是**全名**（核心库平台表 `Manifest::full_name`；GB 写着「Nintendo Game Boy」——
+    // 全名一律带厂名，拿主意的人 2026-10-02 裁，票 `gui-draws-the-rest-of-the-design/04`）。
     assert!(
-        有这一段(&屏上, "Game Boy"),
-        "GB 那一组的组头该写平台全名「Game Boy」：\n{屏上}",
+        有这一段(&屏上, "Nintendo Game Boy"),
+        "GB 那一组的组头该写平台全名「Nintendo Game Boy」：\n{屏上}",
     );
     // 路径写「根名 · 相对路径」（`table::root_and_path`），不写中立库的键。
     let 路径 = format!("{根} · GB/精灵宝可梦 红.zip");

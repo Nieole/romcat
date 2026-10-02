@@ -1,8 +1,9 @@
 //! **数据源优先级**：同一个字段有好几个源给了值时，显示哪一个（票 `gui-looks-like-the-design/30`）。
 //!
-//! 画成一层弹层（[`crate::dialog`]）。眼下从[刮削面板](crate::scrape)那句「不该靠重采」旁边
-//! 打开——那句话本来就在说「想换一个显示的值，调这张表」；设计稿上的正式入口在设置屏
-//! （票 `gui-looks-like-the-design/31`）。
+//! 画成一层弹层（[`crate::dialog`]）。从三处打开：[刮削面板](crate::scrape)那句「不该靠重采」旁边
+//! ——那句话本来就在说「想换一个显示的值，调这张表」；设计稿上的正式入口设置屏（票
+//! `gui-looks-like-the-design/31`）；作品详情页元数据那一面帮助里那颗「数据源优先级」，它停在简介那一栏
+//! （[`Editor::open_at`]，票 `gui-draws-the-rest-of-the-design/04`）。
 //!
 //! ## 这一层只摆、只转发（ADR-0005）
 //!
@@ -186,6 +187,13 @@ impl Editor {
         self.platform = None;
         self.counted = None;
         self.open = true;
+    }
+
+    /// **打开并停在 `field` 那一栏**：作品详情页元数据那一面帮助里那颗「数据源优先级」走它（设计稿
+    /// `open:prio|简介`，挂单 `Q925`）。读哪一份、读不动怎么办同 [`Self::open`]，只是不从标题那一栏看起。
+    pub fn open_at(&mut self, field: Field) {
+        self.open();
+        self.select_field(field.label());
     }
 
     /// 开着没有。

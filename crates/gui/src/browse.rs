@@ -417,6 +417,12 @@ pub struct Screen {
     /// 它住在这一屏里而不是自成一屏，是因为它的**范围**就是这一屏筛出来的那一批——
     /// 挪到别处去，那批东西就得再传一遍，而传着传着两边的数就对不上了。
     scrape: scrape::Panel,
+    /// **数据源优先级**那一层（[`crate::priority`]）：作品详情页元数据那一面帮助里那颗「数据源优先级」开的就是它，
+    /// 停在简介那一栏（挂单 `Q925`）。
+    ///
+    /// 与刮削面板里那一份分开：那一份叠在刮削那一层上头，刮削那一层收起时跟着关；这一份不叠在别的弹层上。
+    /// 保存之后浏览屏手上缓着的那份表由窗口换掉（`App::ui` 浏览屏那一臂），与另外两处同一个办法。
+    priority: crate::priority::Editor,
     /// **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：作品详情「变体」那一面
     /// 「调整成型…」与「撤销成型纠正」开的就是它。
     fixer: crate::shaping::Fixer,
@@ -539,6 +545,10 @@ pub struct Screen {
     manage_collections: Option<collections::Manage>,
     /// 「**加入合集**」那个弹层；`None` 是没开着。
     join_collection_dialog: Option<collections::Join>,
+    /// 那一层是从**作品详情页**开的（头上或状态块「合集」那一行的「加入合集…」，设计稿 `coll|one`）：
+    /// 只加这一部作品，屏上那句写它的显示标题，`(作品, 显示标题)`。`None` 是表格上方、右键菜单开的那种——
+    /// 加的是勾中的那一批。**从详情页开不碰勾选**：人在详情页上说的是「这一部」，表上勾着的那一批与它无关。
+    join_for: Option<(WorkAnchor, String)>,
     /// **工作目录**：算「加入后装不装得下」那一趟要它（`sublibrary::addition` 走
     /// `sync::prepare_selected`，那条线要工作目录里那份优先级表）。
     workspace: std::path::PathBuf,
@@ -665,6 +675,7 @@ impl Screen {
             non_game_assets: None,
             save: SaveDraft::default(),
             workspace: workspace.clone(),
+            priority: crate::priority::Editor::new(workspace.clone()),
             scrape: scrape::Panel::new(workspace),
             fixer: crate::shaping::Fixer::default(),
             fixed: false,
@@ -715,6 +726,7 @@ impl Screen {
             new_sublibrary_asked: false,
             sublibrary_estimate: sublibrary::Estimate::Working,
             join_collection_dialog: None,
+            join_for: None,
             collecting: None,
             title_draft: TitleDraft::default(),
             suspicions: Vec::new(),
@@ -875,6 +887,33 @@ impl Screen {
         self.open_merge_rows(site, &[anchor]);
     }
 
+    /// 作品详情页上那颗「**加入合集…**」（头上一颗、状态块「合集」那一行一颗，设计稿 `coll|one`）：开浏览屏
+    /// 现成那一层，只加这一部作品（[`Self::collection_dialogs`]）。**不碰表上的勾选。**
+    fn open_join_here(&mut self, site: &Site) {
+        let Some(这一部) = self
+            .work
+            .as_ref()
+            .map(|work| (work.anchor.clone(), self.work_title(work)))
+        else {
+            return;
+        };
+        self.open_join(site, Some(这一部));
+    }
+
+    /// **开「加入合集」那一层，就这一处**：表格上方那一颗、右键菜单那一项（加勾中的那一批，`只加这一部` 给 `None`）、
+    /// 作品详情页那两颗（只加这一部）。默认选中哪一个要看库里有哪几个——问沉淀库（`Q1109`）；读不动就照实说、不开。
+    fn open_join(&mut self, site: &Site, 只加这一部: Option<(WorkAnchor, String)>) {
+        match 合集账本(site) {
+            Ok(账本) => {
+                self.join_collection_dialog = Some(collections::Join::open(&账本));
+                self.join_for = 只加这一部;
+            }
+            Err(读不动) => {
+                self.error = Some(format!("沉淀库读不动，开不了这一层：{读不动}"));
+            }
+        }
+    }
+
     /// 变体卡头一行右头那颗「**移出此作品…**」。
     pub fn open_split(&mut self, site: &Site, key: &str) {
         let Some(work) = self.work.as_ref() else {
@@ -962,22 +1001,41 @@ impl Screen {
         // （「· N 个变体」「（共 N）」）；这儿一度漏了，屏上就是「把1,284加入合集。」。
         // 而 `Screen::scope` 那个数数的是**变体**，不是作品——同 `collections::多少个变体`
         // 那一段的账（挂单 `Q1107`）。`？` 那一档是数不出来，不是零。
-        let 这一批 = match self.scope_total() {
-            Some(几个) => format!("勾中的 {} 个变体", thousands(几个)),
-            None => "勾中的那一批（数不出来）".to_string(),
+        let 这一批 = match (&self.join_for, self.scope_total()) {
+            // 从作品详情页开的：照稿「把「X」加入合集。」（设计稿 `coll|one` 那一句）。
+            (Some((_, 显示标题)), _) => format!("「{显示标题}」"),
+            (None, Some(几个)) => format!("勾中的 {} 个变体", thousands(几个)),
+            (None, None) => "勾中的那一批（数不出来）".to_string(),
         };
         // 「加入合集」那一层同理：列已有的合集、判重名，问的都是沉淀库那本账。
         if let Some(join) = self.join_collection_dialog.as_mut()
             && let Some(账本) = 账本.as_deref()
         {
             let (还开着, 加进) = join.ui(ctx, 账本, &这一批);
-            if !还开着 {
+            let 这一部 = if 还开着 {
+                None
+            } else {
                 self.join_collection_dialog = None;
-            }
-            if let Some(name) = 加进 {
+                self.join_for.take()
+            };
+            match (加进, 这一部) {
+                // **只加这一部**：范围是这一行底下那几个变体，排活、落库、那本账与右键菜单收藏那一条同一条路
+                // （`queue_collection_keys`）。
+                (Some(name), Some((anchor, _))) => {
+                    let keys = self.row_keys(&site.catalog, &anchor);
+                    if keys.is_empty() {
+                        self.notice = Some("这个作品底下一个变体都没有，没什么可加的。".to_owned());
+                    } else {
+                        let doing = 这一下叫什么(&name, true);
+                        self.queue_collection_keys(site, tasks, &name, true, keys, &doing);
+                    }
+                }
                 // 走任务台那条老路：那一趟的读那一半整条只读，写在认领那一步落。
-                self.collection = name;
-                self.join_collection(site, tasks);
+                (Some(name), None) => {
+                    self.collection = name;
+                    self.join_collection(site, tasks);
+                }
+                (None, _) => {}
             }
         }
     }
@@ -2818,6 +2876,17 @@ impl Screen {
         &mut self.scrape
     }
 
+    /// 作品详情页上开的那一层**数据源优先级**（[`crate::priority`]）。
+    #[must_use]
+    pub fn priority(&self) -> &crate::priority::Editor {
+        &self.priority
+    }
+
+    /// 同上，可改。窗口拿它取走保存成了的那一份。
+    pub fn priority_mut(&mut self) -> &mut crate::priority::Editor {
+        &mut self.priority
+    }
+
     /// **成型纠正**那一层（测试拿它核对）。
     #[must_use]
     pub fn fixer(&self) -> &crate::shaping::Fixer {
@@ -3323,14 +3392,7 @@ impl Screen {
             // ——那两层作用于勾中的那一批，而人右键的是**这一行**。
             menu::Pressed::JoinCollection => {
                 self.pick_only(anchor);
-                match 合集账本(site) {
-                    Ok(账本) => {
-                        self.join_collection_dialog = Some(collections::Join::open(&账本));
-                    }
-                    Err(读不动) => {
-                        self.error = Some(format!("沉淀库读不动，开不了这一层：{读不动}"));
-                    }
-                }
+                self.open_join(site, None);
             }
             menu::Pressed::AddToSublibrary => {
                 self.pick_only(anchor);
@@ -3509,6 +3571,8 @@ impl Screen {
         self.sync_media(ui.ctx(), site, writable);
         // **刮削是一层弹层**（[`crate::dialog`]），不占这一屏的地方：摊开着才画，盖在整屏上头。
         self.scrape.show(ui.ctx(), site, tasks);
+        // **数据源优先级那一层**（作品详情页元数据那一面开的，挂单 `Q925`）：同样是弹层，开着才画。
+        self.priority.show(ui.ctx(), &site.catalog);
         // **合并向导与「移出此作品」也是弹层**：盖在整屏上头，三栏与作品详情页都由这一处画。
         self.merge_ui(ui.ctx(), site);
         // **收藏与合集那两个弹层**（票 `gui-looks-like-the-design/13`）。
@@ -3528,7 +3592,7 @@ impl Screen {
         self.notice_toast(ui.ctx(), site);
         // **作品详情页开着就只画它**（票 `gui-looks-like-the-design/15`）：稿上它盖住整块屏。
         if self.page.is_some() {
-            self.page_ui(ui, site);
+            self.page_ui(ui, site, tasks);
             // 底下那张表这一帧不画；合并向导开着的话，它第一步那几行左边那一格要的封面照样得问、得解。
             self.sync_shelf(ui.ctx(), site, writable, false);
             return;
@@ -3593,15 +3657,7 @@ impl Screen {
                     match 按了 {
                         Action::Scrape => self.open_scrape(&site.catalog),
                         Action::Favorite => self.favorite(site, tasks),
-                        Action::Join => match 合集账本(site) {
-                            // 默认选中哪一个要看库里有哪几个——同样问沉淀库（`Q1109`）。
-                            Ok(账本) => {
-                                self.join_collection_dialog = Some(collections::Join::open(&账本));
-                            }
-                            Err(读不动) => {
-                                self.error = Some(format!("沉淀库读不动，开不了这一层：{读不动}"));
-                            }
-                        },
+                        Action::Join => self.open_join(site, None),
                         Action::Merge => self.open_merge(site),
                         Action::AddToSublibrary => self.open_add_to_sublibrary(site),
                     }
