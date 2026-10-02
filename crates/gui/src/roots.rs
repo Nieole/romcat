@@ -1157,7 +1157,6 @@ impl Screen {
             let tokens = Tokens::builtin();
             let [行缝, 列缝] = tokens.space.cell_padding;
             let 弱色 = ui.visuals().weak_text_color();
-            let 警示色 = ui.visuals().error_fg_color;
             let 表头 = |字: &str| {
                 font::strong(字)
                     .size(tokens.font.size_caption_plus)
@@ -1327,14 +1326,14 @@ impl Screen {
                                         {
                                             要扫 = Some(row.root.name.clone());
                                         }
+                                        // 设计稿 `.btn sm ghost warn`：走全窗口那一处警示按钮（`look::warn_button`）——
+                                        // 透明底、红字，平时描边 `line-2`、悬停才换红（与子库卡底「删除子库」同一枚）。
                                         if ui
-                                            .add_enabled(
-                                                !忙,
-                                                egui::Button::new(
-                                                    egui::RichText::new(REMOVE).color(警示色),
-                                                )
-                                                .fill(egui::Color32::TRANSPARENT),
-                                            )
+                                            .scope(|ui| {
+                                                look::warn_button(ui.visuals_mut());
+                                                ui.add_enabled(!忙, egui::Button::new(REMOVE))
+                                            })
+                                            .inner
                                             .on_hover_text(
                                                 "先算一遍代价：去掉多少变体、浏览里少几行、\
                                                  下次导出少几条、哪台子库会少多少",

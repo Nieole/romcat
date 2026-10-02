@@ -233,8 +233,12 @@ impl Plan {
                 );
                 // **撞车按撞在一起的那一处归堆印**（[`Plan::collisions`]）：一条一条平铺着报，
                 // 读的人得自己拿路径去配对，而撞在一起的几行落点一模一样（剥掉了根名）。
-                // 这一类该去哪儿办，由 `RejectReason::advice` 一处答（ADR-0024）。
-                if let Some(怎么办) = reason.advice() {
+                // 这一类该去哪儿办，由 `RejectReason::advice` 一处答（ADR-0024）；单文件上限是多少那句事实由
+                // 拦下它们的那一份文件系统声明答（`Filesystem::max_file_fact`），与界面那一段同一句。
+                if let Some(事实) = reason.fact(&self.filesystem) {
+                    let _ = writeln!(out, "  {事实}");
+                }
+                if let Some(怎么办) = reason.advice(&self.filesystem) {
                     let _ = writeln!(out, "  {怎么办}");
                 }
                 // 归堆是核心一处的事，命令行与界面配出来的对子因此是同一批（ADR-0024）。
@@ -262,7 +266,15 @@ impl Plan {
                     continue;
                 }
                 for file in rows.iter().take(EXAMPLES) {
-                    let _ = writeln!(out, "  {}", file.path);
+                    // 文件名不收的是什么（「含有「:」」）与界面那一行右头同一处拼（`BadName::shown`）。
+                    let _ = writeln!(
+                        out,
+                        "  {}{}",
+                        file.path,
+                        file.bad_name
+                            .as_ref()
+                            .map_or_else(String::new, |bad| format!(" · {}", bad.shown())),
+                    );
                     let _ = writeln!(out, "    {}", file.detail);
                 }
                 if rows.len() > EXAMPLES {
@@ -371,7 +383,9 @@ impl Plan {
                         } else {
                             "[不要了] "
                         },
-                        surprise.path,
+                        // 被修改过的那一份接着写哪一样变了（「路径 · 大小 a → b」），与界面那一行同一处拼
+                        // （`Surprise::path_with_change`）。
+                        surprise.path_with_change(),
                         // 落点与卡上那份只差大小写时，**两条都得印**：只印一条，
                         // 用户要么在卡上找不到那个名字，要么不知道是谁要挤进来。
                         surprise

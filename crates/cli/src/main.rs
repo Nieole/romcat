@@ -4990,7 +4990,7 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
         // 「清单更新为目标的真实状态」说的正是这一句。
         eprintln!("一个字节都没写；清单照目标眼下的样子记了一遍。");
     }
-    if outcome.interrupted || outcome.gave_up || !outcome.failures.is_empty() {
+    if !outcome.clean() {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

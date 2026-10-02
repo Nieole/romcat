@@ -76,33 +76,50 @@ impl RejectReason {
     pub fn label(self) -> &'static str {
         match self {
             Self::TooBig => "超过单文件上限",
-            Self::BadName => "文件名有不收的字符",
+            // 照稿（差距 D-19）：与「放不进目标」那一栏头一句「文件名里有目标不收的字符」同一个说法。
+            Self::BadName => "文件名里有目标不收的字符",
             Self::NameTooLong => "文件名太长",
             Self::PathTooLong => "路径太长",
             Self::Collision => "落点撞车",
         }
     }
 
-    /// 这一类**工具不会做什么、人该去哪儿办**。
+    /// 这一类**人该去哪儿办**。
     ///
-    /// **主库只读**（ADR-0004）：这几类工具一份都改不了，路只有「在主库里自己改名」或者
-    /// 「换一张卡 / 把它从选择集里排除」。[撞车](Self::Collision)那一类是 `None`——它有得办
-    /// （排除其中一份），那句话跟着那一段自己走。
+    /// **主库只读**：这几类工具一份都改不了，路只有「在主库里自己改名」或者「换一张卡 / 把它从选择集里排除」。
+    /// [撞车](Self::Collision)那一类是 `None`——它有得办（排除其中一份），那句话跟着那一段自己走。
+    ///
+    /// **文件名不收的字符那句把具体字符列出来**（拿主意的人 2026-10-01 裁 `F-5` A，照稿）：字取这份文件系统的声明
+    /// （[`Filesystem::forbidden`]），所以要把拦下它的那一份递进来。屏上不写 ADR 编号（票 gl-03 立的规矩）。
     ///
     /// 放在这儿而不是各印各的：命令行那一份与界面那一份说的必须是同一件事，两处各写一遍，
     /// 改了一处就会有一处在骗人（ADR-0024）。
     #[must_use]
-    pub fn advice(self) -> Option<&'static str> {
+    pub fn advice(self, filesystem: &Filesystem) -> Option<String> {
+        const 改名: &str = "在主库里改名后重新扫描即可。";
         Some(match self {
-            Self::TooBig => {
-                "这个目标放不下这么大的单个文件（FAT32 的上限是 4 GiB）：换一张不限单文件                 大小的卡，或者把这几份从选择集里排除。"
-            }
-            Self::BadName | Self::NameTooLong => {
-                "在主库里改掉那个名字，重新扫描就好。工具不会替你改：主库只读（ADR-0004）。"
-            }
-            Self::PathTooLong => "把目标路径挪浅一层，或者在主库里把那几层目录名改短。",
+            // 上限是多少那句事实另摆在这一段头上（[`Filesystem::max_file_fact`]），这里只说怎么办。
+            Self::TooBig => "换一张不限单文件大小的卡，或者把这几份从选择集里排除。".to_string(),
+            Self::BadName if filesystem.forbidden.is_empty() => 改名.to_string(),
+            Self::BadName => format!(
+                "Windows 与 {} 都不收 {}。{改名}",
+                filesystem.name,
+                filesystem.forbidden_shown(),
+            ),
+            Self::NameTooLong => "在主库里把名字改短后重新扫描即可。".to_string(),
+            Self::PathTooLong => "把目标路径挪浅一层，或者在主库里把那几层目录名改短。".to_string(),
             Self::Collision => return None,
         })
+    }
+
+    /// 这一类那一段**零条也说的事实**：只有[超过单文件上限](Self::TooBig)那一段有——这张卡单文件上限是多少
+    /// （[`Filesystem::max_file_fact`]，照稿零条也说，差距 D-20）。别的几类是 `None`。
+    ///
+    /// 与 [`Self::advice`] 分开：劝告有条才说（目标本来就不限单文件大小时劝人换卡是句蠢话），事实一直说。
+    /// 「哪一段说事实」只在这一处判，命令行与界面各问一次。
+    #[must_use]
+    pub fn fact(self, filesystem: &Filesystem) -> Option<String> {
+        (self == Self::TooBig).then(|| filesystem.max_file_fact())
     }
 
     /// 报告里固定的排列顺序。
@@ -115,6 +132,13 @@ impl RejectReason {
             Self::PathTooLong,
             Self::Collision,
         ]
+    }
+}
+
+/// 没说是哪一份的时候就是**不作声称**那一份（[`Filesystem::unlimited`]）：与子库没挑过档案时走的是同一份。
+impl Default for Filesystem {
+    fn default() -> Self {
+        Self::unlimited()
     }
 }
 
@@ -148,22 +172,50 @@ impl Filesystem {
             && self.reserved_stems.is_empty()
     }
 
-    /// 这一份放得进去吗；放不进去就说清是哪一条拦下的。
+    /// **单文件上限那句事实**：「exFAT 不限制单文件大小。」「FAT32 单文件不能超过 4 GiB。」
+    ///
+    /// 差量预览「放不进目标」里「超过单文件上限」那一段**零条也说**（照稿，差距 D-20）：它说的是这张卡的事实，
+    /// 不是劝告——劝告（[`RejectReason::advice`]）照旧有条才说。「不作声称」那一份什么都不查，不能说成「不限制」
+    /// （那是一句关于卡的声称），只说这份档案不查。
+    #[must_use]
+    pub fn max_file_fact(&self) -> String {
+        match self.max_file_bytes {
+            Some(limit) => format!("{} 单文件不能超过 {}。", self.name, 上限的说法(limit)),
+            None if self.claims_nothing() => "这份能力档案不检查单文件大小。".to_string(),
+            None => format!("{} 不限制单文件大小。", self.name),
+        }
+    }
+
+    /// 不收的那几个字排成一串给人读：`\ / : * ? " < > |`。
+    ///
+    /// 次序照 Windows 改名时那句提示（设计稿也是这个次序）；声明里多出来的字按码位排在后头。
+    #[must_use]
+    pub fn forbidden_shown(&self) -> String {
+        const WINDOWS: &str = "\\/:*?\"<>|";
+        let mut chars: Vec<char> = self.forbidden.iter().copied().collect();
+        chars.sort_by_key(|ch| (WINDOWS.find(*ch).unwrap_or(usize::MAX), *ch));
+        chars.into_iter().map(字形).collect::<Vec<_>>().join(" ")
+    }
+
+    /// 这个字目标收不收：声明里点名的那几个，加上（有声明时）一切控制字符。
+    fn refuses(&self, ch: char) -> bool {
+        self.forbidden.contains(&ch) || (!self.forbidden.is_empty() && ch.is_control())
+    }
+
+    /// 这一份放得进去吗；放不进去就说清是哪一条拦下的（[`Barred`]）。
     ///
     /// `path` 是相对子库根的路径（键，`/` 分隔、NFC）；`prefix_chars` 是子库根本身
     /// 那串路径有多长——**路径上限比的是完整路径**，同一份内容挂在 `E:\Games` 与挂在
     /// 一条很深的路径底下结论会不同，那是实情不是缺陷。
+    ///
+    /// 文件名不收时**连不收的是什么一起交出来**（[`BadName`]）：屏上那一行右头照它写「含有「:」」，
+    /// 不从 [`Barred::detail`] 那句话里抠——一个判断只在这一处做（ADR-0024）。
     #[must_use]
-    pub fn screen(
-        &self,
-        path: &str,
-        bytes: u64,
-        prefix_chars: usize,
-    ) -> Option<(RejectReason, String)> {
+    pub fn screen(&self, path: &str, bytes: u64, prefix_chars: usize) -> Option<Barred> {
         if let Some(limit) = self.max_file_bytes
             && bytes > limit
         {
-            return Some((
+            return Some(Barred::because(
                 RejectReason::TooBig,
                 format!(
                     "{} 超过 {} 的单文件上限 {}",
@@ -177,18 +229,25 @@ impl Filesystem {
             if segment.is_empty() {
                 continue;
             }
-            if let Some(bad) = segment.chars().find(|ch| {
-                self.forbidden.contains(ch) || (!self.forbidden.is_empty() && ch.is_control())
-            }) {
-                return Some((
-                    RejectReason::BadName,
-                    format!("「{segment}」里的 {bad:?} 是 {} 不收的字符", self.name),
-                ));
+            if let Some(bad) = segment.chars().find(|ch| self.refuses(*ch)) {
+                // **整条路径里不收的字各记一次**，按出现的次序：只记头一个的话，人改掉它、重扫一遍，
+                // 才撞上下一个。前面几段已经查过是干净的，所以这一段起往后数就是全部。
+                let mut chars: Vec<char> = Vec::new();
+                for ch in path.split('/').flat_map(str::chars) {
+                    if self.refuses(ch) && !chars.contains(&ch) {
+                        chars.push(ch);
+                    }
+                }
+                return Some(Barred {
+                    reason: RejectReason::BadName,
+                    detail: format!("「{segment}」里的 {bad:?} 是 {} 不收的字符", self.name),
+                    bad_name: Some(BadName::Chars(chars)),
+                });
             }
             if let Some(limit) = self.max_name_chars {
                 let width = segment.encode_utf16().count();
                 if width > limit {
-                    return Some((
+                    return Some(Barred::because(
                         RejectReason::NameTooLong,
                         format!("「{segment}」有 {width} 个字符，{} 至多 {limit}", self.name),
                     ));
@@ -197,17 +256,18 @@ impl Filesystem {
             if !self.reserved_stems.is_empty() {
                 let stem = segment.split('.').next().unwrap_or(segment).to_uppercase();
                 if self.reserved_stems.contains(&stem) {
-                    return Some((
-                        RejectReason::BadName,
-                        format!("「{segment}」撞上保留名 {stem}"),
-                    ));
+                    return Some(Barred {
+                        reason: RejectReason::BadName,
+                        detail: format!("「{segment}」撞上保留名 {stem}"),
+                        bad_name: Some(BadName::Reserved(stem)),
+                    });
                 }
             }
         }
         if let Some(limit) = self.max_path_chars {
             let width = prefix_chars + 1 + path.encode_utf16().count();
             if width > limit {
-                return Some((
+                return Some(Barred::because(
                     RejectReason::PathTooLong,
                     format!("完整路径 {width} 个字符，{} 至多 {limit}", self.name),
                 ));
@@ -215,6 +275,77 @@ impl Filesystem {
         }
         None
     }
+}
+
+/// [`Filesystem::screen`] 拦下一份时交回来的：哪一条约束、一句话、文件名不收时不收的是什么。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Barred {
+    /// 哪一条约束拦下的。
+    pub reason: RejectReason,
+    /// 说清楚是怎么回事，给人读的一句话。
+    pub detail: String,
+    /// 文件名不收的是什么；只有 [`RejectReason::BadName`] 那一类有。
+    pub bad_name: Option<BadName>,
+}
+
+impl Barred {
+    /// 不是文件名那一类拦下的：没有 [`Self::bad_name`]。
+    fn because(reason: RejectReason, detail: String) -> Self {
+        Self {
+            reason,
+            detail,
+            bad_name: None,
+        }
+    }
+}
+
+/// 文件名**不收的是什么**：[`RejectReason::BadName`] 那一类的结构化答案。
+///
+/// 差量预览「放不进目标」那一行右头照它写（设计稿「含有「:」」，差距 C-2），命令行同印。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum BadName {
+    /// 含有目标不收的字：整条路径里按出现的次序，各记一次。
+    Chars(Vec<char>),
+    /// 去掉扩展名之后撞上保留名（已折成大写）。
+    Reserved(String),
+}
+
+impl BadName {
+    /// 屏上与命令行那半句：「含有「:」」「撞上保留名「CON」」。
+    #[must_use]
+    pub fn shown(&self) -> String {
+        match self {
+            Self::Chars(chars) => format!(
+                "含有{}",
+                chars
+                    .iter()
+                    .map(|ch| format!("「{}」", 字形(*ch)))
+                    .collect::<String>()
+            ),
+            Self::Reserved(stem) => format!("撞上保留名「{stem}」"),
+        }
+    }
+}
+
+/// 一个字写给人看是什么样：控制字符画不出来，写成 `\u{…}`；别的照原样。
+fn 字形(ch: char) -> String {
+    if ch.is_control() {
+        ch.escape_unicode().to_string()
+    } else {
+        ch.to_string()
+    }
+}
+
+/// 一个单文件上限写给人看：正好是整 GiB（或者差一个字节就整——FAT32 那条记的是 4 GiB 减 1 字节，文件长度字段
+/// 是 32 位）写成「4 GiB」，别的照 [`human_bytes`](crate::report::human_bytes)。
+fn 上限的说法(limit: u64) -> String {
+    const GIB: u64 = 1 << 30;
+    for 整 in [limit, limit.saturating_add(1)] {
+        if 整 >= GIB && 整 % GIB == 0 {
+            return format!("{} GiB", 整 / GIB);
+        }
+    }
+    crate::report::human_bytes(limit)
 }
 
 #[cfg(test)]

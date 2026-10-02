@@ -44,7 +44,7 @@ use serde::Serialize;
 use crate::container::{ContainerKind, Contents};
 use crate::path::fold;
 
-pub use filesystem::{Filesystem, RejectReason};
+pub use filesystem::{BadName, Barred, Filesystem, RejectReason};
 
 /// 内置的那一份。
 const BUILTIN: &str = include_str!("capability/profiles.toml");
@@ -1496,7 +1496,7 @@ mod tests {
         let fat32 = 档案("retroarch-fat32").filesystem;
         assert_eq!(fat32.max_file_bytes, Some(4_294_967_295));
         // 一份 4.5 GiB 的 PS2 镜像：ADR-0017 补充段点名的正是这一种。
-        let (reason, detail) = fat32
+        let Barred { reason, detail, .. } = fat32
             .screen("PS2/某作.iso", 4_831_838_208, 0)
             .expect("放不进去");
         assert_eq!(reason, RejectReason::TooBig);
@@ -1516,12 +1516,12 @@ mod tests {
     #[test]
     fn 文件名的字符限制与保留名也查() {
         let exfat = 档案("retroarch-exfat").filesystem;
-        let (reason, _) = exfat.screen("SFC/魂斗罗?.zip", 1024, 0).expect("问号不收");
+        let Barred { reason, .. } = exfat.screen("SFC/魂斗罗?.zip", 1024, 0).expect("问号不收");
         assert_eq!(reason, RejectReason::BadName);
-        let (reason, _) = exfat.screen("SFC/NUL.zip", 1024, 0).expect("撞上保留名");
+        let Barred { reason, .. } = exfat.screen("SFC/NUL.zip", 1024, 0).expect("撞上保留名");
         assert_eq!(reason, RejectReason::BadName);
         let 长名 = format!("SFC/{}.zip", "字".repeat(300));
-        let (reason, _) = exfat.screen(&长名, 1024, 0).expect("太长");
+        let Barred { reason, .. } = exfat.screen(&长名, 1024, 0).expect("太长");
         assert_eq!(reason, RejectReason::NameTooLong);
         assert!(exfat.screen("SFC/魂斗罗.zip", 1024, 0).is_none());
     }
@@ -1531,7 +1531,7 @@ mod tests {
         let fat32 = 档案("retroarch-fat32").filesystem;
         let 深 = format!("{}/一.zip", vec!["目录"; 60].join("/"));
         assert!(fat32.screen(&深, 1024, 0).is_none(), "单看相对路径还够");
-        let (reason, _) = fat32
+        let Barred { reason, .. } = fat32
             .screen(&深, 1024, 100)
             .expect("加上子库根那一串就超了");
         assert_eq!(reason, RejectReason::PathTooLong);
@@ -1710,7 +1710,7 @@ mod tests {
         // 换成 exFAT 并不会让 260 这条消失。
         let 深 = format!("{}/一.zip", vec!["目录"; 60].join("/"));
         for name in ["retroarch-exfat", "retroarch-fat32"] {
-            let (reason, _) = 档案(name)
+            let Barred { reason, .. } = 档案(name)
                 .filesystem
                 .screen(&深, 1024, 100)
                 .unwrap_or_else(|| panic!("{name} 该拦下这条路径"));
