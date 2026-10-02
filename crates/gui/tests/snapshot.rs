@@ -2240,10 +2240,63 @@ fn 合并向导_确认合并_暗色() {
     拍合并向导("merge/step3-dark", Theme::Dark, 3);
 }
 
+/// **合并向导第一步带「建议一并合并」那一段**（设计稿 `renderMW` 的 `extra`，票 `gui-draws-the-rest-of-the-design/16`）：
+/// 浏览现场摆上那一对**疑似同一作品**（[`浏览现场_`] 的 `疑似`），勾上其中一边（`Pocket Monsters - Aka`）与一个 GBA 的作品
+/// ——另一边（[`疑似的作品`]）不在向导里，第一步就把它连核心库给的头一条理由摆出来。与稿上那一张同一个摆法
+/// （精灵宝可梦 红 + 火焰之纹章，建议「口袋妖怪 红」）。没挂媒体池：两行左边都画平台代号那一格。
+#[track_caller]
+fn 拍建议一并合并(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场_(false, true);
+    {
+        let 行: Vec<romcat_core::catalog::browse::WorkAnchor> = {
+            let (_, site) = app.browse_and_site();
+            ["Pocket Monsters - Aka (Japan)", "Gyakuten Saiban (Japan)"]
+                .iter()
+                .map(|名字| {
+                    romcat_core::catalog::browse::WorkAnchor::Work(
+                        site.catalog
+                            .work_named(名字)
+                            .expect("读得动")
+                            .expect("作品表里有它"),
+                    )
+                })
+                .collect()
+        };
+        let (browse, _) = app.browse_and_site();
+        for anchor in 行 {
+            browse.picked_mut().toggle(&anchor);
+        }
+    }
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    按(&mut harness, romcat_gui::browse::merge::MERGE);
+    assert_eq!(
+        正好画着的每一处(harness.output(), "建议一并合并").len(),
+        1,
+        "{名字}：第一步该有「建议一并合并」那一段"
+    );
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 合并向导_建议一并合并_浅色() {
+    拍建议一并合并("merge/suggest-light", Theme::Light);
+}
+
+#[test]
+fn 合并向导_建议一并合并_暗色() {
+    拍建议一并合并("merge/suggest-dark", Theme::Dark);
+}
+
 /// **移出此作品**那一层：打开作品详情页停在「变体与文件」，按头一张变体卡上那颗
 /// 「移出此作品…」（[`按`] 点的是**最后一处**，也就是最底下那张卡的那一颗）。
+///
+/// `移入` 为真时再按「移入另一个作品」那一档（设计稿 `st.mode='move'`）：候选那一框没搜时列五个、同平台（SFC）的排前。
 #[track_caller]
-fn 拍移出此作品(名字: &str, 主题: Theme) {
+fn 拍移出此作品(名字: &str, 主题: Theme, 移入: bool) {
     if 该跳过(名字) {
         return;
     }
@@ -2264,18 +2317,36 @@ fn 拍移出此作品(名字: &str, 主题: Theme) {
     }
     let mut harness = 开一个(主题, move |ui| app.ui(ui));
     按(&mut harness, romcat_gui::browse::merge::SPLIT);
+    if 移入 {
+        按(&mut harness, "移入另一个作品");
+        assert!(
+            !正好画着的每一处(harness.output(), "Seiken Densetsu 2 (Japan)").is_empty()
+                || !正好画着的每一处(harness.output(), "圣剑传说 2").is_empty(),
+            "{名字}：候选那一框该列出与它同平台的那个作品"
+        );
+    }
     拍下(harness, 名字);
     drop(目录);
 }
 
 #[test]
 fn 移出此作品弹层_浅色() {
-    拍移出此作品("merge/split-light", Theme::Light);
+    拍移出此作品("merge/split-light", Theme::Light, false);
 }
 
 #[test]
 fn 移出此作品弹层_暗色() {
-    拍移出此作品("merge/split-dark", Theme::Dark);
+    拍移出此作品("merge/split-dark", Theme::Dark, false);
+}
+
+#[test]
+fn 移出此作品弹层_移入另一个作品_浅色() {
+    拍移出此作品("merge/split-move-light", Theme::Light, true);
+}
+
+#[test]
+fn 移出此作品弹层_移入另一个作品_暗色() {
+    拍移出此作品("merge/split-move-dark", Theme::Dark, true);
 }
 
 // ——— 库 ———

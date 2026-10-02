@@ -548,12 +548,24 @@ pub struct Conflict {
     pub others: Vec<Offer>,
 }
 
+/// 合并向导第三步那张冲突表**一行一行的次序**（设计稿 `mwConflicts`：显示标题打头，其余照 `FIELDS`——
+/// 简介、类型、开发商、发行商、年份；票 `gui-draws-the-rest-of-the-design/16`）。
+///
+/// 与 [`Field::all`]（报告里的排列）是两件事：这一份是人在一张表上**从上往下比**时的次序，
+/// 先看名字与简介，年份那种一眼对得上的放最后。**汉化组不在里面**：它挂在**变体**上（ADR-0012），合并一个字都不动它。
+pub const CONFLICT_ORDER: [Field; 6] = [
+    Field::Title,
+    Field::Description,
+    Field::Genre,
+    Field::Developer,
+    Field::Publisher,
+    Field::Year,
+];
+
 /// **只列出有冲突的字段**：两边一样的、对方空着的一条都不列。
 ///
 /// 每个作品写出去的是什么由 [`entry_fields`] 答（与导出、作品详情页元数据那一面**同一处**，
-/// ADR-0024）；这一层只做减法。次序照 [`Field::all`] 那份固定的排列。
-///
-/// **汉化组不在里面**：它挂在**变体**上（ADR-0012），合并一个字都不动它。
+/// ADR-0024）；这一层只做减法。次序照 [`CONFLICT_ORDER`]。
 ///
 /// # Errors
 /// 读中立库失败时返回错误。
@@ -580,10 +592,7 @@ pub fn conflicts(
         .map(|work| Ok((work.clone(), shown(work)?)))
         .collect::<Result<_, CatalogError>>()?;
     let mut out = Vec::new();
-    for field in Field::all() {
-        if field == Field::TranslationGroup {
-            continue;
-        }
+    for field in CONFLICT_ORDER {
         let keep_said = mine.get(&field).cloned().flatten();
         let mut others = Vec::new();
         for (work, fields) in &theirs {
@@ -706,14 +715,11 @@ pub fn keep_aliases(site: &mut Site, keep: &str, names: &[String]) -> Result<(),
 /// 新增一条**作品级**的「A 与 B 是同一作品」记录（`CONTEXT.md` 的**合并作品**条）。
 /// 收在核心库里而不是界面上：这句话说的是库能做什么、做不到什么，命令行与日后别的壳
 /// 照样要它。
-#[must_use]
-pub fn auto_absorb_reason(into: &str) -> String {
-    format!(
-        "还不能选：合并记在每个变体上，要做到自动归入，需要在沉淀库新增一条作品级的\
-         「A 与 B 是同一作品」记录。眼下新扫描到的同类变体仍会单独成为一个作品，\
-         可以再合并一次——再合一次就归进《{into}》了。"
-    )
-}
+///
+/// 末尾照稿停在「可以再合并一次。」：从前还接着一截「——再合一次就归进《X》了」，与前半句说的是同一件事
+/// （拿主意的人 2026-10-01 裁，票 `gui-draws-the-rest-of-the-design/16` 岔路口 `F-9`）。
+pub const AUTO_ABSORB_REASON: &str = "还不能选：合并记在每个变体上，要做到自动归入，需要在沉淀库新增一条作品级的\
+     「A 与 B 是同一作品」记录。眼下新扫描到的同类变体仍会单独成为一个作品，可以再合并一次。";
 
 #[cfg(test)]
 mod tests {
@@ -730,6 +736,19 @@ mod tests {
             Kind::Split.summary(&从[..1], "幻想传说（汉化版）"),
             "移出此作品 · 《口袋妖怪 红》 → 《幻想传说（汉化版）》",
         );
+    }
+
+    #[test]
+    fn 冲突表的次序收齐了合并要比的每一个字段_汉化组除外() {
+        // `CONFLICT_ORDER` 是照稿手排的；`Field` 日后多一个字段而这里没跟上，那个字段就悄悄不比了。
+        let mut 照稿 = CONFLICT_ORDER.to_vec();
+        照稿.sort();
+        let mut 该比的: Vec<Field> = Field::all()
+            .into_iter()
+            .filter(|field| *field != Field::TranslationGroup)
+            .collect();
+        该比的.sort();
+        assert_eq!(照稿, 该比的);
     }
 
     #[test]

@@ -613,12 +613,13 @@ fn 变体卡上移出此作品_移到新建的作品_一条裁决撤得回来() 
         "没说清发行版信息一个字不动：\n{开了}",
     );
 
-    // **移的就是弹层上写着的那一个**：它把那个变体的键印在标题底下那张卡上。
+    // **移的就是弹层上写着的那一个**：它把那个变体写成「根名 · 相对路径」印在标题底下那张卡上
+    // （拿主意的人 2026-10-01 裁 `F-8`），拼回中立库的键就是它。
     let 移的是 = 开了
         .lines()
-        .find(|line| line.starts_with(&format!("{根}/")))
-        .expect("弹层上该写着移的是哪一个变体")
-        .to_string();
+        .find_map(|line| line.strip_prefix(&format!("{根} · ")))
+        .map(|相对| format!("{根}/{相对}"))
+        .expect("弹层上该写着移的是哪一个变体");
 
     let 落了 = 正好点一下(&ctx, "移出", |ui| app.ui(ui));
     assert!(落了.contains("已移到"), "没给回执：\n{落了}");
@@ -1244,5 +1245,513 @@ fn 第一步保留那枚标签照稿是强调色实底_字是强调色上的字�
         版式.tag_height,
         字.left() - 底.left(),
         版式.tag_padding,
+    );
+}
+
+// ——— 票 `gui-draws-the-rest-of-the-design/16`：合并向导与「移出此作品」照稿 ———
+
+/// 在这个点上按一下（移过去、按下、松开），交回松开之后再画一帧画出来的字。
+fn 点在(
+    ctx: &egui::Context, 位置: egui::Pos2, mut 画一帧: impl FnMut(&mut egui::Ui)
+) -> String {
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = headless::input();
+    input.events.push(egui::Event::PointerMoved(位置));
+    input.events.push(按(true));
+    headless::frame(ctx, input, &mut 画一帧);
+    let mut input = headless::input();
+    input.events.push(按(false));
+    headless::frame(ctx, input, &mut 画一帧);
+    跑一帧(ctx, 画一帧)
+}
+
+/// 第一步里某一行的粗体名：紧挨在那一行说明（以 `说明开头` 打头）头上、与它左沿对齐的那一段。
+fn 那一行的名字(output: &egui::FullOutput, 名字: &str, 说明开头: &str) -> egui::Rect {
+    let 说明 = 画着的每一处(output, &|字| 字.starts_with(说明开头))
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("第一步没有「{说明开头}…」那一行：\n{}", 画出来的字(output)));
+    画着的每一处(output, &|字| 字 == 名字)
+        .into_iter()
+        .find(|字| {
+            (字.left() - 说明.left()).abs() < 1.0
+                && 字.bottom() <= 说明.top() + 1.0
+                && 说明.top() - 字.bottom() < 字.height()
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "「{说明开头}…」那一行头上没有粗体「{名字}」：\n{}",
+                画出来的字(output)
+            )
+        })
+}
+
+#[test]
+fn 第一步按在作品名右边的空白处也换得了保留的作品() {
+    // 设计稿 `.mwit`：**整张卡是一颗按钮**（`<button class="mwit" data-mw="keep:…">`），点哪儿都换保留的那一个
+    // （差距清单 `M-01`）。从前只有圆点与那几行字按得动，名字右边那一大片空白按下去什么都不做。
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-整卡换保留");
+    走到第几步(&ctx, &mut app, 1);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 乙的名字 = 那一行的名字(&这一帧, 乙, "GB · 1996 · 1 个变体 · ");
+    // 名字右边两百点、与名字同一高度：那一行卡里，字已经写完了的空白处。
+    let 空白处 = egui::pos2(乙的名字.right() + 200.0, 乙的名字.center().y);
+    点在(&ctx, 空白处, |ui| app.ui(ui));
+    稳一稳(&ctx, &mut app);
+
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 乙的名字 = 那一行的名字(&这一帧, 乙, "GB · 1996 · 1 个变体 · ");
+    let 标签们 = 画着的每一处(&这一帧, &|字| 字 == "保留");
+    let [标签] = 标签们.as_slice() else {
+        panic!(
+            "第一步该正好有一枚「保留」：{标签们:?}\n{}",
+            画出来的字(&这一帧)
+        );
+    };
+    assert!(
+        (标签.center().y - 乙的名字.center().y).abs() < 1.0 && 标签.left() >= 乙的名字.right(),
+        "按在乙那一行名字右边的空白处，保留的该换成乙：「保留」画在 {标签:?}，乙的名字在 {乙的名字:?}",
+    );
+}
+
+#[test]
+fn 卡上那颗移除只移除那一行_不换保留的作品() {
+    // 整张卡是一颗按钮之后，卡里那颗「移除」得照旧接它自己的点击（它摆在卡的上头）：按它不该顺手把保留的换成这一张。
+    // **先把保留的换成丙**：默认保留的是甲（变体最多），而保留的那一行被移除时会退回「变体最多的那一个」——
+    // 留着甲当保留的，就算那一下也被整张卡接走了，结果照样是甲，这条测试就红不出来。
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-卡上移除");
+    勾上(&mut app, &[甲, 乙, 丙]);
+    跑(&ctx, &mut app, 2);
+    点一下(&ctx, "合并作品…", |ui| app.ui(ui));
+    稳一稳(&ctx, &mut app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 丙的名字 = 那一行的名字(&这一帧, 丙, "SFC · 年份未知 · 1 个变体 · ");
+    点在(
+        &ctx,
+        egui::pos2(丙的名字.right() + 200.0, 丙的名字.center().y),
+        |ui| app.ui(ui),
+    );
+    稳一稳(&ctx, &mut app);
+    let 保留的是 = |app: &mut App, 名字: &str, 说明开头: &str| {
+        let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+        let 那一行 = 那一行的名字(&这一帧, 名字, 说明开头);
+        画着的每一处(&这一帧, &|字| 字 == "保留")
+            .iter()
+            .any(|标签| (标签.center().y - 那一行.center().y).abs() < 1.0)
+    };
+    assert!(
+        保留的是(&mut app, 丙, "SFC · 年份未知 · 1 个变体 · "),
+        "按在丙那张卡的空白处，保留的该先换成丙",
+    );
+
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 乙的名字 = 那一行的名字(&这一帧, 乙, "GB · 1996 · 1 个变体 · ");
+    let 移除 = 画着的每一处(&这一帧, &|字| 字 == "移除")
+        .into_iter()
+        .min_by(|a, b| {
+            (a.center().y - 乙的名字.center().y)
+                .abs()
+                .total_cmp(&(b.center().y - 乙的名字.center().y).abs())
+        })
+        .expect("三张卡上各有一颗「移除」");
+    点在(&ctx, 移除.center(), |ui| app.ui(ui));
+    let 之后 = 稳一稳(&ctx, &mut app);
+    assert!(
+        !之后
+            .lines()
+            .any(|line| line.starts_with("GB · 1996 · 1 个变体 · ")),
+        "按了乙那张卡上的「移除」，乙该从向导里去掉：\n{之后}",
+    );
+    assert!(
+        保留的是(&mut app, 丙, "SFC · 年份未知 · 1 个变体 · "),
+        "按的是乙那张卡上的「移除」，保留的该照旧是丙——变成了甲就是那一下也被整张卡接走了",
+    );
+}
+
+/// 乙那一份标题集合里补一条与**甲的作品名**一字不差的别名：核心库据此认出甲乙**疑似同一作品**（命名撞上）。
+fn 乙也叫甲的名字(catalog: &mut Catalog) {
+    catalog
+        .put_titles(&[romcat_core::catalog::TitleRow {
+            work: 乙.to_string(),
+            value: 甲.to_string(),
+            language: romcat_core::title::Language::Chinese,
+            kind: romcat_core::title::TitleKind::Alias,
+            source: "文件名".to_string(),
+            region: None,
+            variant_key: None,
+            confidence: Confidence::High,
+            seam: None,
+            evidence: "夹具".to_string(),
+            seen: 1,
+        }])
+        .expect("写得进标题集合");
+}
+
+#[test]
+fn 参与的作品与向导外的作品疑似同一作品时_第一步建议一并合并_按添加就进向导() {
+    // 设计稿 `renderMW` 第一步那一段 `extra`：参与的作品里有一个与库里别的作品是**疑似同一作品**、另一边还没在向导里时，
+    // 小标题「建议一并合并」底下一行「作品名 · 第一条理由 · 添加」（差距清单 `M-03`）。理由**逐字**取核心库（`Suspicion::reasons`）。
+    let mut catalog = 建库();
+    乙也叫甲的名字(&mut catalog);
+    let store = Store::in_memory().expect("开得出沉淀库");
+    let 那一对 = romcat_core::triage::same_work::survey(&catalog, &store, 根).expect("扫得动");
+    let 理由 = 那一对
+        .iter()
+        .find(|one| one.touches(甲) && one.other_than(甲) == Some(乙))
+        .map(|one| one.reasons()[0].clone())
+        .unwrap_or_else(|| panic!("夹具没摆出甲乙这一对：{那一对:?}"));
+    let site = Site::in_memory(catalog, store, 根);
+    let mut app = App::new(site, 干净工作目录("romcat-测试-合并-建议一并合并"));
+    app.show_view(View::Browse);
+
+    let ctx = headless::context();
+    勾上(&mut app, &[甲, 丙]);
+    跑(&ctx, &mut app, 2);
+    点一下(&ctx, "合并作品…", |ui| app.ui(ui));
+    let 屏上 = 稳一稳(&ctx, &mut app);
+    assert!(
+        有这一段(&屏上, "建议一并合并"),
+        "第一步该有「建议一并合并」那一段：\n{屏上}"
+    );
+    assert!(
+        有这一段(&屏上, &理由),
+        "那一行该逐字写核心库给的头一条理由「{理由}」：\n{屏上}"
+    );
+    assert!(
+        !屏上
+            .lines()
+            .any(|line| line.starts_with("GB · 1996 · 1 个变体 · ")),
+        "乙还没进向导：\n{屏上}",
+    );
+
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 理由在 = 画着的每一处(&这一帧, &|字| 字 == 理由)[0];
+    let 添加 = 画着的每一处(&这一帧, &|字| 字 == "添加")
+        .into_iter()
+        .find(|字| (字.center().y - 理由在.center().y).abs() < 4.0)
+        .unwrap_or_else(|| panic!("理由那一行上没有「添加」：\n{}", 画出来的字(&这一帧)));
+    点在(&ctx, 添加.center(), |ui| app.ui(ui));
+    let 之后 = 稳一稳(&ctx, &mut app);
+    assert!(
+        之后
+            .lines()
+            .any(|line| line.starts_with("GB · 1996 · 1 个变体 · ")),
+        "按了「添加」，乙该进向导、摆成一张卡：\n{之后}",
+    );
+    assert!(
+        !有这一段(&之后, "建议一并合并"),
+        "乙进了向导，那一对两边都在里头了，这一段该收起来：\n{之后}",
+    );
+}
+
+#[test]
+fn 添加其他作品的搜索结果整行按下去就添加() {
+    // 设计稿 `mwResults`：一行就是一颗按钮（`<button data-mw="add:…">`），按名字、按年份那一截都添加（差距清单 `M-04`）。
+    // 从前那一行只有行尾一颗「添加」按得动。
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-整行添加");
+    let 屏上 = 走到第几步(&ctx, &mut app, 1);
+    assert!(
+        !屏上
+            .lines()
+            .any(|line| line.starts_with("SFC · 年份未知 · 1 个变体 · ")),
+        "丙还没进向导：\n{屏上}",
+    );
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    // 「添加其他作品」底下那一框里丙那一行的名字：画在「添加其他作品」那个小标题底下的那一处。
+    let 小标题 = 画着的每一处(&这一帧, &|字| 字 == "添加其他作品")[0];
+    let 丙的名字 = 画着的每一处(&这一帧, &|字| 字 == 丙)
+        .into_iter()
+        .find(|字| 字.top() > 小标题.bottom())
+        .unwrap_or_else(|| panic!("搜索结果里没有丙：\n{}", 画出来的字(&这一帧)));
+    // 按在那一行字都写完了的右半边空白处：整行都是那一颗按钮。
+    点在(
+        &ctx,
+        egui::pos2(丙的名字.right() + 300.0, 丙的名字.center().y),
+        |ui| app.ui(ui),
+    );
+    let 之后 = 稳一稳(&ctx, &mut app);
+    assert!(
+        之后
+            .lines()
+            .any(|line| line.starts_with("SFC · 年份未知 · 1 个变体 · ")),
+        "按在搜索结果里丙那一行右半边的空白处，丙该进向导：\n{之后}",
+    );
+}
+
+#[test]
+fn 第二步组头写平台全名_一行变体竖直居中_路径写根名与相对路径_置信度是标签() {
+    // 设计稿 `.vgrp` / `.vrow`（差距清单 `M-07`、`M-08`、`M-10`，岔路口 `F-8` 拿主意的人 2026-10-01 裁 A）。
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-合并-第二步照稿");
+    let 屏上 = 走到第几步(&ctx, &mut app, 2);
+    // 组头：平台色标之后是**全名**（核心库平台表 `Manifest::full_name`；GB 写着「Game Boy」）。
+    assert!(
+        有这一段(&屏上, "Game Boy"),
+        "GB 那一组的组头该写平台全名「Game Boy」：\n{屏上}",
+    );
+    // 路径写「根名 · 相对路径」（`table::root_and_path`），不写中立库的键。
+    let 路径 = format!("{根} · GB/精灵宝可梦 红.zip");
+    assert!(
+        有这一段(&屏上, &路径),
+        "乙那一行的路径该写「{路径}」：\n{屏上}"
+    );
+    assert!(
+        !有这一段(&屏上, &键("GB", "精灵宝可梦 红.zip")),
+        "路径不该再写中立库的键：\n{屏上}",
+    );
+
+    跑(&ctx, &mut app, 60);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    // 乙那一行：简称在上、路径在下，那一摞的竖直正中就是这一行的中线；「来自「乙」」与体积都对着它。
+    let 路径在 = 画着的每一处(&这一帧, &|字| 字 == 路径)[0];
+    let 名在 = 画着的每一处(&这一帧, &|字| 字 == "汉化版")
+        .into_iter()
+        .find(|字| (字.left() - 路径在.left()).abs() < 1.0 && 字.bottom() <= 路径在.top() + 1.0)
+        .unwrap_or_else(|| panic!("乙那一行路径头上没有简称：\n{}", 画出来的字(&这一帧)));
+    let 中线 = (名在.top() + 路径在.bottom()) / 2.0;
+    let 来自 = 画着的每一处(&这一帧, &|字| 字 == format!("来自「{乙}」"))[0];
+    assert!(
+        (来自.center().y - 中线).abs() < 1.5,
+        "「来自「{乙}」」该对着那一行的中线（{中线}）竖直居中，画在 {来自:?}",
+    );
+    assert!(
+        (路径在.height() - 名在.height()).abs() < 6.0 && 来自.height() < 名在.height() * 1.5,
+        "那一行各格都该单行：简称 {名在:?}，路径 {路径在:?}，来自 {来自:?}",
+    );
+    // 置信度是标签（设计稿 `.chip`）：那个词底下垫着这一档的浅底（`hi-soft`），不是一道色条。
+    let 色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme());
+    let 这一行的词 = 画着的每一处(&这一帧, &|字| 字 == "高置信")
+        .into_iter()
+        .find(|字| (字.center().y - 中线).abs() < 4.0)
+        .unwrap_or_else(|| panic!("乙那一行没有置信度那个词：\n{}", 画出来的字(&这一帧)));
+    assert!(
+        方块们(&这一帧)
+            .iter()
+            .any(|(rect, _, 底)| *底 == 色.hi_soft && rect.contains(这一行的词.center())),
+        "乙那一行的「高置信」底下该垫一块 hi-soft 的标签底",
+    );
+}
+
+/// 这一帧里画着的每一道**横线**（两端同高的线段，长过三百点）在哪个高度。弹层里页脚上沿那一道分隔线就在其中。
+fn 横线们(output: &egui::FullOutput) -> Vec<f32> {
+    fn 收(shape: &egui::epaint::Shape, out: &mut Vec<f32>) {
+        match shape {
+            egui::epaint::Shape::LineSegment {
+                points: [头, 尾], ..
+            } if (头.y - 尾.y).abs() < 0.5 && (头.x - 尾.x).abs() > 300.0 => {
+                out.push(头.y);
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// 同 [`界面`]，甲乙两边再各说一个**类型**与**发行商**、说的不一样：第三步于是有五个冲突的字段
+/// （显示标题、简介、类型、发行商、年份；开发商两边一样，不列）。
+fn 五个冲突的界面(名字: &str) -> App {
+    let mut catalog = 建库();
+    for (作品, 字段, 值) in [
+        (甲, Field::Genre, "角色扮演"),
+        (乙, Field::Genre, "策略角色扮演"),
+        (甲, Field::Publisher, "Nintendo"),
+        (乙, Field::Publisher, "Pokémon Company"),
+    ] {
+        catalog
+            .put_verdict_value(AnchorKind::Work, 作品, 字段, 值, "夹具")
+            .expect("写得进刮削值");
+    }
+    let site = Site::in_memory(catalog, Store::in_memory().expect("开得出沉淀库"), 根);
+    let mut app = App::new(site, 干净工作目录(名字));
+    app.show_view(View::Browse);
+    app
+}
+
+#[test]
+fn 第三步五个冲突字段的表整个摆得下_合并后会发生什么头一条不出折叠线_字段照稿叫显示标题照稿排() {
+    // 设计稿 `.ctbl`（差距清单 `M-11`…`M-14`）：一格里几个选项挨着，一行约 36 点高；从前每个选项是一行带空说明的
+    // `radio_option`，一行六十来点，五个字段就把「合并后会发生什么」整块挤到折叠线外（gl-16 打回过的同一件事）。
+    // **拿矩形断，不比像素**：1280×800 的视口里不滚，五行都画在页脚上头，「写入 N 条裁决」那一条也画在页脚上头。
+    let ctx = headless::context();
+    let mut app = 五个冲突的界面("romcat-测试-合并-第三步摆得下");
+    走到第几步(&ctx, &mut app, 3);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    // **折叠线是页脚上沿那一道横线**（内容区的裁剪底边），不是页脚里那几个字：「取消」的字比那道线还低一截按钮留白。
+    let 取消 = 画着的每一处(&这一帧, &|字| 字 == "取消")
+        .into_iter()
+        .map(|字| 字.top())
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        取消.is_finite(),
+        "页脚那颗「取消」没画出来：\n{}",
+        画出来的字(&这一帧)
+    );
+    let 页脚 = 横线们(&这一帧)
+        .into_iter()
+        .filter(|y| *y < 取消)
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(页脚.is_finite(), "页脚上沿那一道横线没画出来");
+    // 弹层后头那张表的表头也有「年份」：只数画在「字段冲突」那个小标题底下的。
+    let 小标题 = 画着的每一处(&这一帧, &|字| 字 == "字段冲突")[0];
+    let 字段们 = ["显示标题", "简介", "类型", "发行商", "年份"];
+    let 每一行: Vec<egui::Rect> = 字段们
+        .iter()
+        .map(|字段| {
+            let 每一处: Vec<egui::Rect> = 画着的每一处(&这一帧, &|字| 字 == *字段)
+                .into_iter()
+                .filter(|字| 字.top() > 小标题.bottom())
+                .collect();
+            assert_eq!(
+                每一处.len(),
+                1,
+                "「{字段}」那一行该正好画一处：\n{}",
+                画出来的字(&这一帧)
+            );
+            每一处[0]
+        })
+        .collect();
+    for (字段, 那一行) in 字段们.iter().zip(&每一行) {
+        assert!(
+            那一行.bottom() <= 页脚,
+            "「{字段}」那一行被页脚挡住了：画在 {那一行:?}，页脚从 {页脚} 起",
+        );
+    }
+    assert!(
+        每一行.windows(2).all(|两行| 两行[0].top() < 两行[1].top()),
+        "字段次序该照稿：{字段们:?}，画在 {每一行:?}",
+    );
+    assert!(
+        画着的每一处(&这一帧, &|字| 字 == "标题")
+            .iter()
+            .all(|字| 字.top() < 小标题.bottom()),
+        "标题那一行该叫「显示标题」：\n{}",
+        画出来的字(&这一帧)
+    );
+    let 头一条 = 画着的每一处(&这一帧, &|字| 字.starts_with("写入 "))
+        .first()
+        .copied()
+        .unwrap_or_else(|| {
+            panic!(
+                "不滚的时候「合并后会发生什么」头一条没画出来：\n{}",
+                画出来的字(&这一帧)
+            )
+        });
+    assert!(
+        头一条.bottom() <= 页脚,
+        "「合并后会发生什么」头一条出了折叠线：画在 {头一条:?}，页脚上沿在 {页脚}",
+    );
+    // 自动归入那一句只删尾巴「——再合一次就归进《X》了」（拿主意的人 2026-10-01 裁 `F-9`）。
+    let 屏上 = 滚到底(&ctx, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("可以再合并一次。"),
+        "眼下的走法那半句该留着：\n{屏上}"
+    );
+    assert!(!屏上.contains("再合一次就归进"), "那句尾巴该删掉：\n{屏上}");
+}
+
+/// 打开甲的详情页，直接从「变体与文件」那一面上 `key` 那一张卡开「移出此作品」（与卡上那颗按钮同一个入口），跑稳。
+fn 移出甲的(ctx: &egui::Context, app: &mut App, key: &str) -> String {
+    打开详情页(ctx, app, 甲);
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.open_split(site, key);
+    }
+    稳一稳(ctx, app)
+}
+
+#[test]
+fn 移走的正是首选变体时_那半句写顶上那一个的变体简称_不写文件名() {
+    // 设计稿 `DLG.split`：「它的首选变体改为「${pf.l}」」——`l` 是变体简称（差距清单 `M-19`）；括号那截照旧留着（`F-9` 裁 B）。
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-移出-首选写简称");
+    let 移走的 = 键("GB", "口袋妖怪 红(汉化).zip");
+    {
+        let (_, site) = app.browse_and_site();
+        site.set_preferred_variant(甲, "GB", &移走的)
+            .expect("记得下首选变体");
+    }
+    let 屏上 = 移出甲的(&ctx, &mut app, &移走的);
+    // 甲剩下那一个身上没有汉化记号，核心库答的简称是「原版」（`variant_short_names`）。
+    assert!(
+        屏上.contains("改由「原版」顶上（照「汉化 > 官中 > 日版 > 其他」重选）"),
+        "首选那半句该写顶上那一个的变体简称：\n{屏上}",
+    );
+    assert!(
+        !屏上.contains("改由「口袋妖怪"),
+        "首选那半句不该写文件名：\n{屏上}",
+    );
+}
+
+#[test]
+fn 移入另一个作品那一框每行写平台年份与变体数_同平台的排前() {
+    // 设计稿 `DLG.split` 的 `.srch`：每行圆点、平台色标、粗体名、「年份 · N 个变体」，没搜时同平台的排前（差距清单 `M-20`）。
+    // 甲在 GB 上；乙也在 GB、丙在 SFC——不论库里怎么排，乙都该在丙前头。
+    let ctx = headless::context();
+    let mut app = 界面("romcat-测试-移出-候选那一框");
+    // 夹具自己摆得对不对：库里照默认次序排，丙在乙前头——不然「同平台的排前」示范不出来。
+    {
+        let (_, site) = app.browse_and_site();
+        let 默认次序: Vec<String> = site
+            .catalog
+            .work_page(&WorkQuery::default(), 0, 8)
+            .expect("取得出一页")
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        let 第几 = |名: &str| 默认次序.iter().position(|one| one == 名);
+        assert!(
+            第几(丙) < 第几(乙),
+            "夹具里默认次序该是丙在乙前头：{默认次序:?}"
+        );
+    }
+    移出甲的(&ctx, &mut app, &键("GB", "口袋妖怪 红(汉化).zip"));
+    点一下(&ctx, "移入另一个作品", |ui| app.ui(ui));
+    稳一稳(&ctx, &mut app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 小标题 = 画着的每一处(&这一帧, &|字| 字 == "移到")[0];
+    let 弹层里的 = |那几个字: &str| -> egui::Rect {
+        画着的每一处(&这一帧, &|字| 字 == 那几个字)
+            .into_iter()
+            .find(|字| 字.top() > 小标题.bottom())
+            .unwrap_or_else(|| {
+                panic!(
+                    "「移入另一个作品」那一框里没有「{那几个字}」：\n{}",
+                    画出来的字(&这一帧)
+                )
+            })
+    };
+    let (乙在, 乙那句) = (弹层里的(乙), 弹层里的("1996 · 1 个变体"));
+    let (丙在, 丙那句) = (弹层里的(丙), 弹层里的("年份未知 · 1 个变体"));
+    for (名, 句, 平台) in [(乙在, 乙那句, "GB"), (丙在, 丙那句, "SFC")] {
+        assert!(
+            (句.center().y - 名.center().y).abs() < 4.0 && 句.left() > 名.right(),
+            "「年份 · N 个变体」该跟在名字后头、同一行：名 {名:?}，句 {句:?}",
+        );
+        let 色标 = 画着的每一处(&这一帧, &|字| 字 == 平台)
+            .into_iter()
+            .find(|字| (字.center().y - 名.center().y).abs() < 4.0 && 字.right() < 名.left());
+        assert!(
+            色标.is_some(),
+            "那一行名字前头该有平台「{平台}」：名 {名:?}"
+        );
+    }
+    assert!(
+        乙在.top() < 丙在.top(),
+        "与甲同平台（GB）的乙该排在丙前头：乙 {乙在:?}，丙 {丙在:?}",
     );
 }

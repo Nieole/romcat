@@ -704,6 +704,21 @@ sublibrary_literals = [
 ]
 literals += check_literals(sublibrary_literals)
 
+# 合并向导与「移出此作品」（票 gui-draws-the-rest-of-the-design/16）：整张按得动的选择卡（.mwit / .asmode）、
+# 搜索结果那一框（.srch）、第二步的平台组与一行变体（.vgrp / .vrow）、移出那一档底下的缩进、自动归入那一格的调淡。
+merge_literals = [
+    (r"\.mwit\{[^}]*?gap:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, "layout", "merge-card-gap", None), (2, "layout", "choice-card-padding", 0), (3, "layout", "choice-card-padding", 1)]),
+    (r"\.asmode\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "layout", "mode-card-gap", None), (2, "layout", "choice-card-padding", 0), (3, "layout", "choice-card-padding", 1)]),
+    (r'<div class="field" style="padding-left:(\d+)px"><input class="input" data-dgi="name"', [(1, "layout", "mode-indent", None)]),
+    (r"\.srch\{[^}]*?max-height:(\d+)px", [(1, "layout", "search-list-max", None)]),
+    (r"\.srch button\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "layout", "search-row-gap", None), (2, "layout", "search-row-padding", 0), (3, "layout", "search-row-padding", 1)]),
+    (r"\.vgrp>\.row:first-child\{padding:(\d+)px (\d+)px", [(1, "layout", "variant-group-head-padding", 0), (2, "layout", "variant-group-head-padding", 1)]),
+    (r"\.vrow\{[^}]*?grid-template-columns:(\d+)px minmax\(0,1fr\)[^;]*;gap:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, "layout", "variant-check-column", None), (2, "layout", "variant-row-gap", None), (3, "layout", "variant-row-padding", 0), (4, "layout", "variant-row-padding", 1)]),
+    (r'<label class="opt" style="opacity:(\.\d+)"><input type="checkbox" disabled>', [(1, "mix", "muted-option-opacity", None)]),
+    (r"\.vrow\.off\{opacity:(\.\d+)\}", [(1, "mix", "variant-off-opacity", None)]),
+]
+literals += check_literals(merge_literals)
+
 # 作品详情页（票 gui-looks-like-the-design/15）：顶条、六个面、头上那一块与字卡、概览、变体卡、文件表、识别依据、
 # 元数据那一面、标题面、媒体那一面。
 work_literals = [
