@@ -1163,6 +1163,8 @@ pub struct Layout {
     pub settings_switch: [f32; 3],
     /// 设置屏「主库原名」那一格输入框的宽。设计稿上没有这一格，取这一档的理由写在令牌文件那一行。
     pub settings_name_width: f32,
+    /// 设置屏 ScreenScraper 那几格名那一列的宽（设计稿数据源那一节 `.frm` 行内的 `grid-template-columns`）。
+    pub settings_account_label: f32,
 }
 
 /// 调色比例：两套主题共用。设计稿里写在规则上的字面量（`color-mix` 的百分比、`opacity`）。

@@ -775,6 +775,21 @@ pub fn priorities_path(workspace: &Path) -> PathBuf {
     workspace.join("priorities.toml")
 }
 
+/// 工作目录里那份 **ScreenScraper 账号**（票 `verdict-store-and-sync/15`，收挂单 `Q1063`）。
+///
+/// **读它与写它走同一处**（[`scrape::online::find_account`](crate::scrape::online::find_account) 与
+/// [`scrape::online::save_account`](crate::scrape::online::save_account)）：界面的设置屏、刮削面板与命令行
+/// `romcat scrape` 问的都是那一处，路径只在这儿拼一次。
+///
+/// 与优先级表一样**不带 [`Slug`]**：账号是这个人的，不随今天开的是哪一份库变；而且**只一套**——
+/// 跟着库分开存，就成了一个工作目录里好几套账号，那正是轮换绕配额、永久封禁的那条路（ADR-0007）。
+/// 它单独一份文件，没有并进别的哪份、也没有为它立通用的设置框架（规格 `verdict-store-and-sync` 的
+/// Further Notes）：里头装着密码，权限要单独收（`scrape::online::save_account`）。
+#[must_use]
+pub fn screenscraper_account_path(workspace: &Path) -> PathBuf {
+    workspace.join("screenscraper.toml")
+}
+
 /// **界面的版式偏好**：面板边界各自拖到哪儿了。
 ///
 /// 它落在工作目录里而**不落进中立库**，这不是随手挑的位置：中立库整份可再生

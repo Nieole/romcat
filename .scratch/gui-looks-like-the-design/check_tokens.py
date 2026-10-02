@@ -553,6 +553,7 @@ settings_literals = [
     (r"\.sset\{[^}]*?gap:(\d+)px", [(1, "space", "settings-body-gap", None)]),
     (r"\.srow\{[^}]*?grid-template-columns:(\d+)px[^}]*?gap:(\d+)px (\d+)px;[^}]*?padding-bottom:(\d+)px", [(1, "layout", "settings-row-label", None), (2, "space", "settings-row-gap", 0), (3, "space", "settings-row-gap", 1), (4, "space", "settings-row-bottom", None)]),
     (r"\.srow>b\{[^}]*?padding-top:(\d+)px", [(1, "space", "settings-label-top", None)]),
+    (r"row\('ScreenScraper',`<div class=\"frm\" style=\"grid-template-columns:(\d+)px", [(1, "layout", "settings-account-label", None)]),
     (r"\.switch\{[^}]*?gap:(\d+)px", [(1, "space", "settings-switch-gap", None)]),
     (r"\.switch i\{width:(\d+)px;height:(\d+)px", [(1, "layout", "settings-switch", 0), (2, "layout", "settings-switch", 1)]),
     (r"\.switch i::after\{[^}]*?width:(\d+)px", [(1, "layout", "settings-switch", 2)]),

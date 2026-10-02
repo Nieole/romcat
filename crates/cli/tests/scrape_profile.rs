@@ -112,3 +112,77 @@ fn 在线档缺凭据时不硬闯_也不悄悄退回离线() {
         "既然起不来，就不该出一份看起来跑完了的报告"
     );
 }
+
+// ——— ScreenScraper 账号存在工作目录里（票 `verdict-store-and-sync/15`，收挂单 `Q1063`）———
+//
+// 账号是编的，**一个网络请求都不发**：`--online-budget 0` 让自设的上限在发第一个请求之前就收手，
+// 而这份小库里本来就没有撞过 DAT 的条目（只对已确认的条目发请求）。验的是「认到了账号、认的是哪一套」。
+
+/// 往工作目录里存一套编出来的账号——走核心库那一处（`online::save_account`），与设置屏存的是同一份。
+fn 存一套账号(workspace: &Path) {
+    romcat_core::scrape::online::save_account(
+        workspace,
+        &romcat_core::scrape::online::Account {
+            dev_id: "编的开发者".to_owned(),
+            dev_password: "编的开发者密码".to_owned(),
+            user: String::new(),
+            user_password: String::new(),
+        },
+    )
+    .expect("存得下账号");
+}
+
+/// 在线档、自设上限为零地刮一趟。`环境变量` 是这一趟**额外给**的那几个，别的 ScreenScraper 变量一律摘掉。
+fn 在线刮一趟(workspace: &Path, 环境变量: &[(&str, &str)]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_romcat"));
+    command
+        .arg("scrape")
+        .args(["--library", "测试库", "--workspace"])
+        .arg(workspace)
+        .args(["--no-media", "--profile", "在线", "--online-budget", "0"]);
+    for key in romcat_core::scrape::online::ENV_KEYS {
+        command.env_remove(key);
+    }
+    for (key, value) in 环境变量 {
+        command.env(key, value);
+    }
+    command.output().expect("能启动 romcat")
+}
+
+#[test]
+fn 在线档认得工作目录里存着的账号_一个请求都不发() {
+    let (_dir, workspace) = 现场();
+    存一套账号(workspace.path());
+    let out = 在线刮一趟(workspace.path(), &[]);
+    let 说的 = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "认到了账号就该起得来：\n{说的}");
+    assert!(
+        说的.contains("ScreenScraper 账号：用的是工作目录里存着的那一套"),
+        "没说认到的是工作目录里那一套：\n{说的}"
+    );
+    let 报告 = String::from_utf8_lossy(&out.stdout);
+    assert!(报告.contains("刮削：在线档"), "{报告}");
+    assert!(
+        !说的.contains("编的开发者密码") && !报告.contains("编的开发者密码"),
+        "密码不许印出来"
+    );
+}
+
+#[test]
+fn 在线档设了环境变量时用环境变量那一套() {
+    let (_dir, workspace) = 现场();
+    存一套账号(workspace.path());
+    let out = 在线刮一趟(
+        workspace.path(),
+        &[
+            ("SCREENSCRAPER_DEVID", "环境变量里的开发者"),
+            ("SCREENSCRAPER_DEVPASSWORD", "环境变量里的开发者密码"),
+        ],
+    );
+    let 说的 = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{说的}");
+    assert!(
+        说的.contains("ScreenScraper 账号：用的是开工具之前给的环境变量"),
+        "环境变量该优先：\n{说的}"
+    );
+}

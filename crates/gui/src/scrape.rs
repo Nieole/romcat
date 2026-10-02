@@ -431,18 +431,26 @@ impl Panel {
         };
         // **在线档要一套凭据，拿不到就别启动。** 悄悄退回离线跑完，只会让人对着一份
         // 缺封面的报告以为「在线源也没有」（`ScrapeError::NoNetwork` 的道理）。
-        let credentials = match (self.online, Credentials::from_env()) {
-            (false, _) => None,
-            (true, Some(credentials)) => Some(credentials),
-            (true, None) => {
-                self.error = Some(format!(
-                    "联网源要一套 ScreenScraper 凭据，从环境变量读：{}。\n\
-                     devid 要在它的论坛人工申请（无 devid 直接 403），\
-                     不要拿别人的 devid 用——那会连累对方被拉黑。",
-                    online::ENV_KEYS.join(" / "),
-                ));
-                return;
+        // 账号只问核心库那一处（`online::find_account`）：环境变量优先，其次设置屏存进工作目录的那一套。
+        let credentials = if self.online {
+            match online::find_account(&self.workspace) {
+                Ok(Some((account, _))) => Some(account.credentials()),
+                Ok(None) => {
+                    self.error = Some(format!(
+                        "联网源要一套 ScreenScraper 账号：在设置屏「数据源」那一节填一次，\
+                         或者开工具之前给环境变量 {}（环境变量优先）。\n{}",
+                        online::ENV_KEYS.join(" / "),
+                        online::DEVID_NOTE,
+                    ));
+                    return;
+                }
+                Err(why) => {
+                    self.error = Some(format!("联网源起不来：{why}"));
+                    return;
+                }
             }
+        } else {
+            None
         };
         let workspace = self.workspace.clone();
         let title = format!(

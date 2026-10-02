@@ -4590,10 +4590,12 @@ fn 待确认_空态_暗色() {
 
 /// **设置那一屏**：一份刚建出来的库开在设置上，八节里挑一节拍。
 ///
-/// 三样钉死，照旧是为了「每台机器每一趟都一样」：底部状态栏与工作目录那一节印的那一段短写
-/// （`App::set_workspace_label`）、数据源那张表的时刻（`库屏的钟`），以及**探 ffmpeg 那个程序名**
+/// 四样钉死，照旧是为了「每台机器每一趟都一样」：底部状态栏与工作目录那一节印的那一段短写
+/// （`App::set_workspace_label`）、数据源那张表的时刻（`库屏的钟`）、**探 ffmpeg 那个程序名**
 /// ——那一格照实探这台机器，而门禁那几台有的装了有的没装（`Screen::probe_with`，指一个必定
-/// 不存在的名字，画出来一律是「没找到」那一档，设计稿上画的也是这一档）。
+/// 不存在的名字，画出来一律是「没找到」那一档，设计稿上画的也是这一档）——以及**不看环境变量**
+/// （`Screen::ignore_env`）：ScreenScraper 的账号环境变量优先，而那几台机器上给没给不一定；
+/// 工作目录是新建的临时目录，里头没存账号，画出来一律是「账号没给」、四格空着那一档。
 struct 设置屏 {
     app: App,
     _工作区: TempDir,
@@ -4609,7 +4611,7 @@ impl 设置屏 {
         let screen = app.settings_mut();
         screen.show_section(节);
         screen.probe_with(romcat_core::scrape::preview::NO_SUCH_PROGRAM);
-        screen.pin_account(false);
+        screen.ignore_env();
         screen.pin_clock(库屏的钟());
         Self {
             app,
@@ -4655,6 +4657,38 @@ fn 设置_数据源_浅色() {
 #[test]
 fn 设置_数据源_暗色() {
     拍设置屏("settings/sources-dark", Theme::Dark, Section::Sources);
+}
+
+/// **数据源那一节、工作目录里存着一套账号**（票 `verdict-store-and-sync/15`）：几格摆着那一套，
+/// 两格密码画成圆点——圆点那个字形画不画得出来，读字的那几条测试验不到，只有这两张看得见。
+/// 账号是编的；存的那一下走核心库那一处（`online::save_account`），与设置屏「保存」存的是同一份。
+#[track_caller]
+fn 拍设置屏存着账号(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 设置屏::停在(Section::Sources);
+    romcat_core::scrape::online::save_account(
+        现场._工作区.path(),
+        &romcat_core::scrape::online::Account {
+            dev_id: "编的开发者".to_owned(),
+            dev_password: "编的开发者密码".to_owned(),
+            user: "编的用户".to_owned(),
+            user_password: "编的密码".to_owned(),
+        },
+    )
+    .expect("存得下账号");
+    拍下(开一个(主题, move |ui| 现场.app.ui(ui)), 名字);
+}
+
+#[test]
+fn 设置_数据源_存着账号_浅色() {
+    拍设置屏存着账号("settings/sources-account-light", Theme::Light);
+}
+
+#[test]
+fn 设置_数据源_存着账号_暗色() {
+    拍设置屏存着账号("settings/sources-account-dark", Theme::Dark);
 }
 
 #[test]
