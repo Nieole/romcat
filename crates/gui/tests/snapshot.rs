@@ -1722,6 +1722,7 @@ fn 拍详情页(名字: &str, 主题: Theme, 面: Tab) {
     let 浏览现场 { mut app, 目录 } = 浏览现场(false);
     挂上媒体池(&mut app, 目录.path());
     摆上第几版子库与导出(&mut app);
+    摆上官方名称与别名(&mut app);
     // 打开与换面走的是界面上「查看详情」、点一面的同一个入口（`Screen::open_page`）；交给画帧那个闭包在下一帧开头办。
     let 换面 = std::rc::Rc::new(std::cell::Cell::new(None::<Tab>));
     let 要换 = std::rc::Rc::clone(&换面);
@@ -1879,6 +1880,63 @@ const 合并的那三个: [&str; 3] = [
     "Gyakuten Saiban (Japan)",
 ];
 
+/// 作品详情页头上与合并向导那一行底下**那一句**（设计稿 `.hsub`，票 `gui-draws-the-rest-of-the-design/03`）要的料：
+/// 几个作品的标题集合里补上**官方名称**与别的叫法，摆成三种样子——
+///
+/// - 点开的那个（`Chrono Trigger`）：一条官方名称、一条中文别名（它汉化那个变体的文件名就叫这个），
+///   那一句是「Chrono Trigger · 时空之轮」；
+/// - `Seiken Densetsu 2`：只有一条官方名称（日版罗马字），那一句就是它；
+/// - `Gyakuten Saiban`：一条都不补——它没有中文译名，补一条官方名称就成了它的显示标题，那一句照旧空着、不画。
+///
+/// **只摆在详情页与合并向导那几张上**：浏览屏那几张的内容一个字都不动。三个作品的显示标题也都不变
+/// （中文译名排在官方名称前头）。
+fn 摆上官方名称与别名(app: &mut App) {
+    use romcat_core::title::{Language, TitleKind};
+
+    // 地区只给日版那一条（日文原名跟着日版条目走）；英文名与文件名那一条不带地区。
+    let 一条 = |work: &str, value: &str, language: Language, kind: TitleKind, source: &str| {
+        romcat_core::catalog::TitleRow {
+            work: work.to_owned(),
+            value: value.to_owned(),
+            language,
+            kind,
+            source: source.to_owned(),
+            region: (language == Language::Japanese).then(|| "Japan".to_owned()),
+            variant_key: None,
+            confidence: Confidence::High,
+            seam: None,
+            evidence: "基线里摆的".to_owned(),
+            seen: 1,
+        }
+    };
+    let (_, site) = app.browse_and_site();
+    site.catalog
+        .put_titles(&[
+            一条(
+                点开的作品,
+                "Chrono Trigger",
+                Language::English,
+                TitleKind::Official,
+                "No-Intro",
+            ),
+            一条(
+                点开的作品,
+                "时空之轮",
+                Language::Chinese,
+                TitleKind::Alias,
+                "文件名",
+            ),
+            一条(
+                "Seiken Densetsu 2 (Japan)",
+                "Seiken Densetsu 2",
+                Language::Japanese,
+                TitleKind::Official,
+                "No-Intro",
+            ),
+        ])
+        .expect("写得进标题集合");
+}
+
 /// 勾上 [`合并的那三个`]，不经表格——表上勾选框那一格在基线里是个小方块，
 /// 点它要先滚到那一行，而这几张要看的是弹层。
 fn 勾上那三个(app: &mut App) {
@@ -1962,6 +2020,29 @@ fn 记上汉化记号(app: &mut App) {
         .expect("识别结论写得进");
 }
 
+/// 合并向导第一步那一格封面（令牌 `merge-cover-width` 那么宽）贴上图了没有（不论画成方块还是网格）。
+/// 只认那么宽的：左栏顶上那枚图标也是一张图。
+fn 贴着图(output: &egui::FullOutput) -> bool {
+    fn 有(shape: &egui::epaint::Shape) -> bool {
+        let 宽 = romcat_gui::tokens::Tokens::builtin()
+            .layout
+            .merge_cover_width;
+        match shape {
+            egui::epaint::Shape::Rect(rect) => {
+                rect.fill_texture_id() != egui::TextureId::default()
+                    && (rect.rect.width() - 宽).abs() < 0.5
+            }
+            egui::epaint::Shape::Mesh(mesh) => {
+                mesh.texture_id != egui::TextureId::default()
+                    && (mesh.calc_bounds().width() - 宽).abs() < 0.5
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().any(有),
+            _ => false,
+        }
+    }
+    output.shapes.iter().any(|clipped| 有(&clipped.shape))
+}
+
 /// **合并向导**走到第 `第几步` 步（从 1 数），拍一张。CI 上跳过（[`该跳过`]）。
 #[track_caller]
 fn 拍合并向导(名字: &str, 主题: Theme, 第几步: usize) {
@@ -1971,6 +2052,11 @@ fn 拍合并向导(名字: &str, 主题: Theme, 第几步: usize) {
     let 浏览现场 { mut app, 目录 } = 浏览现场(false);
     记上汉化记号(&mut app);
     勾上那三个(&mut app);
+    摆上官方名称与别名(&mut app);
+    // 第一步每一行左边那一格贴封面（设计稿 `.mwit .mc`）：点开的那个在媒体池里有一张，另两个画小字卡。
+    if 第几步 == 1 {
+        挂上媒体池(&mut app, 目录.path());
+    }
     // 第三步那一层比另外两步高一截，1280×800 装不下（见 [`确认那一对的画面`]）。
     let 画面 = if 第几步 == 3 {
         确认那一对的画面
@@ -1981,6 +2067,20 @@ fn 拍合并向导(名字: &str, 主题: Theme, 第几步: usize) {
     按(&mut harness, romcat_gui::browse::merge::MERGE);
     for _ in 1..第几步 {
         按(&mut harness, "下一步");
+    }
+    if 第几步 == 1 {
+        // 等后台把那一张封面解完：只跑帧、不看挂钟（同 [`拍详情页`]）；上限给得明确。
+        let mut 跑了几帧 = 0;
+        while !贴着图(harness.output()) && 跑了几帧 < 等图最多几帧 {
+            harness.step();
+            跑了几帧 += 1;
+            std::thread::yield_now();
+        }
+        assert!(
+            贴着图(harness.output()),
+            "{名字}：第一步那一行的封面跑满 {跑了几帧} 帧还没贴上"
+        );
+        harness.run();
     }
     // **步骤条贯通左右、中间不断**（拿主意的人 2026-09-21 定，**与设计稿不同**）。
     //

@@ -29,7 +29,7 @@ use romcat_core::scrape::priority::{self, FieldShown, Said, VERDICT};
 use romcat_core::scrape::{AnchorKind, Field, MediaKind, preview};
 use romcat_core::shape::Role;
 use romcat_core::site::Site;
-use romcat_core::title::{Language, SortFrom, TitleKind, language_of};
+use romcat_core::title::{AlsoKnownAs, Language, SortFrom, TitleKind, language_of};
 use romcat_core::verdict::TitleSuppression;
 
 use super::{
@@ -1396,12 +1396,13 @@ impl Screen {
                             )
                             .wrap(),
                         );
-                        // 底下那一句（设计稿 `.hsub`）：没认出作品的说名字怎么来的；认出的、显示标题又不是作品名本身时写作品名。
-                        let 这一句 = if loose {
-                            Some("名称取自文件名")
-                        } else {
-                            (work.name != title).then_some(work.name.as_str())
-                        };
+                        // 底下那一句（设计稿 `.hsub`）：合并向导那一行底下印的也是它（`subtitle_line`）。
+                        let 这一句 = subtitle_line(
+                            loose,
+                            self.detail
+                                .as_ref()
+                                .and_then(|detail| detail.also_known_as.as_ref()),
+                        );
                         if let Some(这一句) = 这一句 {
                             ui.label(egui::RichText::new(这一句).size(tokens.font.size_body).color(字));
                         }
@@ -3671,6 +3672,41 @@ fn platform_chip(ui: &mut egui::Ui, platform: &str) {
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, 字色);
 }
+
+/// 作品详情页头上大标题底下那一句（设计稿 `.hsub`）；**合并向导每一行底下印的也是它**（票
+/// `gui-draws-the-rest-of-the-design/03`：两屏同一句，不各拼一遍）。
+///
+/// 没认出作品的那一行说名字是怎么来的；认出的照核心库那一问（`title::also_known_as`）写
+/// 「官方名称 · 其余叫法」：官方名称那一条打头，其余叫法照核心库交的次序跟着，「 · 」隔开（稿上 `.hsub` 的写法）。
+/// 显示标题印在大标题上，不在这一句里。一条都没有时是 `None`，那一行不画。
+///
+/// **其余叫法最多列 [`OTHER_NAMES_SHOWN`] 条**，多了的后头接「等 N 个」，N 是其余叫法一共几条（拿主意的人 2026-10-01 裁）：
+/// 头上那一块的高度不该随文件名的多少涨落，全部叫法在标题那一面。
+pub(crate) fn subtitle_line(loose: bool, also_known_as: Option<&AlsoKnownAs>) -> Option<String> {
+    if loose {
+        return Some("名称取自文件名".to_owned());
+    }
+    let also_known_as = also_known_as?;
+    let others = &also_known_as.others;
+    let parts: Vec<&str> = also_known_as
+        .official
+        .iter()
+        .chain(others.iter().take(OTHER_NAMES_SHOWN))
+        .map(String::as_str)
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let line = parts.join(" · ");
+    Some(if others.len() > OTHER_NAMES_SHOWN {
+        format!("{line} 等 {} 个", thousands(others.len() as u64))
+    } else {
+        line
+    })
+}
+
+/// 作品详情页头上那一句（[`subtitle_line`]）里其余叫法最多列几条，多了接「等 N 个」（拿主意的人 2026-10-01 裁）。
+const OTHER_NAMES_SHOWN: usize = 3;
 
 /// 头上那几格事实（设计稿 `.hfacts`）：平台、年份、类型、开发商、发行商、变体，一排 `hero-facts-columns` 格、整排最宽
 /// `hero-facts-max`；名在上（小号弱字），值在下（正文、拉丁与数字加粗，一行放不下截尾巴）。

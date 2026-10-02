@@ -1635,9 +1635,24 @@ impl Screen {
         }
     }
 
+    /// **这一帧画完了才问封面、排解码**（[`Shelf::sync`]）：画了表、而表开着行首封面或者是卡片墙，或者合并向导开着
+    /// （它第一步那几行左边那一格也走这一份，`Shelf::merge_cover`；向导在表之前画，它那几行也已经记下了）。
+    ///
+    /// `画了表` 为假是作品详情页盖住整屏的那一帧：那时只为向导那几行问。**表没画却照样 sync** 的话，这一帧
+    /// 一行都没记下，`Shelf` 那份解码会把攒着的行首封面当成看不见的清掉，回到表上再重解一遍。
+    fn sync_shelf(
+        &mut self, ctx: &egui::Context, site: &mut Site, writable: bool, 画了表: bool
+    ) {
+        let 表要 = 画了表 && (self.list_covers || self.view == BrowseView::Cards);
+        if 表要 || self.merging.is_some() {
+            self.shelf
+                .sync(ctx, &mut site.catalog, self.pool.as_ref(), writable);
+        }
+    }
+
     fn merge_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
         if let Some(wizard) = self.merging.as_mut() {
-            match wizard.ui(ctx, site, &self.priorities) {
+            match wizard.ui(ctx, site, &self.priorities, &mut self.shelf) {
                 None => {}
                 Some(merge::Done::Close) => self.merging = None,
                 Some(merge::Done::Apply) => self.apply_merge(site),
@@ -3481,6 +3496,8 @@ impl Screen {
         // **作品详情页开着就只画它**（票 `gui-looks-like-the-design/15`）：稿上它盖住整块屏。
         if self.page.is_some() {
             self.page_ui(ui, site);
+            // 底下那张表这一帧不画；合并向导开着的话，它第一步那几行左边那一格要的封面照样得问、得解。
+            self.sync_shelf(ui.ctx(), site, writable, false);
             return;
         }
         // **挑选栏钉在这一屏最上头**（票 `23` 验收第 4 条，设计稿 `.pickbar`）：
@@ -3584,10 +3601,7 @@ impl Screen {
                     }
                 };
                 // **画完表才问封面**：这一帧画到了哪几行，表画完才知道。
-                if self.list_covers || self.view == BrowseView::Cards {
-                    self.shelf
-                        .sync(ui.ctx(), &mut site.catalog, self.pool.as_ref(), writable);
-                }
+                self.sync_shelf(ui.ctx(), site, writable, true);
                 // **一行都没有时说清为什么空着**：表头照旧在（排序、全选都还点得着），
                 // 空态那一句摆在表头底下（照稿 `.empty` 是表里的一行）。
                 if self.window.total() == 0 && self.window.error().is_none() {

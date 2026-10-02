@@ -27,11 +27,13 @@ use romcat_core::filename::Rules;
 use romcat_core::report::{human_bytes, thousands};
 use romcat_core::scrape::{Field, Priorities};
 use romcat_core::site::Site;
+use romcat_core::title::{self, TitleSet};
 use romcat_core::triage::merge::{self, Kind};
 
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
 use crate::look;
+use crate::media::Shelf;
 use crate::table;
 use crate::tokens::Tokens;
 
@@ -79,8 +81,12 @@ struct Row {
     /// **作品名**——核心库那一侧认的是它；还没认出作品的那一行是 `None`，
     /// 它只能当被合并的一侧（保留的那一侧必须说得出作品名，不然没有名字可留作别名）。
     work: Option<String>,
-    /// 屏上那个名字。
+    /// 屏上那个名字：认出作品的是**显示标题**（与作品详情页大标题同一个），认不出的是正题（[`title_of`]）。
     title: String,
+    /// 头一个平台（没有封面时那张小字卡上的水印印它，与作品详情页头上那张同一个取法）；一个都说不出是空串。
+    platform: String,
+    /// 名字底下那一句副标题：与作品详情页头上**同一句**（`work::subtitle_line`）；一条别的叫法都没有时是 `None`。
+    subtitle: Option<String>,
     /// 年份；一条都没刮到时是 `None`（屏上照词表那句写「年份未知」）。
     year: Option<String>,
     /// 底下那些变体里**最高的那档置信度**（与表上那一行同一条口径，`WorkRow::confidence`）。
@@ -121,10 +127,28 @@ impl Row {
             WorkAnchor::Work(_) => Some(detail.name.clone()),
             WorkAnchor::Loose(_) => None,
         };
+        // **认出作品的那一行叫什么、还叫什么，都从它的标题集合挑**：显示标题（`title::choose`）与那一句
+        // （`title::also_known_as`），与作品详情页大标题、头上那一句是同两个函数。粗体写显示标题，不写作品名
+        // （拿主意的人 2026-10-01 裁：照稿 `.mwit` 的 `<b>${w.t}</b>`；底下那一句去掉的正是显示标题）。
+        let (title, also_known_as) = match &work {
+            Some(name) => {
+                let set = TitleSet {
+                    work: name.clone(),
+                    entries: catalog.titles_of(name)?,
+                };
+                (
+                    title::choose(&set, priorities).display,
+                    Some(title::also_known_as(&set, priorities)),
+                )
+            }
+            None => (title_of(&detail, rules), None),
+        };
         Ok(Some(Self {
             anchor: anchor.clone(),
+            subtitle: super::work::subtitle_line(work.is_none(), also_known_as.as_ref()),
+            platform: detail.platforms.first().cloned().unwrap_or_default(),
             work,
-            title: title_of(&detail, rules),
+            title,
             year: detail.year.clone(),
             // **哪一档由核心库答**（`WorkDetail::confidence`，与表上那一行同一条口径）：
             // 界面不自己 match 一遍候选（ADR-0024）。一条候选都没有时 `Tier::of` 把它
@@ -150,8 +174,9 @@ impl Row {
     }
 }
 
-/// 这一行屏上叫什么：认不出作品的那一行是它的**正题**（与表上那一行主栏同一处剥），
-/// 认出作品的就是**作品名**——核心库那一侧按名字认，屏上印别的名字会让人对不上。
+/// 「移出此作品」那一层里这个作品叫什么、合并向导里认不出作品的那一行叫什么：认不出作品的是它的**正题**
+/// （与表上那一行主栏同一处剥），认出作品的是**作品名**——核心库那一侧按名字认。合并向导第一步里认出作品的那一行
+/// 写的是显示标题（[`Row::load`]）。
 fn title_of(detail: &WorkDetail, rules: &Rules) -> String {
     detail.title(rules).unwrap_or_else(|| detail.name.clone())
 }
@@ -456,11 +481,15 @@ impl Wizard {
     }
 
     /// 画这一帧。交回这一帧要办的事。
+    ///
+    /// `shelf` 是浏览屏行首封面那一份（[`Shelf`]）：第一步每一行左边那一格贴哪张、后台解码都走它，
+    /// 摆这一层的那一屏照旧每帧 `Shelf::sync` 一次。
     pub fn ui(
         &mut self,
         ctx: &egui::Context,
         site: &Site,
         priorities: &Priorities,
+        shelf: &mut Shelf,
     ) -> Option<Done> {
         // **页脚先搭好再画内容区**（共用弹层那一层的规矩）：按不按得动看的是这一帧画之前的状态。
         let 走得了 = match self.step {
@@ -493,7 +522,7 @@ impl Wizard {
                     ui.add_space(look::step(1));
                 }
                 match self.step {
-                    0 => self.step_pick(ui, site, priorities),
+                    0 => self.step_pick(ui, site, priorities, shelf),
                     1 => self.step_variants(ui, site),
                     _ => self.step_confirm(ui),
                 }
@@ -517,7 +546,13 @@ impl Wizard {
     }
 
     /// 第一步：**选择要保留的作品**。
-    fn step_pick(&mut self, ui: &mut egui::Ui, site: &Site, priorities: &Priorities) {
+    fn step_pick(
+        &mut self,
+        ui: &mut egui::Ui,
+        site: &Site,
+        priorities: &Priorities,
+        shelf: &mut Shelf,
+    ) {
         look::help(
             ui,
             "选择要保留的作品。其他作品的变体会归入它，它们的名称保留为别名。\
@@ -545,16 +580,13 @@ impl Wizard {
                         thousands(row.variants.len() as u64),
                         row.tier.label(),
                     );
-                    // **「保留」那枚标签紧跟在作品名后头**（稿上 `.mwit` 的 `<b>作品名</b>` 后头就是 `.keepb`，
-                    // 挂单 `Q1015`）：摆在整块后头的话，它离名字隔着整句说明那么远、落在两行之间。
-                    let 点了 = look::radio_option_with(ui, 是保留, &row.title, &一句, |ui| {
-                        if 是保留 {
-                            table::tag(ui, "保留");
-                        } else {
-                            // 没挂标签的那几行也留出标签那么高：不然保留那一行比别的行高出一截，几张卡高矮不齐。
-                            ui.allocate_space(egui::vec2(0.0, Tokens::builtin().layout.tag_height));
-                        }
-                    });
+                    // 右头那颗「移除」要留出来的宽：底下那一句截尾巴截到它左边（稿上 `.mwit` 的第四列 `auto`）。
+                    let 右头 = if self.rows.len() > 2 {
+                        look::small_button_width(ui, "移除") + ui.spacing().item_spacing.x
+                    } else {
+                        0.0
+                    };
+                    let 点了 = 保留那一行(ui, shelf, row, 是保留, &一句, 右头);
                     if 点了.clicked() && 当得了 {
                         换保留 = Some(at);
                     }
@@ -1057,6 +1089,93 @@ fn 平台那一句(row: &Row) -> String {
         return romcat_core::report::UNKNOWN_PLATFORM_LABEL.to_string();
     }
     out.join(" / ")
+}
+
+/// 第一步的**一行**（设计稿 `.mwit` 里那几样）：左边一枚圆点、一格封面缩略图（没有封面画平台色块，
+/// [`Shelf::merge_cover`]），右边一栏字——显示标题（保留的那一个后头紧跟一枚「保留」）、底下「平台 · 年份 ·
+/// 几个变体 · 置信度」那一句、再底下那一句副标题（与作品详情页头上**同一句**，`work::subtitle_line`；一行放不下
+/// 截尾巴）。圆点与那几行字哪一处按下去都算。
+///
+/// 副标题那一句**用比例字**、与说明同一档（拿主意的人 2026-10-01 裁）：稿上那一行是等宽小字，可那是给罗马字的官方名
+/// 用的；这一句拼进了中文、日文的别名，打包的等宽字体只有拉丁字符，汉字回落成常规体、一行里字宽不齐。
+///
+/// 摆法照共用的那一行单选（`.opt`：上下 `option-padding`、几样之间 `option-gap`、名字 `size-small-plus`、
+/// 说明 `size-caption-plus`）；稿上整张卡一颗按钮、四列网格那一套归票 16（差距清单 `M-01`）。
+/// `右头` 是这一行右头还要摆的东西占多宽（「移除」那颗）：副标题那一句截到它左边。
+fn 保留那一行(
+    ui: &mut egui::Ui,
+    shelf: &mut Shelf,
+    row: &Row,
+    是保留: bool,
+    一句: &str,
+    右头: f32,
+) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let palette = look::palette(ui);
+    let 名字号 = look::font_size(ui.ctx(), tokens.font.size_small_plus);
+    let 说明号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
+    let 点得着 = |text: egui::RichText| egui::Label::new(text).sense(egui::Sense::click());
+    ui.add_space(layout.option_padding);
+    let response = ui
+        .horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = layout.option_gap;
+            let 圆点 = look::radio_dot(ui, 是保留);
+            shelf.merge_cover(
+                ui,
+                &row.anchor,
+                row.work.as_deref().unwrap_or_default(),
+                &row.platform,
+            );
+            let 字 = ui
+                .vertical(|ui| {
+                    ui.set_max_width((ui.available_width() - 右头).max(0.0));
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    // 横排一行最矮是 `interact_size.y`（按钮那么高）：清掉它，名字那一行才不被撑高。
+                    ui.spacing_mut().interact_size.y = 0.0;
+                    // **「保留」那枚标签紧跟在作品名后头**（稿上 `.mwit` 的 `<b>作品名</b>` 后头就是 `.keepb`，
+                    // 挂单 `Q1015`）：摆在整块后头的话，它离名字隔着整句说明那么远、落在两行之间。
+                    let 名 = ui
+                        .horizontal(|ui| {
+                            let 名 = ui.add(
+                                点得着(
+                                    egui::RichText::new(&row.title)
+                                        .size(名字号)
+                                        .color(palette.ink),
+                                )
+                                .extend(),
+                            );
+                            if 是保留 {
+                                look::accent_tag(ui, "保留");
+                            } else {
+                                // 没挂标签的那几行也留出标签那么高：不然保留那一行比别的行高出一截，几张卡高矮不齐。
+                                ui.allocate_space(egui::vec2(0.0, layout.tag_height));
+                            }
+                            名
+                        })
+                        .inner;
+                    let mut 合 = 名
+                        | ui.add(点得着(
+                            egui::RichText::new(一句).size(说明号).color(palette.ink_3),
+                        ));
+                    if let Some(副) = &row.subtitle {
+                        合 |= ui.add(
+                            点得着(egui::RichText::new(副).size(说明号).color(palette.ink_3))
+                                .truncate(),
+                        );
+                    }
+                    合
+                })
+                .inner;
+            圆点 | 字
+        })
+        .inner;
+    ui.add_space(layout.option_padding);
+    let enabled = ui.is_enabled();
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, 是保留, &row.title)
+    });
+    response
 }
 
 /// 一格里最多印这么多字，剪掉的补一个省略号（设计稿第三步那两格 `slice(0,80)`）。

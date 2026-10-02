@@ -38,7 +38,7 @@ use crate::scrape::measure::Measured;
 use crate::scrape::pool::MediaPool;
 use crate::scrape::{AnchorKind, MediaKind};
 use crate::shape::Role;
-use crate::title::{Chosen, Language, TitleKind, TitleSet};
+use crate::title::{AlsoKnownAs, Chosen, Language, TitleKind, TitleSet};
 
 /// 一个变体在**首选变体**那条规则里排第几，连它凭什么排在那儿。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +183,9 @@ pub struct VariantDetail {
     pub titles: Vec<TitleRow>,
     /// 从标题集合里挑出来的**显示标题**与**排序标题**；作品未知时是 `None`。
     pub display: Option<Chosen>,
+    /// 这个作品**还叫什么**：官方名称那一条与其余叫法（[`crate::title::also_known_as`]，作品详情页头上那一句）；
+    /// 作品未知时是 `None`。
+    pub also_known_as: Option<AlsoKnownAs>,
     /// 中文标题取的是哪一条叫法。读它走 [`Self::chinese_title`]。
     chinese_title: Option<TitleRow>,
     /// **首选变体**的人工裁决；没人裁过是 `None`（那时按规则算，见 [`Self::preferred_now`]）。
@@ -349,6 +352,9 @@ impl Catalog {
         let display = set
             .as_ref()
             .map(|set| crate::title::choose(set, priorities));
+        let also_known_as = set
+            .as_ref()
+            .map(|set| crate::title::also_known_as(set, priorities));
         let chinese_title = set
             .as_ref()
             .and_then(|set| crate::title::best_chinese(set, priorities))
@@ -392,6 +398,7 @@ impl Catalog {
             reason,
             titles,
             display,
+            also_known_as,
             chinese_title,
             preferred,
             preferred_unmatched,
@@ -738,33 +745,17 @@ impl Catalog {
         Ok(out)
     }
 
-    /// 主列表那几行**各自的封面**：行首那一小格贴哪张（票 `gui-looks-like-the-design/09`）。
+    /// 主列表**一行**的封面：行首那一小格贴哪张（票 `gui-looks-like-the-design/09`）；这一行一张封面都没有是 `None`。
     ///
     /// 每一行看它**自己那个锚点**：认出作品的看作品锚点（封面默认挂在作品这一层，ADR-0009），
     /// 没认出来的看那个变体自己（[`WorkAnchor::scrape_anchor`](super::browse::WorkAnchor::scrape_anchor)，
     /// 与主列表补元数据那一趟同一处取）。一个锚点上有好几张封面时取逐条清单
-    /// （[`VariantDetail::media_items`]）里头一张。
+    /// （[`VariantDetail::media_items`]）里头一张。**一行一次按锚点的查询**：界面只拿视口里新滚进来的
+    /// 那十几行来问，不是整页。
     ///
-    /// 交回的次序与 `rows` 一一对应；这一行一张封面都没有是 `None`。**一行一次按锚点的查询**：
-    /// 界面只拿视口里新滚进来的那十几行来问，不是整页。
-    ///
-    /// # Errors
-    /// 读库失败时返回错误。
-    pub fn row_covers(
-        &self,
-        rows: &[super::browse::WorkRow],
-        pool: Option<&MediaPool>,
-    ) -> Result<Vec<Option<MediaItem>>, CatalogError> {
-        rows.iter()
-            .map(|row| self.cover_of(&row.anchor, &row.name, pool))
-            .collect()
-    }
-
-    /// 主列表**一行**的封面，挑法见 [`Self::row_covers`]。
-    ///
-    /// **侧边详情头上那一格问的也是它**：同一行在表上与详情里贴的是同一张，「这一行的封面是哪张」
-    /// 只在这儿挑一次（ADR-0024）。`name` 是那一行的名字——认出作品的是作品名
-    /// （`WorkRow::name`、`WorkDetail::name`）。
+    /// **侧边详情头上那一格、合并向导第一步那几行左边那一格问的也是它**：同一行在表上、详情里与向导里
+    /// 贴的是同一张，「这一行的封面是哪张」只在这儿挑一次（ADR-0024）。`name` 是那一行的名字——认出作品的
+    /// 是作品名（`WorkRow::name`、`WorkDetail::name`）。
     ///
     /// # Errors
     /// 读库失败时返回错误。

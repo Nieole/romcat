@@ -444,6 +444,48 @@ pub fn best_chinese<'a>(set: &'a TitleSet, priorities: &Priorities) -> Option<&'
         .min_by_key(|entry| rank(entry, priorities))
 }
 
+/// 一部作品**还叫什么**：标题集合里类型为**官方名称**的那一条，与其余几条叫法（由 [`also_known_as`] 挑）。
+///
+/// 作品详情页头上大标题底下那一句（设计稿 `.hsub`）与合并向导每一行底下那一句用的都是它
+/// （票 `gui-draws-the-rest-of-the-design/03`）；那一句怎么拼、摆在屏上哪儿是界面的事。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AlsoKnownAs {
+    /// 类型是官方名称的那一条（屏上那一句打头的副标题）；一条都没有、或者只有显示标题自己那一条时是 `None`。
+    pub official: Option<String>,
+    /// 其余几条叫法：去掉显示标题与上面那一条官方名称，同一串字只留一次。
+    pub others: Vec<String>,
+}
+
+/// 这部作品**还叫什么**：标题集合里类型为**官方名称**的那一条，其余叫法是剩下几条
+/// （票 `gui-draws-the-rest-of-the-design/03`，2026-09-23 grill 裁定的口径）。
+///
+/// **显示标题不在里头**：它已经印在大标题上（[`choose`] 挑的那一个），再说一遍是噪音——所以与显示标题
+/// 同一串字的官方名称不算，轮到下一条官方名称。
+///
+/// 好几条官方名称（英文的、日版罗马字的、几个 DAT 各写一份）里挑哪一条、其余叫法按什么次序排，
+/// **都照 [`choose`] 那把七层排序键**（`rank`）：不另立一套名次，同一份库问两次答的是同一句。
+/// 同一串字在集合里出现好几次（几个源、几种类型都这么叫）只留一次。
+#[must_use]
+pub fn also_known_as(set: &TitleSet, priorities: &Priorities) -> AlsoKnownAs {
+    let display = choose(set, priorities).display;
+    let mut ranked: Vec<&TitleRow> = set.entries.iter().collect();
+    ranked.sort_by_cached_key(|entry| rank(entry, priorities));
+    let official = ranked
+        .iter()
+        .find(|entry| entry.kind == TitleKind::Official && entry.value != display)
+        .map(|entry| entry.value.clone());
+    let mut said: BTreeSet<&str> = [display.as_str()]
+        .into_iter()
+        .chain(official.as_deref())
+        .collect();
+    let others = ranked
+        .iter()
+        .filter(|entry| said.insert(entry.value.as_str()))
+        .map(|entry| entry.value.clone())
+        .collect();
+    AlsoKnownAs { official, others }
+}
+
 /// 一条叫法在回退链上排第几。数字小的排前面。七层的含义见 [`choose`]。
 fn rank(entry: &TitleRow, priorities: &Priorities) -> Rank {
     let bucket = match (entry.language, entry.kind) {
@@ -1769,5 +1811,115 @@ mod tests {
             (chosen.sort.as_str(), chosen.sort_shown.as_str()),
             ("CHRONO TRIGGER", "Chrono Trigger")
         );
+    }
+
+    /// 作品详情页头上那一句（设计稿 `.hsub`）照稿写「官方名称 · 其余叫法」（票 `gui-draws-the-rest-of-the-design/03`）：
+    /// 打头的是类型为官方名称的那一条，其余叫法是剩下几条——显示标题已经印在大标题上，不再说一遍。
+    #[test]
+    fn 还叫什么交出官方名称那一条与其余叫法_显示标题不在里头() {
+        let priorities = Priorities::builtin();
+        let set = 集合(vec![
+            叫法("时空之轮", Language::Chinese, TitleKind::Alias, "文件名"),
+            叫法(
+                "Chrono Trigger",
+                Language::English,
+                TitleKind::Official,
+                "No-Intro",
+            ),
+            叫法(
+                "超时空之钥",
+                Language::Chinese,
+                TitleKind::Translated,
+                "中文离线源",
+            ),
+            叫法(
+                "クロノ・トリガー",
+                Language::Japanese,
+                TitleKind::Alias,
+                "文件名",
+            ),
+        ]);
+        assert_eq!(choose(&set, &priorities).display, "超时空之钥");
+
+        let 还叫 = also_known_as(&set, &priorities);
+        assert_eq!(还叫.official.as_deref(), Some("Chrono Trigger"));
+        assert_eq!(还叫.others, ["时空之轮", "クロノ・トリガー"]);
+    }
+
+    /// 集合里没有官方名称那一类时那一条空着，只剩其余叫法；一条别的叫法都没有时两样都空（那一句整个不画）。
+    #[test]
+    fn 没有官方名称时那一条空着_只剩其余叫法() {
+        let priorities = Priorities::builtin();
+        let set = 集合(vec![
+            叫法(
+                "超时空之钥",
+                Language::Chinese,
+                TitleKind::Translated,
+                "中文离线源",
+            ),
+            叫法(
+                "Chrono_Trigger_fix",
+                Language::Unknown,
+                TitleKind::Alias,
+                "文件名",
+            ),
+            叫法("时空之轮", Language::Chinese, TitleKind::Alias, "文件名"),
+        ]);
+        let 还叫 = also_known_as(&set, &priorities);
+        assert_eq!(还叫.official, None);
+        assert_eq!(还叫.others, ["时空之轮", "Chrono_Trigger_fix"]);
+
+        let 只有它自己 = 集合(vec![叫法(
+            "超时空之钥",
+            Language::Chinese,
+            TitleKind::Translated,
+            "中文离线源",
+        )]);
+        assert_eq!(
+            also_known_as(&只有它自己, &priorities),
+            AlsoKnownAs::default()
+        );
+        assert_eq!(
+            also_known_as(&集合(Vec::new()), &priorities),
+            AlsoKnownAs::default()
+        );
+    }
+
+    /// 显示标题本身就是一条官方名称时（没有中文名的作品）它不算：轮到下一条与它不同的官方名称；
+    /// 几个源写了同一串字，那一串只说一次。
+    #[test]
+    fn 显示标题就是官方名称时轮到下一条官方名称_同一串字只说一次() {
+        let priorities = Priorities::builtin();
+        let set = 集合(vec![
+            叫法(
+                "Chrono Trigger",
+                Language::English,
+                TitleKind::Official,
+                "No-Intro",
+            ),
+            叫法(
+                "Chrono Trigger",
+                Language::English,
+                TitleKind::Official,
+                "TOSEC",
+            ),
+            叫法(
+                "Kuronoo Torigaa",
+                Language::Japanese,
+                TitleKind::Official,
+                "No-Intro",
+            ),
+            叫法(
+                "Chrono Trigger",
+                Language::Unknown,
+                TitleKind::Alias,
+                "文件名",
+            ),
+            叫法("CT (hack)", Language::Unknown, TitleKind::Alias, "文件名"),
+        ]);
+        assert_eq!(choose(&set, &priorities).display, "Chrono Trigger");
+        let 还叫 = also_known_as(&set, &priorities);
+        assert_eq!(还叫.official.as_deref(), Some("Kuronoo Torigaa"));
+        assert_eq!(还叫.others, ["CT (hack)"]);
     }
 }

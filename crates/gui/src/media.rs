@@ -441,8 +441,10 @@ impl Gallery {
 
 /// 主列表**行首那一小格封面**：哪一行贴哪张、后台解码。
 ///
-/// - **贴哪张由核心库答**（`Catalog::row_covers`），这里只缓着问过的那几行——一行问一次，
+/// - **贴哪张由核心库答**（`Catalog::cover_of`），这里只缓着问过的那几行——一行问一次，
 ///   滚回来不再问；刮削跑完、库底下变了由 [`Self::forget`] 作废。
+/// - **合并向导第一步那几行左边那一格也走这一份**（`Shelf::merge_cover`，票
+///   `gui-draws-the-rest-of-the-design/03`）：同一行在表上与向导里贴的是同一张，问过一次就不再问。
 /// - **解码在后台**（[`Gallery`]），与详情面板那几格**分开一份**：那一份只留选中那个变体的图，
 ///   两份合用的话翻几屏列表就把详情里的图挤掉了。
 /// - **没有封面的那一行画平台色块**（`platform_block`），不画灰色占位：大多数作品没有封面。
@@ -450,8 +452,8 @@ impl Gallery {
 pub struct Shelf {
     /// 问过核心库的那几行：它的封面，或者 `None`（问过了，一张都没有）。
     covers: BTreeMap<WorkAnchor, Option<MediaItem>>,
-    /// 这一帧画到的那几行。画完表交给 [`Self::sync`]。
-    seen: Vec<WorkRow>,
+    /// 这一帧画到的那几行：锚点与名字（问封面要的就是这两样，`Catalog::cover_of`）。画完交给 [`Self::sync`]。
+    seen: Vec<(WorkAnchor, String)>,
     /// 行首那些图的后台解码。
     gallery: Gallery,
     /// 问封面那一趟读库出的错。
@@ -485,7 +487,12 @@ impl Shelf {
 
     /// 记录一张当前可见卡片，交给下一帧的 [`Self::sync`] 查询封面。
     pub fn note(&mut self, row: &WorkRow) {
-        self.seen.push(row.clone());
+        self.see(&row.anchor, &row.name);
+    }
+
+    /// 这一帧画到了这一行：锚点与名字（认出作品的是作品名）。
+    fn see(&mut self, anchor: &WorkAnchor, name: &str) {
+        self.seen.push((anchor.clone(), name.to_owned()));
     }
 
     /// **画完表之后每帧一次**：这一帧新画到、还没问过的那几行去问核心库要封面，
@@ -500,37 +507,30 @@ impl Shelf {
         writable: bool,
     ) {
         let seen = std::mem::take(&mut self.seen);
-        let fresh: Vec<WorkRow> = seen
-            .iter()
-            .filter(|row| !self.covers.contains_key(&row.anchor))
-            .cloned()
-            .collect();
-        if !fresh.is_empty() {
-            match catalog.row_covers(&fresh, pool) {
-                Ok(found) => {
-                    for (row, cover) in fresh.into_iter().zip(found) {
-                        self.covers.insert(row.anchor, cover);
-                    }
-                }
+        for (anchor, name) in &seen {
+            if self.covers.contains_key(anchor) {
+                continue;
+            }
+            let cover = match catalog.cover_of(anchor, name, pool) {
+                Ok(cover) => cover,
                 Err(error) => {
                     // **记成「问过了」**：读不动时每帧再问一遍，只是把同一句错刷满。
-                    for row in fresh {
-                        self.covers.insert(row.anchor, None);
-                    }
                     self.error = Some(format!("行首封面读不动：{error}"));
+                    None
                 }
-            }
+            };
+            self.covers.insert(anchor.clone(), cover);
         }
         let items: Vec<MediaItem> = seen
             .iter()
-            .filter_map(|row| self.covers.get(&row.anchor).cloned().flatten())
+            .filter_map(|(anchor, _)| self.covers.get(anchor).cloned().flatten())
             .collect();
         self.gallery.sync(ctx, catalog, &items, writable);
     }
 
     /// 行首那一格：这一行的封面解出来了就贴封面，否则画平台色块。大小照令牌 `thumb-list`。
     pub(crate) fn thumb(&mut self, ui: &mut egui::Ui, row: &WorkRow) {
-        self.seen.push(row.clone());
+        self.note(row);
         let tokens = crate::tokens::Tokens::builtin();
         let [width, height] = tokens.layout.thumb_list;
         let size = egui::vec2(width, height);
@@ -543,7 +543,7 @@ impl Shelf {
 
     /// 卡片视图的封面：仍然由核心库挑哪一张、仍然走这一份后台解码池；没有封面时画字卡。
     pub(crate) fn card(&mut self, ui: &mut egui::Ui, size: egui::Vec2, row: &WorkRow, title: &str) {
-        self.seen.push(row.clone());
+        self.note(row);
         let item = self.covers.get(&row.anchor).and_then(Option::as_ref);
         match item.and_then(|item| self.gallery.texture(item)) {
             Some(texture) => paint_cover(
@@ -558,6 +558,35 @@ impl Shelf {
                 title,
                 row.platforms.first().map_or("", String::as_str),
             ),
+        }
+    }
+}
+
+impl Shelf {
+    /// **合并向导第一步那一行左边那一格**（设计稿 `.mwit .mc`）：这一行的封面解出来了就贴封面（小圆角），
+    /// 否则画平台色块、正中写平台代号（[`platform_block`]，与列表行首那一格同一个画法）。宽取令牌
+    /// `merge-cover-width`、高按 `card-cover-ratio` 折。
+    ///
+    /// **占位上不写作品名**（拿主意的人 2026-10-01 裁）：稿上没封面时是一张小字卡，可 44 点宽里作品名只能逐字母折行、
+    /// 还压在水印上；那一行右边粗体已经写着名字。
+    ///
+    /// 贴哪张与主列表那一行同一处挑（`Catalog::cover_of`：锚点 + 名字，认出作品的是作品名），解码也走这一份——
+    /// 摆它的那一屏照旧每帧 [`Self::sync`] 一次。
+    pub(crate) fn merge_cover(
+        &mut self,
+        ui: &mut egui::Ui,
+        anchor: &WorkAnchor,
+        name: &str,
+        platform: &str,
+    ) {
+        self.see(anchor, name);
+        let tokens = crate::tokens::Tokens::builtin();
+        let width = tokens.layout.merge_cover_width;
+        let size = egui::vec2(width, width / tokens.layout.card_cover_ratio);
+        let item = self.covers.get(anchor).and_then(Option::as_ref);
+        match item.and_then(|item| self.gallery.texture(item)) {
+            Some(texture) => paint_cover(ui, size, tokens.radius.small, texture),
+            None => platform_block(ui, size, platform),
         }
     }
 }
@@ -940,7 +969,7 @@ fn card_face(ui: &mut egui::Ui, face: &Face<'_>) {
     outline(ui, rect, radius);
 }
 
-/// 没有封面时列表行首那一格：**平台色块**，照稿 `.lthumb`——规整的小圆角矩形（令牌 `radius.small`），
+/// 没有封面时列表行首那一格（合并向导第一步那一格也是它，[`Shelf::merge_cover`]）：**平台色块**，照稿 `.lthumb`——规整的小圆角矩形（令牌 `radius.small`），
 /// 平台色调进次级底色的底、顶上一道平台色、正中写平台代号，外头一圈分隔线。
 pub(crate) fn platform_block(ui: &mut egui::Ui, size: egui::Vec2, platform: &str) {
     let tokens = crate::tokens::Tokens::builtin();

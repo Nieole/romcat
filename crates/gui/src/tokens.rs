@@ -1084,6 +1084,8 @@ pub struct Layout {
     pub hero_card_mark_offset: [f32; 2],
     /// 头上那张字卡的标题至多几行（设计稿 `.tc-t`）。
     pub hero_card_title_rows: usize,
+    /// 合并向导第一步每一行左边封面那一格的宽，高按 `card_cover_ratio` 折（设计稿 `.mwit .mc`）。
+    pub merge_cover_width: f32,
     /// 概览里媒体那一块摆几格（设计稿 `.mstrip`）。
     pub media_strip_columns: usize,
     /// 概览左右两栏的比例：`[左, 右]`（设计稿 `.ov`）。

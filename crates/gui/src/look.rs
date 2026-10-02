@@ -714,6 +714,8 @@ pub enum Tone {
     Bad,
     /// 强调：令牌 `accent-ink` 的字、`accent-soft` 的底（设计稿 `.t-acc`）——子库屏「尚未生成差量预览」。
     Accent,
+    /// 强调实底：令牌 `on-accent` 的字、`accent` 的底（设计稿 `.keepb`）——合并向导第一步那枚「保留」（[`accent_tag`]）。
+    AccentSolid,
 }
 
 /// 一档**置信度**的标签用哪种语气：高置信放心、中置信留神、低置信要紧、没有候选不置可否
@@ -746,6 +748,7 @@ fn tone_colors_in(palette: &Palette, tone: Tone) -> (Color32, Color32) {
         Tone::Neutral => (palette.none, palette.none_soft),
         Tone::Bad => (palette.lo, palette.lo_soft),
         Tone::Accent => (palette.accent_ink, palette.accent_soft),
+        Tone::AccentSolid => (palette.on_accent, palette.accent),
     }
 }
 
@@ -771,7 +774,10 @@ pub fn chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
         tone,
         text,
         [layout.chip_height, layout.chip_padding, layout.chip_gap],
-        Tokens::builtin().font.size_caption_plus,
+        (
+            Tokens::builtin().font.size_caption_plus,
+            egui::FontFamily::Proportional,
+        ),
         true,
     )
 }
@@ -784,7 +790,10 @@ pub fn plain_chip(ui: &mut egui::Ui, tone: Tone, text: &str) -> egui::Response {
         tone,
         text,
         [layout.chip_height, layout.chip_padding, layout.chip_gap],
-        Tokens::builtin().font.size_caption_plus,
+        (
+            Tokens::builtin().font.size_caption_plus,
+            egui::FontFamily::Proportional,
+        ),
         false,
     )
 }
@@ -800,19 +809,37 @@ pub fn read_only(ui: &mut egui::Ui, text: &str) -> egui::Response {
         Tone::Good,
         text,
         [layout.ro_height, layout.ro_padding, layout.ro_gap],
-        tokens.font.size_small,
+        (tokens.font.size_small, egui::FontFamily::Proportional),
         true,
     )
 }
 
-/// 标签与只读标签共用的画法：`[高, 左右留白, 圆点与字的间距]`，这个字号（按倍率取整），圆点直径取令牌 `chip-dot`。
-/// `圆点` 为假时不画点、也不留点那一格（[`plain_chip`]）。
+/// 一枚**强调色实底的标签**（设计稿 `.keepb`，合并向导第一步保留的那个作品名后头那一枚「保留」）：强调色的底、
+/// 强调色上的字色（`on-accent`），字是 `size-caption`（稿 11px）、粗体那一族（字体预算只粗拉丁与数字，中文照旧常规体）；
+/// 高与左右留白与行内标签同（`tag-height` / `tag-padding`，稿上 `.keepb` 与 `.tag` 一样是 20 与 7），圆角取 `radius.small`。
+///
+/// 拿主意的人 2026-10-01 在票 `gui-draws-the-rest-of-the-design/01` 人的关上裁：照稿改，不再借灰底的行内标签
+/// （`table::tag`）。画法与 [`chip`] 同一处（[`Tone::AccentSolid`] 那一对颜色，不画圆点）。
+pub fn accent_tag(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    tag(
+        ui,
+        Tone::AccentSolid,
+        text,
+        [tokens.layout.tag_height, tokens.layout.tag_padding, 0.0],
+        (tokens.font.size_caption, crate::font::strong_family()),
+        false,
+    )
+}
+
+/// 几种标签共用的画法：`[高, 左右留白, 圆点与字的间距]`，`(字号, 字体族)`（字号按倍率取整），圆点直径取令牌
+/// `chip-dot`。`圆点` 为假时不画点、也不留点那一格（[`plain_chip`]、[`accent_tag`]）。
 fn tag(
     ui: &mut egui::Ui,
     tone: Tone,
     text: &str,
     [高, 边, 缝]: [f32; 3],
-    字号: f32,
+    (字号, 字体族): (f32, egui::FontFamily),
     圆点: bool,
 ) -> egui::Response {
     let tokens = Tokens::builtin();
@@ -820,7 +847,7 @@ fn tag(
     let 字号 = font_size(ui.ctx(), 字号);
     let galley = egui::WidgetText::from(
         egui::RichText::new(text)
-            .font(egui::FontId::proportional(字号))
+            .font(egui::FontId::new(字号, 字体族))
             .color(字色),
     )
     .into_galley(
@@ -915,35 +942,10 @@ pub fn note_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R
 /// 一行**单选**（设计稿 `.opt`）：左边一枚圆点（[`radio_dot`]），右边名字、底下一行说明小字，整行按得动。
 /// 行内间距与上下留白取令牌 `option-gap` / `option-padding`；名字 `size-small-plus`、说明 `size-caption-plus`（稿 12.5 / 11.5）。
 ///
-/// 交回整行的点击（圆点、名字、说明哪一处按下去都算）。名字后头还要接东西的用 [`radio_option_with`]；
-/// 一行里要摆的不止名字与说明的，拿 [`radio_dot`] 自己拼。
+/// 交回整行的点击（圆点、名字、说明哪一处按下去都算）。一行里要摆的不止名字与说明的（合并向导第一步那一行：
+/// 封面缩略图、名字后头那枚「保留」、底下那一句副标题），拿 [`radio_dot`] 自己拼。
 pub fn radio_option(ui: &mut egui::Ui, selected: bool, title: &str, note: &str) -> egui::Response {
-    radio_option_in(ui, selected, title, note, None)
-}
-
-/// 同 [`radio_option`]，名字**后头紧跟着**再摆一样东西（`名字后头` 摆，与名字同一行、隔 `option-gap`）。
-/// 合并向导第一步那枚「保留」标签就摆在这儿（设计稿 `.mwit` 里 `<b>作品名</b>` 后头的 `.keepb`，挂单 `Q1015`）。
-pub fn radio_option_with(
-    ui: &mut egui::Ui,
-    selected: bool,
-    title: &str,
-    note: &str,
-    名字后头: impl FnOnce(&mut egui::Ui),
-) -> egui::Response {
-    radio_option_in(ui, selected, title, note, Some(Box::new(名字后头)))
-}
-
-/// 名字那一行后头再摆的那一样（[`radio_option_with`]）；没有就是 `None`。
-type 后头摆的<'a> = Option<Box<dyn FnOnce(&mut egui::Ui) + 'a>>;
-
-fn radio_option_in(
-    ui: &mut egui::Ui,
-    selected: bool,
-    title: &str,
-    note: &str,
-    名字后头: 后头摆的<'_>,
-) -> egui::Response {
-    let response = option_row(ui, title, note, |ui| radio_dot(ui, selected), 名字后头);
+    let response = option_row(ui, title, note, |ui| radio_dot(ui, selected));
     let enabled = ui.is_enabled();
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, title)
@@ -964,19 +966,12 @@ pub fn checkbox_option(
 ) -> egui::Response {
     let 边长 = Tokens::builtin().layout.checkbox_size;
     let mut 方框那一格 = None;
-    let mut response = option_row(
-        ui,
-        title,
-        note,
-        |ui| {
-            let 行高 = option_line_height(ui);
-            let (_, response) =
-                ui.allocate_exact_size(egui::vec2(边长, 行高), egui::Sense::click());
-            方框那一格 = Some(response.clone());
-            response
-        },
-        None,
-    );
+    let mut response = option_row(ui, title, note, |ui| {
+        let 行高 = option_line_height(ui);
+        let (_, response) = ui.allocate_exact_size(egui::vec2(边长, 行高), egui::Sense::click());
+        方框那一格 = Some(response.clone());
+        response
+    });
     // **先拨再画**：点在名字或说明上的那一下也得当帧画成拨过之后的样子。
     let 勾着 = 拨一下(ui, &mut response, checked, title);
     if let Some(那一格) = 方框那一格
@@ -991,14 +986,12 @@ pub fn checkbox_option(
 
 /// 设计稿 `.opt` 那一行：上下各留 `option-padding`；左边一枚记号（`mark` 摆，圆点或方框，高是名字那一行），
 /// 隔 `option-gap`，右边一栏名字（`size-small-plus`、`ink`）与底下一行说明（`size-caption-plus`、`ink-3`），两行左沿对齐。
-/// 给了 `名字后头` 的，名字那一行后头再摆它（同一行、隔 `option-gap`）。
 /// 交回整行的点击（记号、名字、说明哪一处按下去都算）。
 fn option_row(
     ui: &mut egui::Ui,
     title: &str,
     note: &str,
     mark: impl FnOnce(&mut egui::Ui) -> egui::Response,
-    名字后头: 后头摆的<'_>,
 ) -> egui::Response {
     let tokens = Tokens::builtin();
     let layout = &tokens.layout;
@@ -1016,19 +1009,7 @@ fn option_row(
                     egui::Label::new(egui::RichText::new(title).size(名字号).color(palette.ink))
                         .extend()
                         .sense(egui::Sense::click());
-                let 名 = match 名字后头 {
-                    None => ui.add(名字),
-                    // 横排一行最矮是 `interact_size.y`（按钮那么高）：清掉它，名字那一行才不被撑高。
-                    Some(后头) => {
-                        ui.spacing_mut().interact_size.y = 0.0;
-                        ui.horizontal(|ui| {
-                            let 名 = ui.add(名字);
-                            后头(ui);
-                            名
-                        })
-                        .inner
-                    }
-                };
+                let 名 = ui.add(名字);
                 let 注 = ui.add(
                     egui::Label::new(egui::RichText::new(note).size(说明号).color(palette.ink_3))
                         .sense(egui::Sense::click()),
@@ -2717,6 +2698,7 @@ mod tests {
             (Tone::Neutral, ["none", "none-soft"]),
             (Tone::Bad, ["lo", "lo-soft"]),
             (Tone::Accent, ["accent-ink", "accent-soft"]),
+            (Tone::AccentSolid, ["on-accent", "accent"]),
         ] {
             let (字, 底) = 标签(tone);
             颜色.push((format!("标签（{tone:?}）的字"), 字, 字键));
