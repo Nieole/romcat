@@ -10,7 +10,7 @@ use romcat_gui::tokens::Tokens;
 use romcat_gui::{headless, look};
 
 mod shared;
-use shared::{按键事件, 输入};
+use shared::{填着这个颜色的框, 按键事件, 输入};
 
 /// 页脚上按下去的是哪一颗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,26 +402,6 @@ fn 弹层里的输入框滚出视口也不被回收() {
 }
 
 // ——— 页脚 ———
-
-/// 这一帧画出来的那些**填着这个颜色的框**。
-fn 填着这个颜色的框(output: &egui::FullOutput, color: egui::Color32) -> Vec<egui::Rect> {
-    fn 收(shape: &egui::epaint::Shape, color: egui::Color32, out: &mut Vec<egui::Rect>) {
-        match shape {
-            egui::epaint::Shape::Rect(rect) if rect.fill == color => out.push(rect.rect),
-            egui::epaint::Shape::Vec(shapes) => {
-                for one in shapes {
-                    收(one, color, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    for clipped in &output.shapes {
-        收(&clipped.shape, color, &mut out);
-    }
-    out
-}
 
 #[test]
 fn 页脚上的主按钮画成强调色_其余几颗不是() {

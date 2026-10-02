@@ -140,8 +140,28 @@ const SEARCH_HITS: u64 = 6;
 /// **屏上又常驻着理由**（[`PREVIEW_NOTE`] 那条提示框，没排过预览就一直摆着）。
 /// 而它同时要求「那句理由只许有一处」——所以守卫拒下时说的与按不动那颗悬停里写的
 /// **是同一个常量**，各写一份就回到了这条规矩本来要防的「两份迟早分叉」。
-const NO_PREVIEW: &str = "还没排过差量预览：同步前必须先看一遍它要做什么（ADR-0016）。\
+///
+/// **不写 ADR 编号**（票 gl-03 立的规矩：屏上不出现 `ADR-`；它画在「同步」按不动时的悬停里，也是守卫拒下时那句话）：
+/// 「同步前必须先预览」出自 ADR-0016，写在这条文档里。
+const NO_PREVIEW: &str = "还没排过差量预览：同步前必须先看一遍它要做什么。\
      按「生成差量预览」排一趟。";
+
+/// 排过差量、**一步都不用做**时「同步」旁边那一句，也是那颗按不动时悬停里的那一句。
+const ALIGNED: &str = "一步都不用做：目标已经和选择集对齐了。";
+
+/// 台上这一屏排的那一趟（排差量或同步）还没跑完时「同步」为什么按不动（[`Screen::sync_refusal`]）。
+const BUSY: &str = "按不动：台上这一趟还没跑完。";
+
+/// 计划里有删除、还没勾「我看过删除清单」时为什么按不动「同步」——**守卫拒下时说的与按不动那颗悬停里写的是同一句**
+/// （ADR-0005「『不禁按钮』那一条什么时候允许同时画灰」那一节：那句理由只许有一处）。勾选那一格常驻在按钮左边，
+/// 理由一直在屏上。
+fn 先点头(deletes: &romcat_core::sync::Tally) -> String {
+    format!(
+        "这份计划里有 {} 个删除（{}）。看过上面的预览之后，勾上「我看过删除清单」再来。",
+        thousands(deletes.files),
+        human_bytes(deletes.bytes),
+    )
+}
 
 /// 还没排过差量预览时卡上那条提示框（设计稿 `diffHTML` 的 `.note`）。
 ///
@@ -150,6 +170,11 @@ const NO_PREVIEW: &str = "还没排过差量预览：同步前必须先看一遍
 /// 逐字照稿（正面那一说）。
 const PREVIEW_NOTE: &str = "同步前需要先生成差量预览，确认将要进行的更改。\
      生成预览只读取数据，不会写入任何文件。选择集修改后，已有的预览会失效。";
+
+/// **刚同步完**那张卡上的提示框：照稿去掉末句「选择集修改后…」（设计稿 `diffHTML` 的 `s.synced?'':…`，差距 D-02）。
+/// 前两句与 [`PREVIEW_NOTE`] 逐字一样（测试钉着）。
+const PREVIEW_NOTE_SYNCED: &str = "同步前需要先生成差量预览，确认将要进行的更改。\
+     生成预览只读取数据，不会写入任何文件。";
 
 /// 卡不在位时容量图例底下那一行普通小字（设计稿 `devCard`；逐字照稿、样式也照稿，拿主意的人定）。
 const ABSENT_NOTE: &str = "设备未连接时仍可计算已选容量；\
@@ -246,6 +271,28 @@ impl Anomaly {
             Self::NoFit,
         ]
     }
+}
+
+/// 卡头那枚**状态标签**说的是哪一档（设计稿 `devState`，[`Screen::chip_state`] 答）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum 卡头 {
+    /// 卡不在位。
+    未连接,
+    /// 台上正跑着这一台的排差量预览（差距 D-03）。
+    正在生成差量预览,
+    /// 台上正跑着这一台的同步（差距 D-03）。
+    正在同步,
+    /// 排过差量，这一趟要动这么多个文件。
+    待同步(u64),
+    /// 目标已经对齐：排过差量、一步都不用做，或者刚干干净净同步完。
+    已同步 {
+        /// 清单记着几条；读不动或者还是空的时候是 `None`（那时写「已经对齐」，不编一个数）。
+        清单: Option<usize>,
+        /// 是刚同步完（还没再排过差量）的那一种。
+        刚同步完: bool,
+    },
+    /// 没排过差量预览。
+    尚未生成差量预览,
 }
 
 /// 「**目标设置**」那层弹层开着时，开的是哪一种。
@@ -659,13 +706,19 @@ pub struct Screen {
     /// **它同时是认领凭据**：跑完的那一趟按号对得上才收（[`Screen::settle`]）。
     /// **但它不是「那一趟认哪份计划」的凭据**——计划在排它那一刻就整份交给了台上那趟活，
     /// 屏上这一份此后怎么变都影响不到它（模块文档「台上那一趟认的是排它时那份计划」）。
-    syncing: Option<u64>,
+    ///
+    /// 连着记**同步的是哪一台**：跑着时那张卡的卡头说「正在同步」（[`卡头`]），收场时提示条上说得出是哪一台。
+    syncing: Option<(u64, String)>,
     /// 上一趟同步的账。
     outcome: Option<Outcome>,
-    /// 上一次动作的回执。
+    /// 上一次动作的回执（排差量预览、算容量被停下时那一句）。**同步的回执不在这儿**：它进任务台历史，
+    /// 屏上只一条底边提示条（[`Self::receipt`]，拿主意的人 2026-10-01 裁 `F-7`）。
     notice: Option<String>,
-    /// 上一趟同步有没有出岔子（被停、放弃、有步骤失败）。回执照红的画。
-    failed: bool,
+    /// 同步收场时底边那条提示条（拿主意的人 2026-10-01 裁 `F-7` A，照 `Q664` 刮削弹层的先例）：一句话说哪一台、
+    /// 怎么收的场（词照任务台历史那一行，`Ending::word`）；没走完、出了岔子的带一颗「查看任务」——下文在任务台历史里。
+    receipt: Option<Toast>,
+    /// 提示条上的「查看任务」按下去了，等窗口把人送去任务屏（[`Self::take_tasks_jump`]）。
+    to_tasks: bool,
     /// 上一次出的错。
     error: Option<String>,
 }
@@ -706,6 +759,8 @@ impl Screen {
             syncing: None,
             outcome: None,
             notice: None,
+            receipt: None,
+            to_tasks: false,
             vetted: None,
             name_vetted: None,
             overrides: BTreeMap::new(),
@@ -722,7 +777,6 @@ impl Screen {
             counting_failed: None,
             saved: None,
             sample_directory: None,
-            failed: false,
             error: None,
         }
     }
@@ -1025,7 +1079,7 @@ impl Screen {
     /// 排上任务台的那一趟同步是第几号。
     #[must_use]
     pub fn syncing(&self) -> Option<u64> {
-        self.syncing
+        self.syncing.as_ref().map(|(id, _)| *id)
     }
 
     /// 某一台设备卡上那根**容量条**：选中的、清单之外的、上限。
@@ -1094,6 +1148,17 @@ impl Screen {
     #[must_use]
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
+    }
+
+    /// 同步收场时底边那条提示条上的那句话；没有就是 `None`。提示条收起来（停够了，或者按了「查看任务」）之后也是 `None`。
+    #[must_use]
+    pub fn receipt(&self) -> Option<&str> {
+        self.receipt.as_ref().map(Toast::text)
+    }
+
+    /// 提示条上的「查看任务」按下去了没有。**取走就清掉**：窗口每帧问一次（`App::route`），换到任务屏只换一回。
+    pub fn take_tasks_jump(&mut self) -> bool {
+        std::mem::take(&mut self.to_tasks)
     }
 
     /// 「目标设置」那层弹层里那份草稿，供实测与测试填。
@@ -1338,9 +1403,8 @@ impl Screen {
         } else if self.evaluating == Some(done.id) {
             self.evaluating = None;
             self.settle_evaluate(done);
-        } else if self.syncing == Some(done.id) {
-            self.syncing = None;
-            self.settle_sync(site, done);
+        } else if let Some((_, name)) = self.syncing.take_if(|(id, _)| *id == done.id) {
+            self.settle_sync(site, &name, done);
         } else if let Some((_, name)) = self.reading_footprint.take_if(|(id, _)| *id == done.id) {
             self.settle_footprint(name, done);
         } else if let Some((_, text)) = self.counting.take_if(|(id, _)| *id == done.id) {
@@ -1377,7 +1441,6 @@ impl Screen {
                      一个字节都没动，再排一次就是。",
                     Ending::<()>::Stopped.render(),
                 ));
-                self.failed = false;
             }
             // **不静默结束**：哪一步、为什么，两样都说出来。
             Ending::Failed { step, why } => {
@@ -1409,7 +1472,6 @@ impl Screen {
                      再算一次就是。",
                     Ending::<()>::Stopped.render(),
                 ));
-                self.failed = false;
             }
             Ending::Failed { step, why } => {
                 self.error = Some(format!(
@@ -1420,18 +1482,22 @@ impl Screen {
         }
     }
 
-    /// 同步那一趟回来了：**清单落回中立库**，然后把这一趟的账摆出来。
+    /// 同步那一趟回来了：**清单落回中立库**，回执交给任务台历史，屏上只摆一条底边提示条。
     ///
     /// **清单要在这一步写**——台上那条线拿的是只读连接，写不动（[`Product::Synced`]
     /// 的文档）。**被按停的那一趟也要落清单**：那份清单记的是「到中断为止目标上真实有
     /// 什么」，下一趟才接得上。
-    fn settle_sync(&mut self, site: &mut Site, done: Finished<Product>) {
-        let elapsed = done.elapsed.as_secs_f64();
-        match done.ended {
+    ///
+    /// ## 回执去哪儿（拿主意的人 2026-10-01 裁 `F-7` A）
+    ///
+    /// 照 `Q664`（刮削弹层排上就关、回执交给任务台）的先例：**这一趟的回执是任务台历史那一行**——名字、耗时、
+    /// 收场与下文都在那儿（`Record`）。屏上不再起一段屏顶的字（从前成功也画成警示黄），只一条底边提示条
+    /// （[`sync_receipt`]）：说哪一台、怎么收的场；没走完或出了岔子的带一颗「查看任务」。
+    fn settle_sync(&mut self, site: &mut Site, name: &str, done: Finished<Product>) {
+        let 收场 = done.ended.forget();
+        let outcome = match done.ended {
             // **跑完的那一趟与「停在半路」那一趟走同一条**：后者交出来的清单同样是真的
             // ——它记着「到中断为止目标上真实有什么」，不落库下一趟就接不上（ADR-0015）。
-            // 回执里那句「⚠️ 这一趟被你按停了」由 `sync_notice` 照 `interrupted` 印，
-            // 与任务屏历史那一行说的是同一件事。
             Ending::Done(Product::Synced(outcome))
             | Ending::Halfway {
                 product: Product::Synced(outcome),
@@ -1447,9 +1513,6 @@ impl Screen {
                          放上去的东西当成「清单之外」，于是碰都不敢碰。先修好中立库再跑一次。"
                     ));
                 }
-                self.notice = Some(sync_notice(&outcome, elapsed));
-                self.failed =
-                    outcome.interrupted || outcome.gave_up || !outcome.failures.is_empty();
                 // 传完之后那份预览说的已经是过去时了：目标现在是另一个样子。
                 //
                 // **只清掉这一台的那一份。** 台上排着队可能排上几十分钟，认领回来的时候
@@ -1463,28 +1526,25 @@ impl Screen {
                     self.prepared = None;
                     self.acknowledged = false;
                 }
-                self.outcome = Some(*outcome);
+                Some(*outcome)
             }
-            Ending::Done(_) | Ending::Halfway { .. } => {}
+            // 别的屏排上去的活轮不到这儿（任务号已经挡掉了），这一支只为把 `Product` 配全。
+            Ending::Done(_) | Ending::Halfway { .. } => None,
             // **走到这儿的只有「还排着队就被撤掉」那一种**：真跑起来的那一趟被按停时
-            // 照旧交出产物（[`Product::Synced`] 的文档），走的是上面那一支
-            // ——那是「停了，留下了产物」，这一支是「停了，什么都没留下」。
-            // 于是这一句敢说「一个字节都没动」。
-            Ending::Stopped => {
-                self.notice = Some(
-                    "同步还没轮到就被撤掉了。目标设备上一个字节都没动，那份差量还摆着，\
-                     再按一次同步就是。"
-                        .to_string(),
-                );
-                self.failed = false;
-            }
-            Ending::Failed { step, why } => {
-                self.error = Some(format!(
-                    "同步{}",
-                    Ending::<()>::Failed { step, why }.render()
-                ));
-            }
+            // 照旧交出产物（[`Product::Synced`] 的文档），走的是上面那一支。
+            // 「出错了」那一档的下文（哪一步、为什么）在任务台历史那一行里。
+            Ending::Stopped | Ending::Failed { .. } => None,
+        };
+        let (说的, 查看任务) = sync_receipt(name, &收场, outcome.as_ref());
+        let mut toast = Toast::new(说的);
+        if 查看任务 {
+            toast = toast.action(VIEW_TASKS);
         }
+        // **一次只摆一条**：目标设置存下之后那一条换成这一条。删掉一台之后那条带「撤销」的照旧摆着、先画它
+        // （[`Self::toast_ui`]）——这一条等它收起再出来，不替人把撤销丢掉。
+        self.saved = None;
+        self.receipt = Some(toast);
+        self.outcome = outcome;
     }
 
     /// **删减建议表上按「排除」**：把这个变体记成这台设备的一条**排除例外**，然后重算一遍容量。
@@ -1631,13 +1691,17 @@ impl Screen {
     ///
     /// 界面上按那个按钮走的就是它，实测与测试拿它当那一下。
     pub fn sync(&mut self, site: &Site, tasks: &mut Tasks) {
-        if self.syncing.is_some() {
-            return;
-        }
-        let Some(prepared) = self.prepared.clone() else {
-            // 这句话不是提示，是这一屏的规矩：没预览就没有可传的东西。
-            self.error = Some(NO_PREVIEW.to_string());
-            return;
+        // **按钮画灰的那几档，守卫拒下时问的是同一处、说的是同一句**（[`Self::sync_refusal`]，ADR-0005
+        // 「『不禁按钮』那一条什么时候允许同时画灰」：守卫要拒得明明白白，那句理由只许有一处）。
+        let prepared = match (
+            self.sync_refusal(self.prepared.as_ref().map(|prepared| &prepared.plan)),
+            self.prepared.clone(),
+        ) {
+            (None, Some(prepared)) => prepared,
+            (why, _) => {
+                self.error = Some(why.unwrap_or_else(|| NO_PREVIEW.to_string()));
+                return;
+            }
         };
         // **排完差量之后卡被拔了，就不排**：同步那一趟起手就把目标根建出来，卡拔了之后那个路径
         // 指着的是本机的盘——一份子库会被悄悄写进本机一个新建的空目录里。这是按下去之前就判得出
@@ -1645,14 +1709,6 @@ impl Screen {
         // 被拔）是跑起来才撞上的，照旧记失败（[`run_sync`]）。
         if let Some(why) = target_absent(&prepared.root) {
             self.error = Some(why);
-            return;
-        }
-        if prepared.plan.deletes.files > 0 && !self.acknowledged {
-            self.error = Some(format!(
-                "这份计划里有 {} 个删除（{}）。看过上面的预览之后，勾上「我看过删除清单」再来。",
-                thousands(prepared.plan.deletes.files),
-                human_bytes(prepared.plan.deletes.bytes),
-            ));
             return;
         }
         if let Err(message) =
@@ -1687,13 +1743,33 @@ impl Screen {
         // **计划在这一刻整份交出去。** 闭包拿的是它自己那一份，屏上那一份此后作废也好、
         // 重排也好，都改不了台上这一趟要做的事（这条正是 ADR-0016 在搬上任务台之后
         // 还成立的原因）。
-        self.syncing = Some(tasks.queue(format!("同步「{name}」"), move |task| {
+        let id = tasks.queue(format!("同步「{name}」"), move |task| {
             run_sync(&prepared, library_roots.as_ref(), task)
                 .map(|outcome| Product::Synced(Box::new(outcome)))
-        }));
+        });
+        self.syncing = Some((id, name));
         self.error = None;
         self.notice = None;
-        self.failed = false;
+    }
+
+    /// **「同步」这一下拒不拒、为什么**——`None` 就是按得动。卡底那颗画不画灰（[`Self::actions_ui`]）与守卫拒不拒
+    /// （[`Self::sync`]）问的是这同一处，说的是同一句（ADR-0005「『不禁按钮』那一条什么时候允许同时画灰」：
+    /// 守卫拒得明明白白、那句理由只许有一处）。`plan` 是那一台手上那份有效预览。
+    ///
+    /// 次序：没有有效预览（[`NO_PREVIEW`]，提示框常驻着）→ 台上那一趟还没跑完（按钮旁边那一句说着进度）→
+    /// 一步都不用做（[`ALIGNED`]，按钮旁边常驻）→ 有删除还没点头（[`先点头`]，那一格就在按钮左边）。
+    /// 「盘上缺一样东西」那几档（卡拔了、主库那块盘没插）**不在这儿**：它们不画灰，按下去才在屏上说（同一节）。
+    fn sync_refusal(&self, plan: Option<&romcat_core::sync::Plan>) -> Option<String> {
+        let Some(plan) = plan else {
+            return Some(NO_PREVIEW.to_string());
+        };
+        if self.syncing.is_some() || self.previewing.is_some() {
+            return Some(BUSY.to_string());
+        }
+        if plan.touched() == 0 {
+            return Some(ALIGNED.to_string());
+        }
+        (plan.deletes.files > 0 && !self.acknowledged).then(|| 先点头(&plan.deletes))
     }
 
     /// 画一帧。
@@ -2066,13 +2142,9 @@ impl Screen {
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
+        // 排差量预览、算容量被停下时那一句（同步的回执不在这儿：底边一条提示条，[`Self::receipt`]）。
         if let Some(notice) = &self.notice {
-            let color = if self.failed {
-                ui.visuals().error_fg_color
-            } else {
-                ui.visuals().warn_fg_color
-            };
-            ui.colored_label(color, notice);
+            ui.colored_label(ui.visuals().warn_fg_color, notice);
         }
         if self.list.is_empty() {
             // **空态，不是示例设备**（票 `gui-looks-like-the-design/20`）：设计稿脚本里那两台是给稿子
@@ -2110,7 +2182,7 @@ impl Screen {
         look::card(ui, egui::Vec2::splat(step(3)), |ui| {
             ui.horizontal(|ui| {
                 ui.label(font::strong(&sublibrary.name).size(Tokens::builtin().font.size_title));
-                self.state_chip_ui(ui, &sublibrary);
+                self.state_chip_ui(ui, &sublibrary, tasks);
                 // 右边两颗照稿（设计稿 `devCard`）：`btn sm pri` 在左、`btn sm ghost`「目标设置…」靠右。
                 // 主按钮的字照稿写「从浏览添加…」（拿主意的人定，挂单 `Q892`），行为也照字：跳去浏览屏、筛选器空着，
                 // 回来新添一条，已有的一条不碰（拿主意的人 2026-09-30 改裁，挂单 `Q1269`）。
@@ -2176,30 +2248,37 @@ impl Screen {
                 self.exclude(site, tasks, name, &key);
             }
             ui.add_space(step(2));
-            if open {
-                self.delta_ui(ui, site, tasks);
-                return;
-            }
-            // 没排过差量预览、目标又在位时，照稿先摆一条提示框（设计稿 `diffHTML` 的 `.note`）。
-            if !self.absent.contains(name) {
-                note_ui(ui, PREVIEW_NOTE);
+            // **差量预览一次只摆一台的**（它是同步认的那一份计划，见 `prepared`）：摊开那一张摆它，
+            // 别的卡（以及摊开却还没排过的那一张）在位时照稿摆一条提示框（设计稿 `diffHTML` 的 `.note`）。
+            if open && let Some(prepared) = self.prepared.clone() {
+                self.plan_ui(ui, site, tasks, &prepared);
+                ui.add_space(step(2));
+            } else if !self.absent.contains(name) {
+                note_ui(ui, self.preview_note(name));
                 ui.add_space(step(2));
             }
-            // **差量预览一次只摆一台的**（它是同步认的那一份计划，见 `prepared`）。别的卡底下照稿摆一排
-            // 「生成差量预览 / 同步 / 删除子库」，按哪一颗都先换成这一台（[`Self::actions_ui`]）。
-            self.actions_ui(ui, site, tasks, name, false);
+            // **底排摆在卡最底**（拿主意的人 2026-10-01 裁 `F-1` A，照稿 `devCard`）：差量账、计划、异常都在它上面，
+            // 人按「同步」之前先看过它们（ADR-0016）。每张卡同一排，按哪一颗都先换成这一台（[`Self::actions_ui`]）。
+            self.actions_ui(ui, site, tasks, name, open);
         });
     }
 
-    /// 卡底那一排（设计稿 `devCard` 底下）：「生成差量预览」「同步」，卡不在位时旁边一句「请先连接设备」，
-    /// 右头一颗小号「删除子库」。
+    /// 卡底那一排（设计稿 `devCard` 底下）：「生成差量预览」、「同步」（主按钮），卡不在位时旁边一句「请先连接设备」，
+    /// 右头一颗小号「删除子库」。**每张卡都在卡最底**（拿主意的人 2026-10-01 裁 `F-1` A）：从前摊开那一张把这一排挪到
+    /// 差量上头、「同步」另摆在最底且是默认样式。
     ///
     /// **按哪一颗都先把这张卡摊开**（拿主意的人 2026-09-14 定，挂单 `Q859`）：差量预览、同步认的都是摊开那一台，
-    /// 删除那层弹层问的也是它。**摊开那一张不在这一排摆「同步」**：它的「同步」在差量底下，与「我看过删除清单」
-    /// 那一格摆在一起（[`Self::sync_ui`]）。
+    /// 删除那层弹层问的也是它。
+    ///
+    /// **有删除时「同步」左边多一格「我看过删除清单（N 个，X）」**（`F-1` A；稿没画这一格）：ADR-0015「删除前必须干跑
+    /// 预览列出清单」那一道闸——不勾按不动「同步」，[`Self::sync`] 那道守卫拒下时说的与按不动那颗悬停里写的是同一句
+    /// （[`先点头`]）。那一格常驻在按钮旁边，理由一直在屏上（ADR-0005「『不禁按钮』那一条什么时候允许同时画灰」）。
+    ///
+    /// 摊开那一张排差量、同步跑着时，进度与「停下」摆在各自那颗按钮旁边（[`Self::live_ui`]，票 `gui-redesign/11`：
+    /// 人是在这一屏点的，不该逼他去任务屏才停得了）。
     ///
     /// 卡不在位时只写「请先连接设备」（照稿，拿主意的人定），路径与怎么办放进悬停；算过容量的话核心那句原话
-    /// 也在悬停里（挂单 `Q851`）。**按钮不因为卡不在位就按不动**：拦在 `preview` 与 `sync` 里、只在屏上说
+    /// 也在悬停里（挂单 `Q851`）。**「生成差量预览」不因为卡不在位就按不动**：拦在 `preview` 与 `sync` 里、只在屏上说
     /// （ADR-0005，票 `gui-looks-like-the-design/07`）。
     ///
     /// **包进横排**：卡片摆在 `ui.columns` 分出来的那一栏里，那一栏的版式是「撑满」，直接往里摆一颗按钮会被
@@ -2226,11 +2305,15 @@ impl Screen {
         // **手上有没有这一台的一份有效预览。** 没有就按不动「同步」——ADR-0016 那句
         // 「同步前必须预览差量，且这是硬要求不是优化项」。作废一份预览的每一条路
         // （改规则、改例外、改目标设置、换一台卡）都走 [`Self::invalidate`]，
-        // 于是这一格跟着当场变灰，不必各处记得去关它。
-        let 有效预览 = self
-            .prepared
-            .as_ref()
-            .is_some_and(|prepared| prepared.sublibrary.name == name);
+        // 于是这一格跟着当场变灰，不必各处记得去关它。按不动的理由与守卫拒下时是同一处（[`Self::sync_refusal`]）。
+        let 按不动 = self.sync_refusal(self.plan_of(name));
+        // 只取这一排还要的那两样（几步、删除那笔账），不整份复制计划——它可以有几千步，而这一排每帧都画。
+        let 账 = self
+            .plan_of(name)
+            .map(|plan| (plan.touched(), plan.deletes));
+        let 删除 = 账
+            .map(|(_, deletes)| deletes)
+            .filter(|deletes| deletes.files > 0);
         ui.horizontal(|ui| {
             // 默认那一档按钮照稿（设计稿 `.btn`，字取半号：[`look::buttons`]）。
             look::buttons(ui, |ui| {
@@ -2244,31 +2327,45 @@ impl Screen {
                 {
                     pressed = Some(Pressed::Preview);
                 }
-                if open {
-                    // 正排着的时候把进度摆在按钮旁边：人是在这一屏点的，不该逼他先切去任务屏
-                    // 才知道排到哪儿了。**停下也在这儿按得着。**
-                    Self::live_ui(ui, tasks, self.previewing, "排差量");
-                } else if ui
-                    .add_enabled_ui(!busy && 有效预览, |ui| primary_button(ui, "同步"))
+            });
+            if open {
+                // 正排着的时候把进度摆在按钮旁边：人是在这一屏点的，不该逼他先切去任务屏
+                // 才知道排到哪儿了。**停下也在这儿按得着。**
+                Self::live_ui(ui, tasks, self.previewing, "排差量");
+            }
+            if let Some(deletes) = 删除 {
+                look::checkbox(
+                    ui,
+                    &mut self.acknowledged,
+                    format!(
+                        "我看过删除清单（{} 个，{}）",
+                        thousands(deletes.files),
+                        human_bytes(deletes.bytes),
+                    ),
+                );
+            }
+            let 按 = look::buttons(ui, |ui| {
+                ui.add_enabled_ui(按不动.is_none(), |ui| primary_button(ui, "同步"))
                     .inner
                     .on_hover_text(
-                        "把这一台排过的那份差量真的落到目标设备上，只碰清单里记录过的文件。",
+                        "把上面这份差量真的落到目标设备上。只碰清单里记录过的文件。\
+                         它排到任务台上跑：进度、已用时间、停下都在任务屏上，\
+                         跑的是这一刻摆着的这一份计划——排上去之后改规则也改不了它。",
                     )
                     // **按不动的理由得说出口**（票 `gui-looks-like-the-design/07`）：一颗灰着的
                     // 按钮不说为什么，人只会以为它坏了。走的是 `on_disabled_hover_text`——
-                    // egui 只给还按得动的控件画 `on_hover_text` 那一句。
-                    .on_disabled_hover_text(if 有效预览 {
-                        "按不动：台上这一趟还没跑完。"
-                    } else {
-                        // **与守卫拒下时说的是同一句**（`NO_PREVIEW`）：ADR-0005 那一节
-                        // 允许画灰的条件里，「那句理由只许有一处」是其中一条。
-                        NO_PREVIEW
-                    })
+                    // egui 只给还按得动的控件画 `on_hover_text` 那一句。没有预览时那句与守卫拒下时
+                    // 说的是同一个常量（`NO_PREVIEW`，ADR-0005 那一节「那句理由只许有一处」）。
+                    .on_disabled_hover_text(按不动.as_deref().unwrap_or_default())
                     .clicked()
-                {
-                    pressed = Some(Pressed::Sync);
-                }
             });
+            if 按 {
+                pressed = Some(Pressed::Sync);
+            }
+            // 同步的进度摆在**同步的那一台**卡上：排上之后人可能摊开了别的卡，进度不该跟着挪过去。
+            if let Some((id, _)) = self.syncing.as_ref().filter(|(_, who)| who == name) {
+                Self::live_ui(ui, tasks, Some(*id), "同步");
+            }
             if let Some(sublibrary) = self.list.iter().find(|row| row.name == name)
                 && self.absent.contains(name)
             {
@@ -2283,6 +2380,8 @@ impl Screen {
                     悬停.push_str(why);
                 }
                 look::help(ui, "请先连接设备").on_hover_text(悬停);
+            } else if matches!(账, Some((0, _))) {
+                look::help(ui, ALIGNED);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if look::small_buttons(ui, |ui| {
@@ -2336,51 +2435,123 @@ impl Screen {
         self.delete_dialog.is_some()
     }
 
-    /// 卡头那枚**状态标签**（设计稿 `devState`），颜色照稿：
+    /// 卡头那枚**状态标签**说哪一档（设计稿 `devState`，次序也照它）。`running` 是任务台上**正跑着**的那一趟的号。
     ///
-    /// - **未连接**——中性色、带圆点（稿上 `t-none`）。字照稿：拿主意的人裁了，词表里原来那个**连接**
-    ///   （规则组里那几项怎么算数）改名（挂单 `Q853`）。**先看它**：稿上也是先问连没连着。
-    /// - **待同步 N 步**——强调色、不带圆点（`t-acc plain`）。排过差量的那一台才有。
-    /// - **已同步 · 清单 N 条**——放心色、不带圆点（`t-hi plain`）。排过差量、一步都不用做的那一台；N 是这一台
-    ///   清单记着几条（[`Self::read_manifests`]）。清单读不动或者还是空的时候退回「已经对齐」，不编一个数。
-    /// - **尚未生成差量预览**——强调色、不带圆点。没排过就说没排过，不摆一个 0——「一步都不用做」与
-    ///   「还不知道要做什么」是两件事。
-    fn state_chip_ui(&self, ui: &mut egui::Ui, sublibrary: &Sublibrary) {
-        let name = sublibrary.name.as_str();
+    /// 1. **未连接**——先问连没连着（稿上也是）。
+    /// 2. **正在生成差量预览 / 正在同步**——台上正跑着的是这一台的那一趟（差距 D-03）。**排着队时照旧**：稿上排着队的
+    ///    那一趟不在 `S.running` 里；排差量的那一下已经把旧差量作废了，于是排着队时说「尚未生成差量预览」是实话，
+    ///    同步排着队时「待同步 N 个文件」也是实话——按钮旁边那一句说着它在等（[`Self::live_ui`]）。
+    /// 3. **待同步 N 个文件 / 已同步**——排过差量的那一台：有要动的就待同步，一步都不用做就是已同步。
+    /// 4. **已同步**——刚**干干净净**同步完的那一台（[`Self::synced`]）：稿上 `s.synced`。
+    /// 5. **尚未生成差量预览**——没排过就说没排过，不摆一个 0。
+    fn chip_state(&self, name: &str, running: Option<u64>) -> 卡头 {
         if self.absent.contains(name) {
-            look::chip(ui, look::Tone::Neutral, "未连接").on_hover_text(format!(
-                "上一回看的时候 {} 不在。插上读卡器，或者按「目标设置…」换一个目录。",
-                sublibrary.target
-            ));
-            return;
+            return 卡头::未连接;
+        }
+        if let Some(running) = running {
+            if self.previewing == Some(running) && self.picked.as_deref() == Some(name) {
+                return 卡头::正在生成差量预览;
+            }
+            if self
+                .syncing
+                .as_ref()
+                .is_some_and(|(id, who)| *id == running && who == name)
+            {
+                return 卡头::正在同步;
+            }
         }
         match self.plan_of(name) {
-            Some(plan) if plan.touched() > 0 => {
+            Some(plan) if plan.touched() > 0 => 卡头::待同步(plan.touched()),
+            Some(_) => 卡头::已同步 {
+                清单: self.manifest_rows.get(name).copied(),
+                刚同步完: false,
+            },
+            None if self.synced(name) => 卡头::已同步 {
+                清单: self.manifest_rows.get(name).copied(),
+                刚同步完: true,
+            },
+            None => 卡头::尚未生成差量预览,
+        }
+    }
+
+    /// 这一台是不是**刚干干净净同步完**：上一趟同步是它的，走完了、一步没失败、没被按停也没主动收手，
+    /// 而且之后没再排过差量（排一下或者改一下选择集都会把那份账作废，[`Self::invalidate`]）。
+    ///
+    /// 稿上的 `s.synced`：卡头写「已同步 · 清单 N 条」、提示框去掉末句（差距 D-02）。出过岔子的那一趟不算——
+    /// 它没把目标对齐，照旧是「尚未生成差量预览」、提示框整句。
+    fn synced(&self, name: &str) -> bool {
+        self.outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.sublibrary == name && outcome.clean())
+    }
+
+    /// 这一台卡上那条提示框（设计稿 `diffHTML` 的 `.note`）：刚同步完的去掉末句（差距 D-02）。
+    fn preview_note(&self, name: &str) -> &'static str {
+        if self.plan_of(name).is_none() && self.synced(name) {
+            PREVIEW_NOTE_SYNCED
+        } else {
+            PREVIEW_NOTE
+        }
+    }
+
+    /// 卡头那枚**状态标签**（设计稿 `devState`），说哪一档由 [`Self::chip_state`] 答。颜色照稿：
+    ///
+    /// - **未连接**——中性色、带圆点（稿上 `t-none`）。字照稿：拿主意的人裁了，词表里原来那个**连接**
+    ///   （规则组里那几项怎么算数）改名（挂单 `Q853`）。
+    /// - **正在生成差量预览 / 正在同步 / 待同步 N 个文件 / 尚未生成差量预览**——强调色、不带圆点（`t-acc plain`）。
+    /// - **已同步 · 清单 N 条**——放心色、不带圆点（`t-hi plain`）；N 是这一台清单记着几条（[`Self::read_manifests`]）。
+    ///   清单读不动或者还是空的时候退回「已经对齐」，不编一个数。
+    fn state_chip_ui(&self, ui: &mut egui::Ui, sublibrary: &Sublibrary, tasks: &Tasks) {
+        let name = sublibrary.name.as_str();
+        let running = tasks.running().map(|live| live.id);
+        match self.chip_state(name, running) {
+            卡头::未连接 => {
+                look::chip(ui, look::Tone::Neutral, "未连接").on_hover_text(format!(
+                    "上一回看的时候 {} 不在。插上读卡器，或者按「目标设置…」换一个目录。",
+                    sublibrary.target
+                ));
+            }
+            卡头::正在生成差量预览 => {
+                look::plain_chip(ui, look::Tone::Accent, "正在生成差量预览").on_hover_text(
+                    "排差量预览正在任务台上跑：只读，一个文件都不写。跑完这里换成它说的那一档。",
+                );
+            }
+            卡头::正在同步 => {
+                look::plain_chip(ui, look::Tone::Accent, "正在同步").on_hover_text(
+                    "同步正在任务台上跑：进度与「停下」在卡底与任务屏上。跑完回执记进任务台历史。",
+                );
+            }
+            卡头::待同步(几个) => {
                 look::plain_chip(
                     ui,
                     look::Tone::Accent,
-                    &format!("待同步 {} 个文件", thousands(plan.touched())),
+                    &format!("待同步 {} 个文件", thousands(几个)),
                 )
                 .on_hover_text("排过差量预览：这一趟要动这么多个文件（一个文件一步）。");
             }
-            Some(_) => match self.manifest_rows.get(name) {
-                Some(rows) => {
-                    look::plain_chip(
-                        ui,
-                        look::Tone::Good,
-                        &format!("已同步 · 清单 {} 条", thousands(*rows as u64)),
-                    )
-                    .on_hover_text(
-                        "排过差量预览：目标已经和选择集对齐，一步都不用做。\
-                         清单记着上次同步放上去的这么多个文件。",
-                    );
+            卡头::已同步 {
+                清单, 刚同步完
+            } => {
+                let 为什么 = if 刚同步完 {
+                    "刚同步完：目标已经照那份差量对齐。"
+                } else {
+                    "排过差量预览：目标已经和选择集对齐，一步都不用做。"
+                };
+                match 清单 {
+                    Some(rows) => {
+                        look::plain_chip(
+                            ui,
+                            look::Tone::Good,
+                            &format!("已同步 · 清单 {} 条", thousands(rows as u64)),
+                        )
+                        .on_hover_text(format!("{为什么}清单记着上次同步放上去的这么多个文件。"));
+                    }
+                    None => {
+                        look::plain_chip(ui, look::Tone::Good, "已经对齐").on_hover_text(为什么);
+                    }
                 }
-                None => {
-                    look::plain_chip(ui, look::Tone::Good, "已经对齐")
-                        .on_hover_text("排过差量预览：目标已经和选择集对齐，一步都不用做。");
-                }
-            },
-            None => {
+            }
+            卡头::尚未生成差量预览 => {
                 look::plain_chip(ui, look::Tone::Accent, "尚未生成差量预览").on_hover_text(
                     "同步前必须先看一遍它要做什么——那是硬要求，不是可以跳过的一步。",
                 );
@@ -2794,26 +2965,11 @@ impl Screen {
         excluded
     }
 
-    /// 卡的下半截：**排差量、看步骤、按同步**。
-    fn delta_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
-        // 头一排与没摊开的卡底下是同一排（[`Self::actions_ui`]）；摊开这一张的「同步」在差量底下。
-        let name = self.picked.clone().unwrap_or_default();
-        self.actions_ui(ui, site, tasks, &name, true);
-        let Some(prepared) = self.prepared.clone() else {
-            // 差量作废了、而同步还在台上跑着的话，这一句底下还得摆得出那一趟的进度
-            // ——不然人一按下同步，屏上就什么都没有了。
-            Self::live_ui(ui, tasks, self.syncing, "同步");
-            note_ui(ui, PREVIEW_NOTE);
-            return;
-        };
-        self.plan_ui(ui, site, tasks, &prepared);
-    }
-
-    /// 那份计划本身：账、要说出口的怪事、步骤、**异常那一块**，以及「真的传」。
+    /// 那份计划本身：账、要说出口的怪事、步骤、**异常那一块**。
     ///
     /// 次序照设计稿 `diffHTML`：五个数一排（[`tally_ui`]）、几条步骤（[`Self::steps_ui`]）、
-    /// 异常分栏（[`Self::anomalies_ui`]），最后才是「同步」。异常摆在同步**上面**不是排版
-    /// 口味——人按那颗按钮之前得先看过它们（ADR-0016）。
+    /// 异常分栏（[`Self::anomalies_ui`]），「同步」在它们底下那一排（[`Self::actions_ui`]）。异常摆在同步**上面**
+    /// 不是排版口味——人按那颗按钮之前得先看过它们（ADR-0016）。
     fn plan_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -2827,7 +2983,6 @@ impl Screen {
         concerns_ui(ui, prepared);
         self.steps_ui(ui, plan);
         self.anomalies_ui(ui, site, tasks, plan);
-        self.sync_ui(ui, site, tasks, plan);
     }
 
     /// 计划那几步（设计稿 `.steplist`）：装在一个定高的框里，框里滚（[`step_list`]）。
@@ -2970,7 +3125,9 @@ impl Screen {
                             |ui| {
                                 // **落点与卡上那份只差大小写时两条都得印**：只印一条，人要么在卡上找不到
                                 // 那个名字，要么不知道是谁要挤进来（`Surprise::landing` 的文档）。
-                                list_path(ui, &one.path, one.landing.as_deref());
+                                // 被修改过的那一份接着写**哪一样变了**（照稿「路径 · 大小 a → b」，差距 D-21）：
+                                // 由核心一处拼（`Surprise::path_with_change`），命令行同印。
+                                list_path(ui, &one.path_with_change(), one.landing.as_deref());
                             },
                         );
                     });
@@ -2994,7 +3151,7 @@ impl Screen {
                     ),
                 );
             }
-            self.restore_ui(ui, site, tasks, plan.restorable);
+            self.restore_ui(ui, site, tasks, plan.restorable, plan.adds_if_restored());
         }
     }
 
@@ -3029,7 +3186,18 @@ impl Screen {
     ///
     /// 勾一下要**重排一趟**（[`Self::set_restore_missing`]）：那份计划是排它那一刻按这个
     /// 开关排出来的，光把勾画上去，上面那几个数说的还是没补回的那一趟。
-    fn restore_ui(&mut self, ui: &mut egui::Ui, site: &Site, tasks: &mut Tasks, 能补几个: u64) {
+    ///
+    /// 说明照稿两半句（差距 C-1）：「补回后新增变为 N 个；只补清单里记录过的文件」。N 由核心答
+    /// （`Plan::adds_if_restored`）——开没开补回都是同一个数，勾上之后它就是新增那一格。**不写 ADR 编号**
+    /// （票 gl-03 立的规矩，差距 D-14）：「只补清单里记录过的」出自 ADR-0015，写在这条文档里。
+    fn restore_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        site: &Site,
+        tasks: &mut Tasks,
+        能补几个: u64,
+        补回之后新增: u64,
+    ) {
         // **勾着的时候哪怕一个都补不了也得画得出来**：不画的话，那个勾就成了屏上看不见、
         // 却还管着下一趟计划的开关，人取消不掉它。
         if 能补几个 == 0 && !self.restore_missing {
@@ -3044,7 +3212,10 @@ impl Screen {
                     ui,
                     &mut on,
                     &format!("同步时补回这 {} 个文件", thousands(能补几个)),
-                    "只补清单里记录过的文件——清单之外的东西工具一律不碰（ADR-0015）。",
+                    &format!(
+                        "补回后新增变为 {} 个；只补清单里记录过的文件",
+                        thousands(补回之后新增)
+                    ),
                 )
             })
             .inner
@@ -3191,14 +3362,20 @@ impl Screen {
                             靠右摆(
                                 ui,
                                 |ui| {
-                                    look::help(
-                                        ui,
-                                        &format!(
-                                            "{}{}",
-                                            human_bytes(one.bytes),
-                                            if one.estimated { "（估的）" } else { "" },
-                                        ),
+                                    // **文件名不收的那一行右头写不收的是什么**（照稿「含有「:」」，差距 C-2）：
+                                    // 核心判出来的那一刻记下的（`Rejected::bad_name`），不从那句 `detail` 里抠。
+                                    // 别的几类照旧写体积——超上限那一行要的正是它。
+                                    let 右头 = one.bad_name.as_ref().map_or_else(
+                                        || {
+                                            format!(
+                                                "{}{}",
+                                                human_bytes(one.bytes),
+                                                if one.estimated { "（估的）" } else { "" },
+                                            )
+                                        },
+                                        romcat_core::capability::BadName::shown,
                                     );
+                                    look::help(ui, &右头);
                                 },
                                 |ui| {
                                     list_path(ui, &one.path, None)
@@ -3210,58 +3387,23 @@ impl Screen {
                     框.rest(rows.len().saturating_sub(ANOMALY_ROWS));
                 });
             }
+            // **超过单文件上限那一段零条也说事实**（照稿「exFAT 不限制单文件大小。」「FAT32 单文件不能超过 4 GiB。」，
+            // 差距 D-20）：哪一段说、说什么都由核心答（`RejectReason::fact`，取排这份计划时拦过它的那一份文件系统声明），
+            // 命令行同印。
+            if let Some(事实) = reason.fact(&plan.filesystem) {
+                look::help(ui, &事实);
+            }
             // **这一类该怎么办，写在它那个框底下**（设计稿那句「Windows 与 exFAT 都不收…」摆在 `.lst` 之后；
             // 票 `gui-looks-like-the-design/07`：不说去哪儿办的话，人只会对着一行字发呆）。那句话由核心答
-            // （`RejectReason::advice`），命令行与这一屏印的是同一份。**一条都没有时不说**：目标本来就是 exFAT 时，
-            // 在「超过单文件上限 · 0」底下劝人换一张 exFAT 的卡是句蠢话。
-            if let Some(怎么办) = reason.advice().filter(|_| !rows.is_empty()) {
-                look::help(ui, 怎么办);
+            // （`RejectReason::advice`，不收的是哪几个字取同一份声明），命令行与这一屏印的是同一份。**一条都没有时不说**：
+            // 目标本来就是 exFAT 时，在「超过单文件上限 · 0」底下劝人换一张不限单文件大小的卡是句蠢话。
+            if let Some(怎么办) = reason.advice(&plan.filesystem).filter(|_| !rows.is_empty()) {
+                look::help(ui, &怎么办);
             }
         }
         if let Some(key) = 排除掉 {
             self.exclude_collided(site, tasks, &name, &key);
         }
-    }
-
-    /// 「真的传」那一行，连**有删除就得先点头**那一格（ADR-0015）。
-    fn sync_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        site: &Site,
-        tasks: &mut Tasks,
-        plan: &romcat_core::sync::Plan,
-    ) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if plan.deletes.files > 0 {
-                look::checkbox(
-                    ui,
-                    &mut self.acknowledged,
-                    format!(
-                        "我看过删除清单（{} 个，{}）",
-                        thousands(plan.deletes.files),
-                        human_bytes(plan.deletes.bytes),
-                    ),
-                );
-            }
-            let ready = self.syncing.is_none()
-                && plan.touched() > 0
-                && (plan.deletes.files == 0 || self.acknowledged);
-            if look::buttons(ui, |ui| ui.add_enabled(ready, egui::Button::new("同步")))
-                .on_hover_text(
-                    "把上面这份差量真的落到目标设备上。只碰清单里记录过的文件。\
-                     它排到任务台上跑：进度、已用时间、停下都在任务屏上，\
-                     跑的是这一刻摆着的这一份计划——排上去之后改规则也改不了它。",
-                )
-                .clicked()
-            {
-                self.sync(site, tasks);
-            }
-            Self::live_ui(ui, tasks, self.syncing, "同步");
-            if plan.touched() == 0 {
-                ui.label("一步都不用做：目标已经和选择集对齐了。");
-            }
-        });
     }
 }
 
@@ -4108,6 +4250,7 @@ impl Screen {
                         format!("已保存「{name}」的目标设置。")
                     };
                     self.undo = None;
+                    self.receipt = None;
                     self.saved = Some(Toast::new(text));
                 }
                 true
@@ -4353,6 +4496,7 @@ impl Screen {
         ) {
             Ok(Some(record)) => {
                 self.undo = None;
+                self.receipt = None;
                 self.saved = Some(Toast::new(format!(
                     "已把 {} 个文件收回「{}」的清单，之后不再提示它们。差量预览正在重排。",
                     thousands(record.files.len() as u64),
@@ -4789,6 +4933,7 @@ impl Screen {
         self.evaluate(site, tasks);
         if 排过差量 {
             self.undo = None;
+            self.receipt = None;
             self.saved = Some(Toast::new(format!(
                 "改过「{name}」的手动例外。差量预览已失效，同步前需要重新生成。"
             )));
@@ -5025,8 +5170,22 @@ impl Screen {
     }
 
     /// 底边那条提示条（[`crate::toast`]）：删掉一台之后那一条，带「撤销」。停够了收起，撤销也跟着没了。
+    ///
+    /// **一次只摆一条**，先后照这个次序：带「撤销」的那一条（它收起就等于删除落定，不能被别的顶掉）、
+    /// 同步收场那一条（[`Self::receipt`]，「查看任务」按下去换到任务屏）、目标设置存下之后那一条。
     fn toast_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
         if self.undo.is_none() {
+            if let Some(receipt) = &mut self.receipt {
+                match receipt.show(ctx) {
+                    toast::Shown::Showing => {}
+                    toast::Shown::Pressed => {
+                        self.to_tasks = true;
+                        self.receipt = None;
+                    }
+                    toast::Shown::Expired => self.receipt = None,
+                }
+                return;
+            }
             if let Some(saved) = &mut self.saved
                 && saved.show(ctx) == toast::Shown::Expired
             {
@@ -5612,50 +5771,47 @@ fn no_second_connection(什么活: &str, why: &CatalogError) -> String {
     )
 }
 
-/// 一趟同步跑完之后摆在屏上的那句回执。
+/// 同步收场那条提示条上那颗按钮的字（设计稿 `row(...,['查看任务','go:task'])` 那几处同一个说法）。
+const VIEW_TASKS: &str = "查看任务";
+
+/// 一趟同步收场时**底边提示条上那句话**，以及要不要带「查看任务」（拿主意的人 2026-10-01 裁 `F-7` A）。
 ///
-/// **中断、失败、主动停了，一样都不许吞。** 全成功的一趟与半数写失败的一趟若在界面上
-/// 长得一样，那句「同步用了 X 秒」就是在骗人（命令行那一侧靠 `Outcome::render_text`
-/// 把这几样印全）。
+/// **收场词照任务台历史那一行**（`name` 之后跟的就是 `Ending::word`）：同一趟活在两处说同一个词，人不必两屏比对
+/// 才敢下结论（挂单 `Q153` 的同一个道理）。今天核心库把「连着失败太多次、主动停了」与「有几步没做成」都交成
+/// **完成**——它们记成部分完成那一档归票 `verdict-store-and-sync/14`，这里不另造一个词，只把几步没做成说出口。
 ///
-/// 耗时取的是**任务台记下的那个数**——与任务屏历史里那一行同一个来源，两处各掐一次表的话，
-/// 同一趟活会在两屏上报出两个数。
-fn sync_notice(outcome: &Outcome, elapsed: f64) -> String {
+/// **中断、失败、主动停了，一样都不许吞**：全成功的一趟与半数写失败的一趟若长得一样，那句「完成」就是在骗人。
+/// 所以除了干干净净跑完的那一档（`Outcome::clean`）与还没轮到就撤掉的那一档，一律带「查看任务」——下文
+/// （留下了什么、停在哪一步、为什么）在任务台历史里。耗时不写在这儿：任务台记着那个数，两处各写一份会说出两个数。
+fn sync_receipt(name: &str, 收场: &Ending<()>, outcome: Option<&Outcome>) -> (String, bool) {
+    let 词 = 收场.word();
+    let Some(outcome) = outcome else {
+        // 没交回产物的两档：还排着队就被撤掉（已取消）、真出错了（失败）。前者一个字节都没写，是干净的。
+        return match 收场 {
+            Ending::Stopped => (
+                format!("「{name}」同步{词}：还没轮到就撤掉了，目标设备上一个字节都没动"),
+                false,
+            ),
+            _ => (format!("「{name}」同步{词}"), true),
+        };
+    };
     let mut line = format!(
-        // **说得出是哪一台**：这句话可能是几十分钟前排上去的那一趟交回来的，
-        // 而那会儿摊开的多半是另一张卡了。
-        "「{}」同步用了 {elapsed:.1} 秒：动了 {} 个文件（新增 {}、更新 {}、删除 {}）。",
-        outcome.sublibrary,
+        "「{name}」同步{词}：动了 {} 个文件（新增 {}、更新 {}、删除 {}）",
         thousands(outcome.touched()),
         thousands(outcome.added.files),
         thousands(outcome.updated.files),
         thousands(outcome.deleted.files),
     );
-    if outcome.interrupted {
-        line.push_str(
-            "\n⚠️ 这一趟部分完成：按停时目标上没留下写了一半的文件，清单记的是\
-             停下那一刻目标上真实有什么，再跑一趟就接上。",
-        );
-    }
-    if outcome.gave_up {
-        line.push_str("\n⚠️ 连着失败太多次，主动停了：多半是卡拔了或者写满了。");
-    }
     if !outcome.failures.is_empty() {
         line.push_str(&format!(
-            "\n⚠️ 有 {} 步没做成：",
-            thousands(outcome.failures.len() as u64),
+            "，有 {} 步没做成",
+            thousands(outcome.failures.len() as u64)
         ));
-        for failure in outcome.failures.iter().take(TOP_NOTES) {
-            line.push_str(&format!("\n  {}：{}", failure.path, failure.why));
-        }
-        if outcome.failures.len() > TOP_NOTES {
-            line.push_str(&format!(
-                "\n  ……另有 {} 步没列",
-                outcome.failures.len() - TOP_NOTES,
-            ));
-        }
     }
-    line
+    if outcome.gave_up {
+        line.push_str("，连着失败太多次，主动停了");
+    }
+    (line, !outcome.clean())
 }
 
 /// Pegasus 适配器的标识（`romcat_core::adapter::find` 认的那个名字）。
@@ -6326,6 +6482,50 @@ mod tests {
             卡片几列(800.0, &改过.layout),
             2,
             "门槛降到 400，800 宽就摆两列"
+        );
+    }
+
+    #[test]
+    fn 卡头那一档_排差量预览跑着时是正在生成差量预览_同步跑着时是正在同步_排着队时照旧() {
+        // 票 `gui-draws-the-rest-of-the-design/15`（差距 D-03）：设计稿 `devState` 在台上**正跑着**那一趟是这一台的
+        // 排差量预览或同步时，卡头说「正在生成差量预览」「正在同步」；排着队时照旧（稿上排着队的那一趟不在 `S.running` 里）。
+        // 「跑着」要一趟真停在半路的排差量才摆得出来，界面测试里造不稳（排差量没有可注入的闸），所以在这一层验那一问。
+        let mut 屏 = Screen::new(std::env::temp_dir());
+        屏.list.push(Sublibrary::at(
+            "掌机",
+            std::path::Path::new("/Volumes/SDCARD"),
+            "Pegasus",
+            None,
+        ));
+        屏.picked = Some("掌机".to_string());
+        assert_eq!(屏.chip_state("掌机", None), 卡头::尚未生成差量预览);
+
+        屏.previewing = Some(7);
+        assert_eq!(屏.chip_state("掌机", Some(7)), 卡头::正在生成差量预览);
+        assert_eq!(
+            屏.chip_state("掌机", Some(3)),
+            卡头::尚未生成差量预览,
+            "台上跑的是别的活、这一趟还排着队：照旧"
+        );
+        assert_eq!(屏.chip_state("别的卡", Some(7)), 卡头::尚未生成差量预览);
+
+        屏.previewing = None;
+        屏.syncing = Some((9, "掌机".to_string()));
+        assert_eq!(屏.chip_state("掌机", Some(9)), 卡头::正在同步);
+        assert_eq!(屏.chip_state("掌机", Some(3)), 卡头::尚未生成差量预览);
+
+        // 卡不在位先说未连接（稿上也是先问连没连着）。
+        屏.absent.insert("掌机".to_string());
+        assert_eq!(屏.chip_state("掌机", Some(9)), 卡头::未连接);
+    }
+
+    #[test]
+    fn 刚同步完那张卡的提示框只少末句() {
+        // 差距 D-02：设计稿 `s.synced?'':'选择集修改后，已有的预览会失效。'`——前两句逐字一样。
+        assert!(PREVIEW_NOTE.starts_with(PREVIEW_NOTE_SYNCED));
+        assert_eq!(
+            &PREVIEW_NOTE[PREVIEW_NOTE_SYNCED.len()..],
+            "选择集修改后，已有的预览会失效。"
         );
     }
 }

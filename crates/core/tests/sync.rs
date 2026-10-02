@@ -304,6 +304,135 @@ fn 目标上的意外变化被报告而不是静默补回() {
     assert_eq!(补回.surprises.len(), 默认.surprises.len());
 }
 
+#[test]
+fn 补回之后新增几个_开没开补回答的是同一个数_勾上之后等于新增那一格() {
+    // 票 `gui-draws-the-rest-of-the-design/15`（差距 C-1）：界面上补回那一格说明的前半句「补回后新增变为 N 个」
+    // 要这个数。它得开没开补回都答同一个——人是在勾之前读它的——而勾上之后它就是新增那一格。
+    let dir = temp_dir("sync-adds-if-restored");
+    let (mut desired, mut manifest, actual) = 摆好现场(&全部组合());
+    // 再摆一份**你删过、工具记着不补**的：清单记着它不在，目标上也没有，选择集还要它。
+    // 它不进意外那一栏（上一趟已经报过），可补回补的也有它。
+    let 记着不补 = "库/记着不补.zip".to_string();
+    let 戳 = Stamp {
+        bytes: 1024,
+        mtime_ns: Some(1_700_000_000_000_000_000),
+    };
+    desired.files.push(DesiredFile {
+        path: 记着不补.clone(),
+        kind: FileKind::Rom,
+        bytes: 1024,
+        unreadable: false,
+        source: 记着不补.clone(),
+        source_stamp: 戳,
+        variant: 记着不补.clone(),
+        convert: None,
+    });
+    manifest.files.push(ManifestFile {
+        path: 记着不补.clone(),
+        kind: FileKind::Rom,
+        stamp: 戳,
+        source: 记着不补.clone(),
+        source_stamp: 戳,
+        variant: 记着不补,
+        absent: true,
+    });
+    let 排 = |restore_missing: bool| {
+        sync::plan(
+            &子库(dir.path(), None),
+            &desired,
+            &manifest,
+            &actual,
+            Options { restore_missing },
+        )
+    };
+    let (不补, 补) = (排(false), 排(true));
+    assert_eq!(不补.withheld, 1, "前提：有一份记着不补的");
+    assert!(不补.restorable >= 2, "前提：这一趟没了的与记着不补的都能补");
+    assert_eq!(
+        不补.adds_if_restored(),
+        补.adds_if_restored(),
+        "开没开补回，「补回之后新增几个」得是同一个数",
+    );
+    assert_eq!(
+        补.adds_if_restored(),
+        补.adds.files,
+        "勾上之后它就是新增那一格"
+    );
+    assert_eq!(不补.adds_if_restored(), 不补.adds.files + 不补.restorable);
+}
+
+/// 内置名册里叫这个名字的那一份文件系统声明。
+fn 内置的文件系统(name: &str) -> Filesystem {
+    romcat_core::capability::Roster::builtin()
+        .filesystems()
+        .iter()
+        .find(|filesystem| filesystem.name == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("内置名册里有 {name}"))
+}
+
+#[test]
+fn 命令行的差量预览印得出被修改过的哪一样变了与文件名里不收的是哪几个字() {
+    // 票 `gui-draws-the-rest-of-the-design/15`（差距 D-21、C-2）：那两个半句由核心一处拼（`Surprise::change`、
+    // `BadName::shown`），界面那一行与命令行印同一份。
+    let dir = temp_dir("sync-report-change");
+    let (desired, manifest, actual) = 摆好现场(&全部组合());
+    let plan = sync::plan(
+        &子库(dir.path(), None),
+        &desired,
+        &manifest,
+        &actual,
+        Options::default(),
+    );
+    let 那一份 = plan
+        .surprises
+        .iter()
+        .find(|one| one.kind == SurpriseKind::Changed)
+        .expect("前提：有一份被修改过的");
+    let 变了 = 那一份.change().expect("被修改过的说得出哪一样变了");
+    assert_eq!(变了, "大小 1.00 KiB → 4.00 KiB");
+    let 印的 = plan.render_text();
+    assert!(
+        印的.contains(&format!("{} · {变了}", 那一份.path)),
+        "命令行没印那半句：\n{印的}"
+    );
+
+    let exfat = 内置的文件系统("exFAT");
+    let mut desired = Desired {
+        files: vec![DesiredFile {
+            path: "PSP/最终幻想 纷争012: 前传.iso".to_string(),
+            kind: FileKind::Rom,
+            bytes: 1024,
+            unreadable: false,
+            source: "库/PSP/最终幻想 纷争012: 前传.iso".to_string(),
+            source_stamp: Stamp {
+                bytes: 1024,
+                mtime_ns: None,
+            },
+            variant: "库/PSP/最终幻想 纷争012: 前传.iso".to_string(),
+            convert: None,
+        }],
+        ..Desired::default()
+    };
+    desired.screen(&exfat, 0);
+    let plan = sync::plan(
+        &子库(dir.path(), None),
+        &desired,
+        &Manifest::default(),
+        &TargetState::default(),
+        Options::default(),
+    );
+    assert_eq!(plan.filesystem, exfat, "计划记着拦下它们的是哪一份文件系统");
+    let 印的 = plan.render_text();
+    assert!(
+        印的.contains("PSP/最终幻想 纷争012: 前传.iso · 含有「:」"),
+        "命令行没印不收的是哪几个字：\n{印的}"
+    );
+    let 劝告 = RejectReason::BadName.advice(&exfat).expect("说得出怎么办");
+    assert!(印的.contains(&劝告), "命令行没印那句劝告：\n{印的}");
+    assert!(!印的.contains("ADR-0004"), "劝告里还带着编号：\n{印的}");
+}
+
 // ───────────────────────── 二、期望状态真的从中立库折出来
 
 /// 一份 fixture 主库：一个单文件变体，一个目录树变体（成员十几个、还带目录本身）。

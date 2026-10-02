@@ -72,7 +72,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::Adapter;
-use crate::capability::{Conversion, Decision, Filesystem, Profile, RejectReason};
+use crate::capability::{BadName, Barred, Conversion, Decision, Filesystem, Profile, RejectReason};
 use crate::catalog::{Catalog, CatalogError, MemberFile};
 use crate::container::Contents;
 use crate::path;
@@ -223,6 +223,10 @@ pub struct Rejected {
     pub only_folded: bool,
     /// 说清楚是怎么回事。
     pub detail: String,
+    /// 文件名不收的是什么（「含有「:」」那半句，[`BadName::shown`]）；只有
+    /// [`RejectReason::BadName`] 那一类有。**判出来的那一刻记下**（[`Filesystem::screen`]），
+    /// 不从 [`Self::detail`] 那句话里抠（ADR-0024）。
+    pub bad_name: Option<BadName>,
     /// 上面那个 [`Self::bytes`] 是**估**出来的吗。
     ///
     /// 重打包成 zip 那一路填的是**未压缩总量**，也就是上界（[`Conversion::estimated`]）。
@@ -274,6 +278,13 @@ pub struct Desired {
     pub rejected: Vec<Rejected>,
     /// 目标吃不下、而这一版转不了的那些。**在 [`Self::files`] 里**：照搬，但报出来。
     pub unsupported: Vec<Unsupported>,
+    /// [放不进目标的那几份](Self::rejected)是照**哪一份文件系统声明**筛出来的（[`Self::screen`] 记下）；
+    /// 没筛过时是「不作声称」那一份。
+    ///
+    /// 差量预览要拿它说两句话：不收的是哪几个字（[`RejectReason::advice`]）、单文件上限是多少
+    /// （[`Filesystem::max_file_fact`]）。记在筛的那一刻，于是屏上说的就是真拦过这一趟的那一份——
+    /// 事后照子库记着的档案名再去名册里查一遍的话，名册改过就会说出另一份的话来。
+    pub filesystem: Filesystem,
 }
 
 impl Desired {
@@ -565,29 +576,29 @@ impl SurpriseKind {
         }
     }
 
-    /// 这一类**工具不会做什么**，以及为什么。
+    /// 这一类**工具不会做什么**。
     ///
-    /// 每一类的处置各不相同（[`plan`] 的模块文档那四条），而「不覆盖、不删除」这件事
+    /// 每一类的处置各不相同（[`plan`] 的模块文档那四条），而「工具不会碰它」这件事
     /// 正是维护者要从这一屏上看走的东西：不说清楚，他会以为工具已经替他处理妥当。
+    /// 「目标位置被占用」那一句照稿只说「不会覆盖」，括号里那个「清单外文件」把余下的说全了——清单之外的文件
+    /// 工具一律不碰（词表**清单**）。
     /// 放在这儿而不是各印各的，是因为命令行那一份与界面那一份**说的必须是同一件事**
     /// ——两处各写一遍，改了一处就会有一处在骗人（ADR-0024 的那条纪律）。
+    ///
+    /// **照稿短句**（拿主意的人 2026-10-01 裁 `F-5` A，命令行跟着变短；稿上的「romcat」换成「工具」）；
+    /// 「元数据读不到」稿没画，留原句。**不写 ADR 编号**：这几句画在屏上（票 gl-03 立的规矩，差距 D-14），
+    /// 出处在这条文档里——补不补那条是 ADR-0015「报告而非静默补回」，读不到那条是 ADR-0021 的第三态。
     #[must_use]
     pub fn refusal(self) -> &'static str {
         match self {
-            Self::Gone => {
-                "清单里有、设备上找不到的文件。那可能是你在掌机上有意删的，\
-                 所以**不会静默补回**（ADR-0015）：默认不补，要补得你明说。"
-            }
+            Self::Gone => "清单里有、设备上找不到的文件，可能被手动删除了。默认不补回。",
             Self::Changed => {
-                "设备上那一份和清单记的对不上（大小或修改时间变了），它已经不是工具放的那一份。\
-                 **不覆盖，也不删除。**"
+                "设备上的文件和清单记录的不一致（大小或修改时间变了），可能被其他工具改过。\
+                 不会覆盖，也不会删除。"
             }
-            Self::Occupied => {
-                "落点上挡着一个**清单之外**的文件，多半是你自己拷进去的。\
-                 **不覆盖，也不删除**——清单之外的文件工具一律不碰（ADR-0015）。"
-            }
+            Self::Occupied => "要复制的位置上已经有一个不是工具放的文件（清单外文件），不会覆盖。",
             Self::Unreadable => {
-                "设备上这个文件的元数据读不到（ADR-0021 的第三态）：既不算在、也不算不在。\
+                "设备上这个文件的元数据读不到：既不算在、也不算不在。\
                  说不清是什么的**一律不动**。"
             }
         }
@@ -622,6 +633,84 @@ pub struct Surprise {
     pub variant: String,
     /// 选择集里**还要不要**它。用户处置的办法完全不同，所以这一位必须在。
     pub still_wanted: bool,
+}
+
+impl Surprise {
+    /// 这一条画在列表里那一截：路径，[被修改过](SurpriseKind::Changed)的接着「 · 大小 a → b」（[`Self::change`]，
+    /// 设计稿 `ANOM` 的 `mod` 那一栏）。命令行与界面的列表都印它，「路径 · 半句」只在这一处拼。
+    #[must_use]
+    pub fn path_with_change(&self) -> String {
+        match self.change() {
+            Some(变了) => format!("{} · {变了}", self.path),
+            None => self.path.clone(),
+        }
+    }
+
+    /// [被修改过](SurpriseKind::Changed)的那一份**哪一样变了**：「大小 a → b」或「修改时间 a → b」
+    /// （设计稿 `ANOM` 的 `mod` 那一栏，差距 D-21）。别的几类是 `None`。
+    ///
+    /// 判它被改过的是 [`Stamp::proves_same`]：大小不同、两边时间不同、或者有一边的时间取不到。
+    /// 这里照同一个次序说是哪一样——大小变了先说大小。那半句只在这一处拼，命令行与界面印同一份。
+    ///
+    /// 时刻照 UTC 写（与 [`human_time`](crate::report::human_time) 同一个理由：同一份清单在两台机器上
+    /// 得说出同一个时刻）：日子不同只写月日（跨年才带年），同一天写到分，同一分钟写到秒。
+    #[must_use]
+    pub fn change(&self) -> Option<String> {
+        if self.kind != SurpriseKind::Changed {
+            return None;
+        }
+        let (expected, found) = (self.expected?, self.found?);
+        if expected.bytes != found.bytes {
+            let (前, 后) = (
+                crate::report::human_bytes(expected.bytes),
+                crate::report::human_bytes(found.bytes),
+            );
+            // 差得太少、两边印出来一样时写到字节：「8.00 MiB → 8.00 MiB」读着像没变。
+            return Some(if 前 == 后 {
+                format!(
+                    "大小 {} 字节 → {} 字节",
+                    crate::report::thousands(expected.bytes),
+                    crate::report::thousands(found.bytes),
+                )
+            } else {
+                format!("大小 {前} → {后}")
+            });
+        }
+        let (Some(前), Some(后)) = (expected.mtime_ns, found.mtime_ns) else {
+            return Some("修改时间取不到，证明不了没变".to_string());
+        };
+        Some(format!("修改时间 {}", 两个时刻(前, 后)))
+    }
+}
+
+/// 两个时刻（纳秒）写成「前 → 后」，只写到分得出前后的那一级（[`Surprise::change`]）。
+fn 两个时刻(前: i64, 后: i64) -> String {
+    /// 一个时刻拆成（年、月日、时分、秒），UTC。公历换算走 [`human_time`](crate::report::human_time) 那一处
+    /// （`YYYY-MM-DD HH:MM`），这里只按位切开、补上秒。
+    fn 拆(ns: i64) -> (String, String, String, String) {
+        let secs = ns.div_euclid(1_000_000_000);
+        let 整句 = crate::report::human_time(secs);
+        let (日子, 时分) = 整句.split_once(' ').unwrap_or((整句.as_str(), ""));
+        let (年, 月日) = 日子.split_once('-').unwrap_or(("", 日子));
+        (
+            年.to_string(),
+            月日.to_string(),
+            时分.to_string(),
+            format!("{:02}", secs.rem_euclid(60)),
+        )
+    }
+    let (甲, 乙) = (拆(前), 拆(后));
+    if 甲.0 != 乙.0 {
+        format!("{}-{} → {}-{}", 甲.0, 甲.1, 乙.0, 乙.1)
+    } else if 甲.1 != 乙.1 {
+        format!("{} → {}", 甲.1, 乙.1)
+    } else if 甲.2 != 乙.2 {
+        format!("{} {} → {}", 甲.1, 甲.2, 乙.2)
+    } else if 甲.3 != 乙.3 {
+        format!("{} {}:{} → {}:{}", 甲.1, 甲.2, 甲.3, 乙.2, 乙.3)
+    } else {
+        format!("{} {}:{}（相差不到一秒）", 甲.1, 甲.2, 甲.3)
+    }
 }
 
 /// 一类操作的账。
@@ -736,6 +825,11 @@ pub struct Plan {
     pub unsupported: Vec<Unsupported>,
     /// 这份计划用的是哪份**能力档案**。
     pub capability: String,
+    /// [放不进目标的那几份](Self::rejected)是照哪一份**文件系统声明**筛出来的（[`Desired::filesystem`]）。
+    ///
+    /// 「放不进目标」那一栏的两句话从它来：不收的是哪几个字（[`RejectReason::advice`]）、单文件上限那句事实
+    /// （[`Filesystem::max_file_fact`]）。命令行与界面都照它说，不各自再去名册里查。
+    pub filesystem: Filesystem,
 
     /// 超出容量上限多少字节；没超或没设上限时是 `None`。
     ///
@@ -751,6 +845,17 @@ impl Plan {
     #[must_use]
     pub fn touched(&self) -> u64 {
         self.steps.len() as u64
+    }
+
+    /// **补回之后新增变为几个**（差距 C-1）：界面上补回那一格说明的前半句「补回后新增变为 N 个」照它写。
+    ///
+    /// **开没开[补回](Options::restore_missing)，这个数都一样**——它答的是「勾上之后会是几个」，不是「这一趟是几个」；
+    /// 勾上之后它就等于[新增](Self::adds)那一格。不在这儿算的话，界面得自己拿新增与[能补几个](Self::restorable)
+    /// 凑一遍，而开着补回时新增里已经含着补回的那几步，凑出来会多算一遍（ADR-0024）。
+    #[must_use]
+    pub fn adds_if_restored(&self) -> u64 {
+        let 已经补上的 = self.steps.iter().filter(|step| step.restore).count() as u64;
+        self.adds.files - 已经补上的 + self.restorable
     }
 
     /// **目标上对不上的那几件**涉及几个不同的变体。人认得的是这个数，不是文件数。
@@ -1169,6 +1274,7 @@ pub fn plan(
         unlistable_dirs: actual.unlistable_dirs,
         rejected: desired.rejected.clone(),
         collisions: Collision::among(&desired.rejected),
+        filesystem: desired.filesystem.clone(),
         unsupported: desired.unsupported.clone(),
         ..Plan::default()
     };
@@ -1837,9 +1943,9 @@ impl Desired {
             let folded = path::fold(&file.path);
             let 只差大小写 = only_folded.contains(&folded);
             let verdict = if collided.contains(&folded) {
-                Some((
-                    RejectReason::Collision,
-                    if 只差大小写 {
+                Some(Barred {
+                    reason: RejectReason::Collision,
+                    detail: if 只差大小写 {
                         format!(
                             "不止一份内容要落到这条路径上——目标大小写不敏感时它们是同一个文件；\
                              这一份来自 {}",
@@ -1854,12 +1960,17 @@ impl Desired {
                             file.source,
                         )
                     },
-                ))
+                    bad_name: None,
+                })
             } else {
                 filesystem.screen(&file.path, file.bytes, prefix_chars)
             };
             match verdict {
-                Some((reason, detail)) => self.rejected.push(Rejected {
+                Some(Barred {
+                    reason,
+                    detail,
+                    bad_name,
+                }) => self.rejected.push(Rejected {
                     path: file.path,
                     source: file.source,
                     kind: file.kind,
@@ -1868,12 +1979,14 @@ impl Desired {
                     reason,
                     only_folded: reason == RejectReason::Collision && 只差大小写,
                     detail,
+                    bad_name,
                     estimated: file.convert.is_some_and(|conversion| conversion.estimated),
                 }),
                 None => keep.push(file),
             }
         }
         self.files = keep;
+        self.filesystem = filesystem.clone();
         self.rejected
             .sort_by(|a, b| a.reason.cmp(&b.reason).then_with(|| a.path.cmp(&b.path)));
     }
@@ -2734,13 +2847,46 @@ mod tests {
         }
         // **逐类断各自该说的那件事**，不拿一句「含『不』」当橡皮图章——
         // 「读不到」里就有个「不」，那条断言拦不住任何回归。
+        // 前三句照稿逐字（拿主意的人 2026-10-01 裁 `F-5` A：照稿短句，「romcat」换成「工具」）；
+        // 「元数据读不到」稿没画，只去掉编号。
         assert_eq!(SurpriseKind::Gone.shown(), "设备上缺失");
-        assert!(SurpriseKind::Gone.refusal().contains("默认不补"));
-        assert!(SurpriseKind::Changed.refusal().contains("不覆盖"));
-        assert!(SurpriseKind::Changed.refusal().contains("不删除"));
-        assert!(SurpriseKind::Occupied.refusal().contains("不覆盖"));
-        assert!(SurpriseKind::Occupied.refusal().contains("一律不碰"));
+        assert_eq!(
+            SurpriseKind::Gone.refusal(),
+            "清单里有、设备上找不到的文件，可能被手动删除了。默认不补回。"
+        );
+        assert_eq!(
+            SurpriseKind::Changed.refusal(),
+            "设备上的文件和清单记录的不一致（大小或修改时间变了），可能被其他工具改过。\
+             不会覆盖，也不会删除。"
+        );
+        assert_eq!(
+            SurpriseKind::Occupied.refusal(),
+            "要复制的位置上已经有一个不是工具放的文件（清单外文件），不会覆盖。"
+        );
         assert!(SurpriseKind::Unreadable.refusal().contains("一律不动"));
+    }
+
+    #[test]
+    fn 异常各栏的说明句与放不进目标的劝告里都没有写给开发者的出处() {
+        // 票 `gui-draws-the-rest-of-the-design/15`（差距 D-14）：屏上不出现 `ADR-`（票 gl-03 立的规矩）。
+        // 这几句命令行与界面印的是同一份（`refusal`、`advice`），一处改了两处都干净。
+        for kind in SurpriseKind::all() {
+            assert!(!kind.refusal().contains("ADR-"), "{}", kind.refusal());
+        }
+        let roster = crate::capability::Roster::builtin();
+        for filesystem in roster.filesystems() {
+            for reason in RejectReason::all() {
+                let Some(怎么办) = reason.advice(filesystem) else {
+                    continue;
+                };
+                assert!(!怎么办.contains("ADR-"), "{}：{怎么办}", filesystem.name);
+            }
+            assert!(
+                !filesystem.max_file_fact().contains("ADR-"),
+                "{}",
+                filesystem.name
+            );
+        }
     }
 
     #[test]
@@ -2756,21 +2902,159 @@ mod tests {
     fn 放不进目标那几类都说得出该去哪儿办_撞车那一类不在这儿说() {
         // 撞车有得办（排除其中一份），那句话跟着那一段自己走；别的几类只能去主库里改名
         // 或者换一张卡——不说去哪儿办的话，人只会对着一行字发呆。
+        let exfat = 内置的("exFAT");
         for reason in RejectReason::all() {
             match reason {
-                RejectReason::Collision => assert!(reason.advice().is_none()),
+                RejectReason::Collision => assert!(reason.advice(&exfat).is_none()),
                 _ => {
-                    let 怎么办 = reason.advice().expect("说得出该去哪儿办");
+                    let 怎么办 = reason.advice(&exfat).expect("说得出该去哪儿办");
                     assert!(!怎么办.is_empty(), "{}", reason.label());
                 }
             }
         }
-        assert!(
-            RejectReason::BadName
-                .advice()
-                .is_some_and(|一句| 一句.contains("主库只读")),
-            "得说清工具不会替人改名：主库只读（ADR-0004）",
+        // **不收的字符那句把具体字符列出来**（拿主意的人 2026-10-01 裁 `F-5` A），字取这份文件系统的声明，
+        // 后半句照稿。
+        assert_eq!(
+            RejectReason::BadName.advice(&exfat).as_deref(),
+            Some("Windows 与 exFAT 都不收 \\ / : * ? \" < > |。在主库里改名后重新扫描即可。"),
         );
+    }
+
+    /// 内置名册里叫这个名字的那一份文件系统声明。
+    fn 内置的(name: &str) -> Filesystem {
+        crate::capability::Roster::builtin()
+            .filesystems()
+            .iter()
+            .find(|filesystem| filesystem.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("内置名册里有 {name}"))
+    }
+
+    #[test]
+    fn 单文件上限那句事实由文件系统一处给_零条也说得出() {
+        // 票 `gui-draws-the-rest-of-the-design/15`（差距 D-20）：「超过单文件上限」那一段零条也说事实，照稿两句。
+        assert_eq!(内置的("exFAT").max_file_fact(), "exFAT 不限制单文件大小。");
+        assert_eq!(
+            内置的("FAT32").max_file_fact(),
+            "FAT32 单文件不能超过 4 GiB。"
+        );
+        // 「不作声称」那一份什么都不查：不能说成「不限制」——那是一句关于卡的声称。
+        assert_eq!(
+            Filesystem::unlimited().max_file_fact(),
+            "这份能力档案不检查单文件大小。"
+        );
+    }
+
+    #[test]
+    fn 文件名里有不收的字符时说得出是哪几个() {
+        // 票 `gui-draws-the-rest-of-the-design/15`（差距 C-2）：「放不进目标」那一行右头照稿写「含有「:」」——
+        // 那几个字得是结构化交出来的，不从 `detail` 那句话里抠。
+        let exfat = 内置的("exFAT");
+        let mut desired = 期望状态(vec![
+            期望("PSP/最终幻想 纷争012: 前传.iso", 1024),
+            期望("PSP/谁? 是谁: 又是谁.iso", 1024),
+            期望("PSP/CON.iso", 1024),
+        ]);
+        desired.screen(&exfat, 0);
+        let 那一份 = |path: &str| {
+            desired
+                .rejected
+                .iter()
+                .find(|one| one.path == path)
+                .unwrap_or_else(|| panic!("{path} 该被拦下：{:?}", desired.rejected))
+                .clone()
+        };
+        let 冒号 = 那一份("PSP/最终幻想 纷争012: 前传.iso");
+        assert_eq!(冒号.reason, RejectReason::BadName);
+        assert_eq!(冒号.bad_name, Some(BadName::Chars(vec![':'])));
+        assert_eq!(
+            冒号.bad_name.as_ref().map(BadName::shown).as_deref(),
+            Some("含有「:」")
+        );
+        // 几个不同的字按出现的次序各写一次。
+        assert_eq!(
+            那一份("PSP/谁? 是谁: 又是谁.iso")
+                .bad_name
+                .as_ref()
+                .map(BadName::shown)
+                .as_deref(),
+            Some("含有「?」「:」"),
+        );
+        assert_eq!(
+            那一份("PSP/CON.iso").bad_name,
+            Some(BadName::Reserved("CON".to_string()))
+        );
+        // 别的原因拦下的那几份没有这一格。
+        let mut 撞车 = 期望状态(vec![期望("FC/Contra.zip", 1), 期望("FC/contra.zip", 1)]);
+        撞车.screen(&exfat, 0);
+        assert!(!撞车.rejected.is_empty());
+        assert!(撞车.rejected.iter().all(|one| one.bad_name.is_none()));
+    }
+
+    #[test]
+    fn 被修改过的那一份说得出哪一样变了_大小或修改时间() {
+        // 票 `gui-draws-the-rest-of-the-design/15`（差距 D-21）：「被修改过」每一行照稿写「大小 a → b」或「修改时间 a → b」。
+        // 那半句收在核心 `Surprise` 一处，命令行与界面印同一份。
+        let 一件 = |expected: Stamp, found: Stamp| Surprise {
+            kind: SurpriseKind::Changed,
+            path: "GBA/逆转裁判.gba".to_string(),
+            landing: None,
+            expected: Some(expected),
+            found: Some(found),
+            variant: "库/GBA/逆转裁判.gba".to_string(),
+            still_wanted: true,
+        };
+        let 戳 = |bytes: u64, mtime_ns: Option<i64>| Stamp { bytes, mtime_ns };
+        // 2026-08-30 与 2026-09-09 的零点（UTC）。
+        let 八月底 = 1_788_048_000_i64 * 1_000_000_000;
+        let 九月初 = 1_788_912_000_i64 * 1_000_000_000;
+        let 一小时 = 3_600 * 1_000_000_000;
+        let 兆 = 1024 * 1024;
+        assert_eq!(
+            一件(
+                戳(8 * 兆, Some(八月底)),
+                戳(8 * 兆 + 100 * 1024, Some(九月初))
+            )
+            .change()
+            .as_deref(),
+            Some("大小 8.00 MiB → 8.10 MiB"),
+            "大小变了就先说大小",
+        );
+        assert_eq!(
+            一件(戳(1024, Some(八月底)), 戳(1024, Some(九月初)))
+                .change()
+                .as_deref(),
+            Some("修改时间 08-30 → 09-09"),
+        );
+        // 同一天里改的：日子一样，就把钟点写出来，不写出一句「08-30 → 08-30」。
+        assert_eq!(
+            一件(
+                戳(1024, Some(八月底 + 一小时)),
+                戳(1024, Some(八月底 + 5 * 一小时))
+            )
+            .change()
+            .as_deref(),
+            Some("修改时间 08-30 01:00 → 05:00"),
+        );
+        // 大小差得太少、两边印出来一样时写到字节。
+        assert_eq!(
+            一件(戳(8 * 兆, None), 戳(8 * 兆 + 1, None))
+                .change()
+                .as_deref(),
+            Some("大小 8,388,608 字节 → 8,388,609 字节"),
+        );
+        // 有一边的时间取不到：说不出从几点变到几点，就照实说取不到。
+        assert_eq!(
+            一件(戳(1024, None), 戳(1024, Some(九月初)))
+                .change()
+                .as_deref(),
+            Some("修改时间取不到，证明不了没变"),
+        );
+        // 别的几类没有这一说。
+        let mut 没了 = 一件(戳(1, None), 戳(2, None));
+        没了.kind = SurpriseKind::Gone;
+        没了.found = None;
+        assert_eq!(没了.change(), None);
     }
 
     #[test]

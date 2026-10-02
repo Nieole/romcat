@@ -295,6 +295,26 @@ pub fn 画着的每一处(
     out
 }
 
+/// 这一帧画出来的那些**填着这个颜色的框**（`Shape::Rect` 的底色正好是它）：主按钮（强调色底）、警示底那一类。
+#[must_use]
+pub fn 填着这个颜色的框(
+    output: &egui::FullOutput,
+    color: egui::Color32,
+) -> Vec<egui::Rect> {
+    fn 收(shape: &egui::epaint::Shape, color: egui::Color32, out: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Rect(rect) if rect.fill == color => out.push(rect.rect),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, color, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, color, &mut out);
+    }
+    out
+}
+
 /// 指针不动地再跑这么多帧，够 egui 那道悬停延迟跨过去。
 ///
 /// egui 0.36 的 `Style::interaction.tooltip_delay` 默认 **0.5 秒**，而这一层没有真的

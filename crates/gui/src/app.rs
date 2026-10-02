@@ -702,6 +702,10 @@ impl App {
             self.browse.show_suspicions(&self.site);
             self.view = View::Browse;
         }
+        // **子库屏同步收场那条提示条上按了「查看任务」**（拿主意的人 2026-10-01 裁 `F-7`）：回执的下文在任务台历史里。
+        if self.sublibrary.take_tasks_jump() {
+            self.view = View::Tasks;
+        }
         if let Some(jump) = self.sublibrary.take_jump() {
             self.browse
                 .begin_editing(&self.site, &jump.sublibrary, jump.rule, jump.broken);

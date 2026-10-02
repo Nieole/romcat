@@ -383,6 +383,31 @@ fn 在掌机上删掉的东西不会自己长回来() {
 }
 
 #[test]
+fn 差量预览里设备上缺失那一类的说明句与界面同一句_不带写给开发者的出处() {
+    // 票 `gui-draws-the-rest-of-the-design/15`（差距 D-14、`F-5` A）：异常各栏那句「工具不会做什么」照稿改短、
+    // 去掉 ADR 编号；命令行印的是核心同一处那一句（`SurpriseKind::refusal`），跟着变短。
+    use romcat_core::sync::SurpriseKind;
+
+    let (_library, workspace, target) = 现场();
+    assert!(子库(workspace.path(), &["sync", "掌机"]).status.success());
+    fs::remove_file(target.path().join("FC/魂斗罗.zip")).expect("删得掉");
+
+    let out = 子库(workspace.path(), &["plan", "掌机"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    let 那一句 = SurpriseKind::Gone.refusal();
+    assert_eq!(
+        那一句,
+        "清单里有、设备上找不到的文件，可能被手动删除了。默认不补回。"
+    );
+    let 印的那一行 = text
+        .lines()
+        .find(|line| line.trim() == 那一句)
+        .unwrap_or_else(|| panic!("命令行没印界面那同一句：\n{text}"));
+    assert!(!印的那一行.contains("ADR-"), "{印的那一行}");
+}
+
+#[test]
 fn 手动拷进目标的东西同步之后一个字节都没变() {
     let (_library, workspace, target) = 现场();
     写(&target.path().join("saves/魂斗罗.sav"), &[9u8; 512]);

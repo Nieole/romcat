@@ -555,9 +555,12 @@ fn danger_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
     }
 }
 
-/// **警示按钮**那一档（设计稿 `.btn.warn`）：白底（`panel`）、红字、红描边（`lo`），悬停时照旧红描边——
-/// 拿主意的人定，与库屏「移除」同一档。按下与拿到焦点那一档描强调色，焦点得看得见。
-/// **全窗口只有这一处回答「警示按钮什么颜色」**。
+/// **警示按钮**那一档（设计稿 `.btn.warn`）：透明底、红字（`lo`），**平时描边 `line-2`、悬停才换 `lo`**——照稿
+/// （`.btn.warn{border-color:var(--line-2);background:transparent}`、`.btn.warn:hover{border-color:var(--lo)}`，
+/// 票 `gui-draws-the-rest-of-the-design/15` 差距 D-01）。从前平时就是红框白底，子库卡底「删除子库」一排里最扎眼的
+/// 一颗正是最不该常按的那一颗。按下与拿到焦点那一档描强调色，焦点得看得见。
+/// **全窗口只有这一处回答「警示按钮什么颜色」**：子库卡底「删除子库」、库屏根那一行「移除…」、待确认屏「拒绝」、
+/// 任务屏「停止」都用它。
 ///
 /// 用法同 [`primary_button`]：在一个 `ui.scope` 里改 `ui.visuals_mut()`。
 pub fn warn_button(visuals: &mut egui::Visuals) {
@@ -570,8 +573,12 @@ fn warn_button_in(palette: &Palette, visuals: &mut egui::Visuals) {
     let widgets = &mut visuals.widgets;
     // 每一档：底色、描边。字一律 `lo`。
     for (widget, fill, stroke) in [
-        (&mut widgets.inactive, palette.panel, palette.lo),
-        (&mut widgets.hovered, palette.panel, palette.lo),
+        (
+            &mut widgets.inactive,
+            egui::Color32::TRANSPARENT,
+            palette.line_2,
+        ),
+        (&mut widgets.hovered, egui::Color32::TRANSPARENT, palette.lo),
         (&mut widgets.active, palette.sunken, palette.accent),
     ] {
         widget.bg_fill = fill;
@@ -4199,16 +4206,19 @@ mod tests {
 
     #[test]
     fn 警示按钮的颜色取自令牌() {
-        // 设计稿 `.btn.warn`（拿主意的人定）：白底 `panel`、红字红描边 `lo`，悬停也是红描边。两套主题各查一遍。
+        // 设计稿 `.btn.warn`：透明底、红字 `lo`，**平时描边 `line-2`、悬停才换 `lo`**（票
+        // `gui-draws-the-rest-of-the-design/15` 差距 D-01；从前平时就是红框白底）。两套主题各查一遍。
         for theme in [Theme::Dark, Theme::Light] {
             let p = Tokens::builtin().color.theme(theme);
             let mut 警示 = theme.default_visuals();
             warn_button(&mut 警示);
             let w = &警示.widgets;
-            assert_eq!(w.inactive.weak_bg_fill, p.panel, "{theme:?}");
-            assert_eq!(w.inactive.bg_stroke.color, p.lo, "{theme:?}");
+            assert_eq!(w.inactive.weak_bg_fill, Color32::TRANSPARENT, "{theme:?}");
+            assert_eq!(w.inactive.bg_stroke.color, p.line_2, "{theme:?}");
             assert_eq!(w.inactive.fg_stroke.color, p.lo, "{theme:?}");
+            assert_eq!(w.hovered.weak_bg_fill, Color32::TRANSPARENT, "{theme:?}");
             assert_eq!(w.hovered.bg_stroke.color, p.lo, "{theme:?}");
+            assert_eq!(w.hovered.fg_stroke.color, p.lo, "{theme:?}");
         }
     }
 

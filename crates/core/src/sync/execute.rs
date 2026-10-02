@@ -313,6 +313,15 @@ impl Outcome {
     pub fn touched(&self) -> u64 {
         self.added.files + self.updated.files + self.deleted.files
     }
+
+    /// 这一趟**干干净净**走完了吗：没被按停、没主动收手、一步都没失败。
+    ///
+    /// 命令行拿它定退出码，界面拿它定卡头说不说「已同步」、收场那条提示条带不带「查看任务」——同一个判断只在
+    /// 这一处（ADR-0024）。
+    #[must_use]
+    pub fn clean(&self) -> bool {
+        !self.interrupted && !self.gave_up && self.failures.is_empty()
+    }
 }
 
 /// 执行一趟同步要的那几样东西。

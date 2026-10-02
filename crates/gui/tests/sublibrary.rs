@@ -39,7 +39,7 @@ use romcat_gui::headless;
 
 mod shared;
 use shared::{
-    占位活, 悬停在, 正好那一段画在哪儿, 点一下, 画出来的字, 画着的每一处
+    占位活, 填着这个颜色的框, 悬停在, 正好那一段画在哪儿, 点一下, 画出来的字, 画着的每一处,
 };
 
 /// 这一趟拿来当目标的那个 fixture 目录里，维护者自己拷进去的东西叫什么。
@@ -2070,11 +2070,11 @@ fn 同步从这里触发而且只碰清单里记录过的文件() {
     assert!(!outcome.interrupted);
     assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
     // **界面上要说得出这一趟干了什么**：被停的一趟、半数写失败的一趟与全成功的一趟
-    // 长得一样，那句「同步用了 X 秒」就是在骗人。
-    let notice = screen.notice().expect("有回执");
+    // 长得一样，那句「完成」就是在骗人。回执是底边那条提示条（拿主意的人 2026-10-01 裁 `F-7`）。
+    let 回执 = screen.receipt().expect("有回执");
     assert!(
-        notice.contains("新增") && notice.contains("删除"),
-        "回执只报了个总数：{notice}",
+        回执.contains("新增") && 回执.contains("删除"),
+        "回执只报了个总数：{回执}",
     );
 
     // **维护者自己拷进去的那份，连修改时间都没动过。**
@@ -2306,11 +2306,11 @@ fn 同步进任务台跑完之后留一条带耗时的历史而且清单写在�
     assert!(screen.syncing().is_none(), "跑完了却还记着一趟在同步");
     let outcome = screen.outcome().expect("跑完了");
     assert!(outcome.touched() > 0, "一步都没做，这条断言等于没测");
-    let notice = screen.notice().expect("有回执");
-    assert!(notice.contains("同步用了"), "回执没说耗时：{notice}");
+    // 回执是底边那条提示条（拿主意的人 2026-10-01 裁 `F-7`）：耗时不在它上头，在任务台历史那一行（下面断着）。
+    let 回执 = screen.receipt().expect("有回执");
     // **说得出是哪一台**：这句话可能是几十分钟前排上去的那一趟交回来的，
     // 而那会儿摊开的多半已经是另一张卡了。
-    assert!(notice.contains("掌机"), "回执没说是哪一台：{notice}");
+    assert!(回执.contains("掌机"), "回执没说是哪一台：{回执}");
 
     // **任务屏上留得下这一趟**：名字说得出是哪个子库，历史那一行带着耗时。
     let history = 场.app.tasks().history();
@@ -2450,8 +2450,12 @@ fn 排着队的那一趟同步撤得掉而且撤完目标与工作目录一处�
         "撤掉不是出错：{:?}",
         screen.error()
     );
-    let notice = screen.notice().expect("该说一句它被撤掉了");
-    assert!(notice.contains("撤掉"), "回执没说清是被撤掉了：{notice}");
+    let 回执 = screen.receipt().expect("该说一句它被撤掉了");
+    assert!(回执.contains("撤掉"), "回执没说清是被撤掉了：{回执}");
+    assert!(
+        回执.contains(Ending::<()>::Stopped.word()),
+        "回执的收场词与任务台历史那一行不是同一个：{回执}"
+    );
     assert_eq!(
         场.app.tasks().history()[0].ending,
         Ending::Stopped,
@@ -2684,13 +2688,19 @@ fn 按停一趟同步之后子库屏与任务屏说的是同一件事() {
          那是机器满载时的偶发，不是实现坏了）",
         ending.render(),
     );
+    let 收场词 = ending.word();
 
-    // 子库屏那句回执。
+    // 子库屏那句回执：底边那条提示条（拿主意的人 2026-10-01 裁 `F-7`），收场词与任务屏历史那一行同一个，
+    // 下文（按停时落了几件）在任务屏上——提示条带一颗「查看任务」。
     场.app.show_view(View::Sublibraries);
     let 子库屏 = 画两帧(&ctx, &mut 场);
     assert!(
-        子库屏.contains("按停"),
-        "子库屏那句回执没说这一趟是被按停的：\n{子库屏}",
+        子库屏.contains(&format!("「掌机」同步{收场词}")),
+        "子库屏那句回执没说这一趟是部分完成：\n{子库屏}",
+    );
+    assert!(
+        子库屏.contains("查看任务"),
+        "没走完的那一趟该带「查看任务」：\n{子库屏}"
     );
 
     // 任务屏历史那一行——**同一件事，同一个词**。
@@ -5196,6 +5206,122 @@ fn 四类异常分栏列出_每一栏写明工具不会做什么() {
     assert!(这一类几条(&场, SurpriseKind::Occupied) >= 1);
 }
 
+/// 把这一台的能力档案换成 `档案`（「目标设置」里挑一份、保存），跟着摊开它。保存会把缓着的差量作废，要重排。
+fn 换档案(场: &mut 现场, name: &str, 档案: &str) {
+    let (screen, site) = 场.app.sublibrary_and_site();
+    screen.edit_target(name);
+    screen.form_mut().capability = 档案.to_string();
+    assert!(screen.save(site), "{:?}", screen.error());
+    screen.open(site, name);
+}
+
+#[test]
+fn 差量预览五栏逐栏切过去_屏上没有写给开发者的出处_放不进目标照稿写不收的字符与单文件上限() {
+    // 票 `gui-draws-the-rest-of-the-design/15`（差距 D-14）：屏上不出现 `ADR-`（票 gl-03 立的规矩）。从前「设备上缺失」
+    // 那一栏的说明句与补回那格底下那句、「元数据读不到」那一句、不收的字符那条劝告都把编号画在屏上。
+    // 「放不进目标」那一栏照稿（D-19、D-20、C-2、`F-5` A）：小标题「文件名里有目标不收的字符」、那一行右头「含有「:」」、
+    // 劝告句列出具体字符、超过单文件上限那一段零条也说事实。
+    use romcat_core::capability::Roster;
+    use romcat_gui::sublibrary::Anomaly;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+    // 卡换成 exFAT，库里添一份文件名带「:」的：放不进目标那一栏有一条「文件名里有目标不收的字符」。
+    写(&场.库.path().join("GBA/逆转裁判: 复苏.zip"), &zip(1024));
+    场.重扫();
+    换档案(&mut 场, "掌机", "retroarch-exfat");
+    场.排预览();
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    let 不收的: Vec<_> = plan
+        .rejected
+        .iter()
+        .filter(|one| one.reason == RejectReason::BadName)
+        .collect();
+    assert_eq!(
+        不收的.len(),
+        1,
+        "前提：那一份文件名不收：{:?}",
+        plan.rejected
+    );
+    assert_eq!(这一类几条(&场, romcat_core::sync::SurpriseKind::Gone), 1);
+
+    for tab in Anomaly::all() {
+        场.app.sublibrary_and_site().0.show_anomaly(tab);
+        let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+        assert!(
+            屏上.contains(tab.shown()),
+            "没切到「{}」那一栏：\n{屏上}",
+            tab.shown()
+        );
+        assert!(
+            !屏上.contains("ADR-"),
+            "「{}」那一栏屏上印着写给开发者的出处：\n{屏上}",
+            tab.shown(),
+        );
+    }
+
+    // 停在「放不进目标」那一栏上（循环最后一栏）。
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    let exfat = Roster::builtin()
+        .filesystems()
+        .iter()
+        .find(|filesystem| filesystem.name == "exFAT")
+        .cloned()
+        .expect("内置名册里有 exFAT");
+    for 该有 in [
+        "文件名里有目标不收的字符 · 1".to_string(),
+        "超过单文件上限 · 0".to_string(),
+        "含有「:」".to_string(),
+        "Windows 与 exFAT 都不收 \\ / : * ? \" < > |。在主库里改名后重新扫描即可。".to_string(),
+        exfat.max_file_fact(),
+    ] {
+        assert!(
+            屏上.contains(&该有),
+            "「放不进目标」那一栏没照稿写「{该有}」：\n{屏上}"
+        );
+    }
+    assert_eq!(exfat.max_file_fact(), "exFAT 不限制单文件大小。");
+    // 那一行右头写的是不收的字，不再是体积。
+    assert!(
+        屏上.lines().any(|line| line == "含有「:」"),
+        "「含有「:」」该是那一行右头单独一段：\n{屏上}"
+    );
+}
+
+#[test]
+fn 被修改过那一栏每一行写出哪一样变了() {
+    // 票 `gui-draws-the-rest-of-the-design/15`（差距 D-21）：稿上那一栏每行是「路径 · 大小 8.0 MiB → 8.1 MiB」
+    // 或「路径 · 修改时间 08-30 → 09-09」。那半句由核心一处拼（`Surprise::change`），命令行同印。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(
+            romcat_core::sync::SurpriseKind::Changed,
+        ));
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    let 改过的: Vec<_> = plan
+        .surprises
+        .iter()
+        .filter(|one| one.kind == romcat_core::sync::SurpriseKind::Changed)
+        .collect();
+    assert_eq!(改过的.len(), 1, "前提：卡上有一份被改过的");
+    let 变了 = 改过的[0].change().expect("被修改过的说得出哪一样变了");
+    assert!(
+        变了.starts_with("大小 "),
+        "夹具改的是内容，大小跟着变：{变了}"
+    );
+    let 那一行 = format!("{} · {变了}", 改过的[0].path);
+    assert!(
+        屏上.lines().any(|line| line == 那一行),
+        "那一行没写出哪一样变了。该是「{那一行}」：\n{屏上}"
+    );
+}
+
 /// 这一帧里**只描边不铺底**的那几个框（`Shape::Rect`，描边有宽、底色全透明）各在哪儿：列表框、外框那一类。
 fn 描边框(output: &egui::FullOutput) -> Vec<egui::Rect> {
     fn 收(shape: &egui::epaint::Shape, out: &mut Vec<egui::Rect>) {
@@ -5291,7 +5417,7 @@ fn 补回那一格是带说明的勾选_说明缩进挂在名字底下() {
     let 帧 = 整张卡两帧(&ctx, &mut 场);
     let 屏上 = 画出来的字(&帧);
     let 名字 = 画着的每一处(&帧, &|text| text.starts_with("同步时补回这 "));
-    let 说明 = 画着的每一处(&帧, &|text| text.starts_with("只补清单里记录过的文件"));
+    let 说明 = 画着的每一处(&帧, &|text| text.starts_with("补回后新增变为 "));
     let ([名字], [说明]) = (名字.as_slice(), 说明.as_slice()) else {
         panic!("补回那一格的名字与说明该各画一处：\n{屏上}");
     };
@@ -5300,6 +5426,42 @@ fn 补回那一格是带说明的勾选_说明缩进挂在名字底下() {
         "说明没缩进到与名字左沿对齐：名字 {名字:?}，说明 {说明:?}"
     );
     assert!(说明.top() >= 名字.bottom() - 0.5, "说明不在名字底下");
+}
+
+#[test]
+fn 补回那一格的说明照稿写补回后新增变为几个_勾上之后等于新增那一格_不带写给开发者的出处() {
+    // 票 `gui-draws-the-rest-of-the-design/15`（差距 C-1、D-14）：稿上那句是「补回后新增变为 107 个；只补清单里记录过的文件」。
+    // 前半句的数由核心一处答（`Plan::adds_if_restored`）——开没开补回都是同一个数，勾上之后它就是新增那一格；
+    // 从前那句只有后半句，还把「（ADR-0015）」画在屏上。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+    let 补回之后 = 场
+        .app
+        .sublibrary()
+        .prepared()
+        .expect("排得出来")
+        .plan
+        .adds_if_restored();
+    let 该说的 = format!("补回后新增变为 {补回之后} 个；只补清单里记录过的文件");
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(屏上.contains(&该说的), "补回那一格的说明没照稿写：\n{屏上}");
+    assert!(!屏上.contains("ADR-"), "屏上印着写给开发者的出处：\n{屏上}");
+
+    // 勾上之后重排一趟：那句话还是同一个数，而新增那一格正好长到它。
+    场.勾上补回(true);
+    let plan = &场.app.sublibrary().prepared().expect("重排得出来").plan;
+    assert_eq!(
+        plan.adds_if_restored(),
+        补回之后,
+        "开没开补回，那个数得一样"
+    );
+    assert_eq!(
+        plan.adds.files, 补回之后,
+        "勾上之后新增那一格不是那句话说的数"
+    );
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(屏上.contains(&该说的), "勾上之后那句话变了：\n{屏上}");
 }
 
 #[test]
@@ -5592,7 +5754,9 @@ fn 被修改过那一栏有收回清单_按下先确认一层_取消则什么都
         "按下去没先问一层：\n{屏上}",
     );
     assert!(
-        屏上.lines().filter(|line| *line == 改过的).count() >= 2,
+        // 卡上那一行是「路径 · 大小 a → b」（差距 D-21），弹层上那一行是路径本身：两处各一行。
+        屏上.lines().filter(|line| line.starts_with(改过的)).count() >= 2
+            && 屏上.lines().any(|line| line == 改过的),
         "弹层上没写是哪几份：\n{屏上}",
     );
     assert!(
@@ -5966,9 +6130,9 @@ fn 没有有效预览时同步按不下去_屏上说清为什么() {
     assert_eq!(场.app.sublibrary().picked(), Some("掌机"));
     assert!(场.app.sublibrary().prepared().is_none());
 
-    // **摊开那一张的「同步」在差量底下**，没排过就压根不画；屏上那一颗是没摊开那一张的，
-    // 而它手上也没有预览，于是按不动。按得动的话，那一下会先把「备份卡」摊开再去同步
-    // （`actions_ui` 的 `Pressed::Sync`），于是「摊开的还是掌机」就是「那一下没按响」。
+    // **每张卡底都有一颗「同步」**（拿主意的人 2026-10-01 裁 `F-1` A：底排在卡最底）。屏上头一颗是摊开的「掌机」那一张的，
+    // 它手上没有预览，于是按不动；按得动的话那一趟会排上台（下面断 `syncing`）。另一颗是没摊开的「备份卡」的，
+    // 按得动的话那一下会先把「备份卡」摊开（`actions_ui` 的 `Pressed::Sync`），于是「摊开的还是掌机」也是「没按响」。
     let 屏上 = 按正好(&ctx, "同步", &mut 场);
     assert_eq!(
         场.app.sublibrary().picked(),
@@ -6018,6 +6182,256 @@ fn 没有有效预览时同步按不下去_屏上说清为什么() {
         "排过差量之后同步没跑起来：{:?}",
         场.app.sublibrary().error(),
     );
+}
+
+/// 同步过一趟、再换掉规则：差量里有删除（上一趟放上去的 SFC 那两份不要了），也有新增（GBA 那一份）。
+fn 摆出有删除的差量(场: &mut 现场) {
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    场.同步到底();
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        screen.remove_rule(site, "掌机", 1);
+    }
+    场.加规则("掌机", "平台=GBA");
+    场.排预览();
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    assert!(
+        plan.deletes.files > 0,
+        "前提：差量里有删除：{:?}",
+        plan.steps
+    );
+}
+
+#[test]
+fn 底排在卡最底_同步是主按钮_有删除时我看过删除清单在同步左边_不勾按不动同步() {
+    // 票 `gui-draws-the-rest-of-the-design/15`（拿主意的人 2026-10-01 裁 `F-1` A）：照稿一排挪到卡最底——
+    // 「生成差量预览｜同步（主按钮）…删除子库」，差量账、计划、异常都在它上面；「我看过删除清单（N 个，X）」
+    // 有删除才出现、摆在「同步」左边——ADR-0015「删除前必须干跑预览列出清单」那道闸不丢。
+    // 从前摊开那张把「生成差量预览」「删除子库」挪到差量**上头**，「同步」另摆在最底、是默认样式。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出有删除的差量(&mut 场);
+
+    let 帧 = 整张卡两帧(&ctx, &mut 场);
+    let 屏上 = 画出来的字(&帧);
+    let 一处 = |那一段: &str| -> egui::Rect {
+        let 每一处 = 画着的每一处(&帧, &|text| text == 那一段);
+        let [那里] = 每一处.as_slice() else {
+            panic!(
+                "「{那一段}」该正好画一处，画了 {} 处：\n{屏上}",
+                每一处.len()
+            );
+        };
+        *那里
+    };
+    let 同步 = 一处("同步");
+    let 生成 = 一处("生成差量预览");
+    let 删除子库 = 一处("删除子库");
+    let 异常那一排 = 一处("设备上缺失");
+    let 点头 = 画着的每一处(&帧, &|text| text.starts_with("我看过删除清单（"));
+    let [点头] = 点头.as_slice() else {
+        panic!("有删除时该有「我看过删除清单」那一格：\n{屏上}");
+    };
+    for (名字, 那一颗) in [
+        ("生成差量预览", 生成),
+        ("同步", 同步),
+        ("删除子库", 删除子库),
+    ] {
+        assert!(
+            那一颗.top() > 异常那一排.bottom(),
+            "「{名字}」不在差量底下：{那一颗:?}，异常那一排 {异常那一排:?}"
+        );
+        assert!(
+            (那一颗.center().y - 同步.center().y).abs() < 4.0,
+            "「{名字}」与「同步」不在同一排：{那一颗:?} / {同步:?}"
+        );
+    }
+    assert!(
+        生成.right() < 同步.left(),
+        "「生成差量预览」该在「同步」左边"
+    );
+    assert!(
+        点头.right() <= 同步.left() && 点头.left() > 生成.right(),
+        "「我看过删除清单」该摆在「同步」左边：{点头:?} / {同步:?}"
+    );
+    assert!(
+        (点头.center().y - 同步.center().y).abs() < 4.0,
+        "「我看过删除清单」不在底排"
+    );
+    assert!(删除子库.left() > 同步.right(), "「删除子库」该在右头");
+
+    // **不勾按不动**：按下去什么都不排。
+    let 屏上 = 整张卡上按正好(&ctx, &mut 场, "同步", false);
+    assert!(
+        场.app.sublibrary().syncing().is_none(),
+        "没勾「我看过删除清单」，「同步」却排上了：\n{屏上}"
+    );
+    // 勾上之后「同步」是**主按钮**（强调色底），按得动。
+    let 点头那一格 = 屏上
+        .lines()
+        .find(|line| line.starts_with("我看过删除清单（"))
+        .expect("那一格还在")
+        .to_string();
+    整张卡上按正好(&ctx, &mut 场, &点头那一格, false);
+    let 帧 = 整张卡两帧(&ctx, &mut 场);
+    let 强调色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme())
+        .accent;
+    let 同步 = 画着的每一处(&帧, &|text| text == "同步")[0];
+    assert!(
+        填着这个颜色的框(&帧, 强调色)
+            .iter()
+            .any(|框| 框.contains_rect(同步)),
+        "「同步」不是主按钮（强调色底）：\n{}",
+        画出来的字(&帧)
+    );
+    整张卡上按正好(&ctx, &mut 场, "同步", false);
+    assert!(
+        场.app.sublibrary().syncing().is_some() || 场.app.sublibrary().outcome().is_some(),
+        "勾上之后「同步」照旧按不动：{:?}",
+        场.app.sublibrary().error()
+    );
+}
+
+#[test]
+fn 同步完屏顶不再有那段回执_任务台历史里有那一趟_成功的提示条不带查看任务() {
+    // 票 `gui-draws-the-rest-of-the-design/15`（拿主意的人 2026-10-01 裁 `F-7` A，照 `Q664` 刮削弹层的先例）：
+    // 回执进任务台历史，屏上只一条底边提示条——成功的不用警示色、不带按钮。从前屏顶一段「「X」同步用了 N 秒：…」，
+    // 成功也是警示黄。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    场.同步到底();
+
+    let screen = 场.app.sublibrary();
+    assert!(screen.error().is_none(), "{:?}", screen.error());
+    assert!(
+        screen.notice().is_none(),
+        "屏顶还摆着回执：{:?}",
+        screen.notice()
+    );
+    let 回执 = screen.receipt().expect("底边该有一条提示条").to_string();
+    assert!(
+        回执.contains("掌机") && 回执.contains(Ending::Done(()).word()),
+        "提示条没说清是哪一台、怎么收的场：{回执}"
+    );
+    let history = 场.app.tasks().history();
+    assert!(
+        history[0].name.contains("掌机") && history[0].ending == Ending::Done(()),
+        "任务台历史里没有那一趟：{} {:?}",
+        history[0].name,
+        history[0].ending,
+    );
+
+    let 帧 = 整张卡两帧(&ctx, &mut 场);
+    let 屏上 = 画出来的字(&帧);
+    assert!(屏上.contains(&回执), "提示条没画出来：\n{屏上}");
+    assert!(!屏上.contains("同步用了"), "屏顶那段回执还在：\n{屏上}");
+    assert!(
+        !屏上.contains("查看任务"),
+        "成功的那一趟不该带「查看任务」：\n{屏上}"
+    );
+    // 提示条的字不是警示色（`mid`，屏顶那段黄字从前用的就是它）。
+    let 警示色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme())
+        .mid;
+    assert!(
+        !字的颜色(&帧, &回执).contains(&警示色),
+        "成功的提示条用了警示色"
+    );
+    // 差距 D-02 与态 8：刚干干净净同步完的那张卡，卡头写「已同步 · 清单 N 条」，提示框去掉末句「选择集修改后…」。
+    let 清单几条 = 场
+        .app
+        .site()
+        .catalog
+        .manifest("掌机")
+        .expect("读得出清单")
+        .files
+        .len();
+    assert!(
+        屏上.contains(&format!("已同步 · 清单 {清单几条} 条")),
+        "刚同步完的卡头没写已同步：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("生成预览只读取数据，不会写入任何文件。"),
+        "提示框不在：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("选择集修改后，已有的预览会失效。"),
+        "刚同步完的卡上提示框没去掉末句：\n{屏上}"
+    );
+}
+
+/// 这一帧里**正好**写着 `那一段` 的每一处各是什么颜色。
+fn 字的颜色(output: &egui::FullOutput, 那一段: &str) -> Vec<egui::Color32> {
+    fn 收(shape: &egui::epaint::Shape, 那一段: &str, out: &mut Vec<egui::Color32>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 那一段 => {
+                out.push(text.fallback_color);
+                out.extend(text.galley.job.sections.iter().map(|one| one.format.color));
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, 那一段, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, 那一段, &mut out);
+    }
+    out
+}
+
+#[test]
+fn 同步有几步没做成时提示条带查看任务_按下去换到任务屏() {
+    // 票 `gui-draws-the-rest-of-the-design/15`（`F-7` A）：失败的提示条带「查看任务」——回执的下文在任务台历史里。
+    // 收场词照今天核心库交出的那一个写（有步骤没做成、连着失败放弃时记部分完成那一档归 `verdict-store-and-sync/14`）。
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    // 卡变成只读：每一步都写不进去。
+    let 原来 = fs::metadata(场.卡.path()).expect("在").permissions();
+    fs::set_permissions(场.卡.path(), fs::Permissions::from_mode(0o555)).expect("改得了权限");
+    场.同步到底();
+    fs::set_permissions(场.卡.path(), 原来).expect("改得回来");
+
+    let screen = 场.app.sublibrary();
+    assert!(
+        screen.notice().is_none(),
+        "屏顶还摆着回执：{:?}",
+        screen.notice()
+    );
+    let 回执 = screen.receipt().expect("底边该有一条提示条").to_string();
+    let 收场 = 场.app.tasks().history()[0].ending.word();
+    assert!(
+        回执.contains(收场),
+        "提示条上的收场词与任务台历史那一行不是同一个：{回执} / {收场}"
+    );
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.contains("查看任务"),
+        "没做成的那一趟该带「查看任务」：\n{屏上}"
+    );
+    // 出过岔子的那一趟没把目标对齐：卡头不说已同步，提示框整句。
+    assert!(
+        !屏上.contains("已同步 · 清单"),
+        "没做成也说已同步：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("选择集修改后，已有的预览会失效。"),
+        "没做成的那一趟提示框也去了末句：\n{屏上}"
+    );
+    整张卡上按正好(&ctx, &mut 场, "查看任务", false);
+    assert_eq!(场.app.view(), View::Tasks, "按「查看任务」没换到任务屏");
 }
 
 #[test]
