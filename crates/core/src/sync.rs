@@ -234,8 +234,8 @@ pub struct Rejected {
 /// 一份内容**目标吃不下，而这一版转不了**。
 ///
 /// 库里那批**裹着一整棵目录树**的 PSV `.tar.zst`（Vita3K 只认 zip/vpk/vci，而这一版只解
-/// 得动单条目的容器，挂账 D91）、33.4% 容量的 Switch `.nsz`/`.xcz`（ES-DE 不认）、
-/// 几乎无人支持的 `.rar` 都落在这里。
+/// 得动单条目的容器，挂账 D91）、占 Switch 三成多容量的 `.nsz`/`.xcz`（ES-DE 不认；见台账
+/// `docs/library-facts.md`）、几乎无人支持的 `.rar` 都落在这里。
 ///
 /// **照样搬过去**，只是点名说出口。不搬的话是静默丢掉用户亲手挑中的东西，那比白占
 /// 一点地方糟得多；而假装已经处理妥当，正是 ADR-0017 那句「矩阵错误比不转换更糟」
@@ -343,7 +343,79 @@ impl Manifest {
     pub fn present(&self) -> impl Iterator<Item = &ManifestFile> {
         self.files.iter().filter(|file| !file.absent)
     }
+
+    /// **收回清单**（`CONTEXT.md`）：照差量预览里**被修改过**的那几条，把清单改成「设备上眼下那一份就是
+    /// 工具放的那一份」。交回改过的清单与收回了哪几份；**一个字节都不碰**，落库由
+    /// [`Site::take_back_into_manifest`](crate::site::Site::take_back_into_manifest) 做。
+    ///
+    /// 收回之后 [`plan`] 核对它时对得上，于是它不再进[被修改过](SurpriseKind::Changed)那一栏：主库那份没变
+    /// 就**不动**，变了就**更新**，选择集不要了就**删除**——工具此后有权更新或删除它，这正是这件事扩了
+    /// 行为边界（ADR-0015）、要人先点头并留一笔审计的原因。
+    ///
+    /// **只收三样都对得上的**，其余的一条都不碰：
+    ///
+    /// - 那一条是**被修改过**。别的几类不是「设备上有一份对不上的」，没有可收的东西。
+    /// - 清单里那一条记着的**还是那条异常说的那个戳**（[`Surprise::expected`]）。人按下去时看着的是排预览
+    ///   那一刻的差量；之后清单又变过（另一趟同步把它重新放过一遍），那条异常说的就不是眼下这一份了——
+    ///   照着它改，等于替人收回一份他没看见的东西。
+    /// - 设备上那一份的戳**带着修改时间**。[`Stamp::proves_same`] 缺了修改时间就证明不了一致，记进去
+    ///   下一趟照旧报它被修改过——收了等于白说一句「之后不再提示」。
+    ///
+    /// 一份都收不了时交回的那张表是空的；该对人说的那句是 [`NOTHING_TO_TAKE_BACK`]。
+    #[must_use]
+    pub fn take_back(&self, surprises: &[Surprise]) -> (Self, Vec<TakenFile>) {
+        let wanted: BTreeMap<&str, (Stamp, Stamp, bool)> = surprises
+            .iter()
+            .filter(|one| one.kind == SurpriseKind::Changed)
+            .filter_map(|one| {
+                let found = one.found.filter(|stamp| stamp.mtime_ns.is_some())?;
+                Some((one.path.as_str(), (one.expected?, found, one.still_wanted)))
+            })
+            .collect();
+        let mut out = self.clone();
+        let mut taken = Vec::new();
+        for file in &mut out.files {
+            let Some(&(expected, found, still_wanted)) = wanted.get(file.path.as_str()) else {
+                continue;
+            };
+            if file.stamp != expected {
+                continue;
+            }
+            taken.push(TakenFile {
+                path: file.path.clone(),
+                was: file.stamp,
+                now: found,
+                still_wanted,
+            });
+            file.stamp = found;
+            file.absent = false;
+        }
+        (out, taken)
+    }
 }
+
+/// **收回清单**里的一份：设备上那一份被修改过的文件，清单原先记着什么、此后记成什么。
+///
+/// 审计里「哪几份」记的就是它（[`TakeBack`](crate::verdict::TakeBack)）：光记路径说不出收回的是**哪一份**
+/// ——同一条路径上，人日后再改一遍就是另一份了。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TakenFile {
+    /// 相对子库根的路径。
+    pub path: String,
+    /// 清单原先记着的那个戳：工具当初放上去的那一份。
+    pub was: Stamp,
+    /// 设备上那一份的戳——人在差量预览上看见的那一份。收回之后清单记的就是它。
+    pub now: Stamp,
+    /// 收回那一刻**选择集还要不要它**（[`Surprise::still_wanted`]）。不要了的那几份，收回之后下一趟
+    /// 同步就会**删掉**——收回放开的正是这一层权，所以按下去之前要说出口，审计里也记着。
+    pub still_wanted: bool,
+}
+
+/// 照差量里那几条**一份都收不回**时（[`Manifest::take_back`] 交回一张空表）对人说的那一句。
+///
+/// 判据只在 [`Manifest::take_back`] 一处，这句话跟着它写在这儿：界面另写一份的话，判据改了那句话不会跟着改。
+pub const NOTHING_TO_TAKE_BACK: &str = "这几份眼下收不回：清单在排这份差量之后又变过，\
+     或者设备上那一份读不到修改时间。重新排一趟差量预览再看。";
 
 /// 目标设备上实际躺着的一个文件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -1876,7 +1876,7 @@ fn 卡不在手边算得出选中多少_装不装得下如实说算不出() {
 
 #[test]
 fn 折一趟事实全部设备共用() {
-    // 折事实是走一遍全库（真机上 343 ms，挂账 D156）。一台一折的话，五张卡就是五趟。
+    // 折事实是走一遍全库（真机上三百多毫秒，挂账 D156）。一台一折的话，五张卡就是五趟。
     let mut 场 = 现场::摆好();
     场.建子库("掌机", "");
     场.建子库("备份卡", "");
@@ -2351,7 +2351,7 @@ fn 排着队的那一趟同步撤得掉而且撤完目标与工作目录一处�
 
 #[test]
 fn 算一遍容量进任务台跑完之后留一条带耗时的历史() {
-    // 挂单 Q87：它原先跑在画帧那条线程上，真机量级上按一下窗口僵 343 毫秒（挂账 D156），
+    // 挂单 Q87：它原先跑在画帧那条线程上，真机量级上按一下窗口僵三百多毫秒（挂账 D156），
     // 期间连「停下」都没有。
     let mut 场 = 现场::摆好();
     场.建子库("掌机", "");
@@ -5033,6 +5033,243 @@ fn 同步过一趟之后那几个还缺着_补回那一格照旧摆得出而且�
         "记着不补的那一条勾上之后也该补回：{:?}",
         plan.steps.iter().map(|step| &step.path).collect::<Vec<_>>(),
     );
+}
+
+/// 在整张卡一帧画全的画面里（[`画两帧整张卡`] 那个高度）按一下**正好**写着 `那一段` 的地方，交回松开之后
+/// 再画两帧画出来的字。`最后一处` 为真时按画出来的最后一处——弹层盖在屏上面、画在最后，页脚上那一颗是它。
+///
+/// 差量预览那一块在卡片下半截，1280×800 的视口里整块落在视口外（[`画两帧整张卡`] 的文档）。
+///
+/// # Panics
+/// 屏上没有正好写着那一段的地方时当场炸。
+fn 整张卡上按正好(
+    ctx: &egui::Context,
+    场: &mut 现场,
+    那一段: &str,
+    最后一处: bool,
+) -> String {
+    let 整张卡 = || {
+        let mut input = headless::input();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(headless::VIEWPORT[0], 2400.0),
+        ));
+        input
+    };
+    let 头一帧 = headless::frame(ctx, 整张卡(), |ui| 场.app.ui(ui));
+    let 找到 = if 最后一处 {
+        最后一处正好画着(&头一帧, 那一段)
+    } else {
+        正好那一段画在哪儿(&头一帧, 那一段)
+    };
+    let Some(位置) = 找到 else {
+        panic!(
+            "屏上没有正好写着「{那一段}」的地方，没处点：\n{}",
+            画出来的字(&头一帧)
+        );
+    };
+    let 按 = |pressed: bool| egui::Event::PointerButton {
+        pos: 位置,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut input = 整张卡();
+    input.events.push(egui::Event::PointerMoved(位置));
+    input.events.push(按(true));
+    headless::frame(ctx, input, |ui| 场.app.ui(ui));
+    let mut input = 整张卡();
+    input.events.push(按(false));
+    input.events.push(egui::Event::PointerGone);
+    headless::frame(ctx, input, |ui| 场.app.ui(ui));
+    画两帧整张卡(ctx, 场)
+}
+
+#[test]
+fn 被修改过那一栏有收回清单_按下先确认一层_取消则什么都不写_确认之后那一份不再出现() {
+    // 票 `verdict-store-and-sync/08`，词表**收回清单**：把设备上被修改过的那几份记回清单，此后工具有权更新或
+    // 删除它们。它扩的是工具在目标设备上的行为边界（ADR-0015），所以按下去先问一层，说清是哪几份、收回意味着
+    // 什么；取消就什么都不写。点头之后记一笔审计（谁、何时、哪几份，住沉淀库），差量当场重排，那一份不再报。
+    use romcat_core::sync::SurpriseKind;
+    let 改过的 = "SFC/圣剑传说 3 汉化版.zip";
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+    assert_eq!(
+        这一类几条(&场, SurpriseKind::Changed),
+        1,
+        "前提：一份被修改过"
+    );
+    let 主库标识 = 场.app.site().library_identity.clone();
+    let 清单原样 = 场.app.site().catalog.manifest("掌机").expect("读得回");
+    let 卡上原样 = 卡上有什么(场.卡.path());
+
+    // **那颗按钮只在「被修改过」那一栏里**：别的栏没有可收回的东西。
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        !屏上.lines().any(|line| line == "收回清单…"),
+        "「设备上缺失」那一栏里也摆着收回清单：\n{屏上}",
+    );
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(
+            SurpriseKind::Changed,
+        ));
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.lines().any(|line| line == "收回清单…"),
+        "「被修改过」那一栏没有收回清单：\n{屏上}",
+    );
+
+    // ── 按下去：先问一层，说清是哪几份、收回意味着什么。还没点头，两份库一个字都没写。
+    let 屏上 = 整张卡上按正好(&ctx, &mut 场, "收回清单…", false);
+    assert!(
+        场.app.sublibrary().take_back_dialog_open(),
+        "按下去没先问一层：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().filter(|line| *line == 改过的).count() >= 2,
+        "弹层上没写是哪几份：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("工具此后有权更新或删除它们"),
+        "弹层上没说清收回意味着什么：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("谁、何时、哪几份"),
+        "弹层上没说这一下要记一笔审计：\n{屏上}",
+    );
+    assert_eq!(
+        场.app.site().catalog.manifest("掌机").expect("读得回"),
+        清单原样,
+        "还没点头清单就变了",
+    );
+
+    // ── 取消：什么都不写。
+    整张卡上按正好(&ctx, &mut 场, "取消", true);
+    assert!(
+        !场.app.sublibrary().take_back_dialog_open(),
+        "按了取消弹层还开着",
+    );
+    assert_eq!(
+        场.app.site().catalog.manifest("掌机").expect("读得回"),
+        清单原样,
+        "按了取消清单却变了",
+    );
+    assert!(
+        场.app
+            .site()
+            .store
+            .take_backs(&主库标识)
+            .expect("读得回")
+            .is_empty(),
+        "按了取消审计里却多了一笔",
+    );
+    assert_eq!(
+        这一类几条(&场, SurpriseKind::Changed),
+        1,
+        "按了取消那一份就不报了"
+    );
+
+    // ── 点头：清单收下设备上那一份，审计记一笔，差量重排之后它不再出现在「被修改过」里。
+    整张卡上按正好(&ctx, &mut 场, "收回清单…", false);
+    let 屏上 = 整张卡上按正好(&ctx, &mut 场, "收回清单", true);
+    场.等任务跑完();
+    assert!(
+        !场.app.sublibrary().take_back_dialog_open(),
+        "点了头弹层还开着",
+    );
+    assert!(
+        场.app.sublibrary().error().is_none(),
+        "{:?}",
+        场.app.sublibrary().error()
+    );
+    assert!(
+        屏上.contains("已把 1 个文件收回「掌机」的清单"),
+        "收回之后没说一声：\n{屏上}",
+    );
+    let 账 = 场.app.site().store.take_backs(&主库标识).expect("读得回");
+    assert_eq!(账.len(), 1, "{账:?}");
+    assert_eq!(账[0].sublibrary, "掌机");
+    assert_eq!(
+        账[0].who,
+        romcat_core::verdict::account(),
+        "谁那一格不是这台机器上登录的账户",
+    );
+    assert_eq!(
+        账[0]
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![改过的],
+    );
+    assert_eq!(
+        这一类几条(&场, SurpriseKind::Changed),
+        0,
+        "收回之后那一份还列在被修改过里",
+    );
+    assert_eq!(
+        卡上有什么(场.卡.path()),
+        卡上原样,
+        "收回清单动了设备上的文件"
+    );
+}
+
+#[test]
+fn 同步还排在台上时按收回清单_说清为什么_不开那一层也一个字不写() {
+    // 台上那一趟同步收回来时照排它那一刻的清单把清单整份记一遍——这时收回的会被它盖掉。按钮**不画灰**
+    // （ADR-0005「不禁按钮」）：照样按得下，按了在屏上说为什么不行，那一层不开，两份库一个字都不写。
+    use romcat_core::sync::SurpriseKind;
+
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(
+            SurpriseKind::Changed,
+        ));
+    let 主库标识 = 场.app.site().library_identity.clone();
+    let 清单原样 = 场.app.site().catalog.manifest("掌机").expect("读得回");
+
+    // 先把台上那个位子占住，于是同步是**排着队**的那一趟。
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着位子");
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.sync(site, tasks);
+    }
+    assert!(场.app.sublibrary().syncing().is_some(), "同步没排上队");
+
+    let 屏上 = 整张卡上按正好(&ctx, &mut 场, "收回清单…", false);
+    assert!(
+        !场.app.sublibrary().take_back_dialog_open(),
+        "同步还在台上，那一层却开了",
+    );
+    assert!(
+        屏上.contains("现在收回的会被它盖掉"),
+        "按了没说为什么不行：\n{屏上}",
+    );
+    assert_eq!(
+        场.app.site().catalog.manifest("掌机").expect("读得回"),
+        清单原样,
+        "同步还在台上，清单却变了",
+    );
+    assert!(
+        场.app
+            .site()
+            .store
+            .take_backs(&主库标识)
+            .expect("读得回")
+            .is_empty(),
+        "同步还在台上，审计里却多了一笔",
+    );
+
+    占位.按停(场.app.tasks_mut());
+    场.等任务跑完();
 }
 
 #[test]

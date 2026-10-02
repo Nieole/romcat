@@ -3733,6 +3733,55 @@ fn 子库_差量异常_放不进目标_暗色() {
     );
 }
 
+#[test]
+fn 子库_差量异常_被修改过_浅色() {
+    拍差量异常(
+        "sublibrary/anomalies-changed-light",
+        Theme::Light,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Changed),
+    );
+}
+
+#[test]
+fn 子库_差量异常_被修改过_暗色() {
+    拍差量异常(
+        "sublibrary/anomalies-changed-dark",
+        Theme::Dark,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Changed),
+    );
+}
+
+/// **收回清单那层确认弹层**（票 `verdict-store-and-sync/08`）：差量异常那一台停在「被修改过」那一栏上，按「收回清单…」。
+/// 画面与那几对同高（[`差量那几对的画面`]）：按钮在卡片下半截，800 高的画面里按不着它。
+fn 拍收回清单弹层(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 摆着异常的一台();
+    现场
+        .app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(
+            romcat_core::sync::SurpriseKind::Changed,
+        ));
+    let mut harness = 开一扇(主题, 差量那几对的画面, move |ui| {
+        现场.app.ui(ui);
+    });
+    按(&mut harness, romcat_gui::sublibrary::TAKE_BACK_BUTTON);
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 子库_收回清单弹层_浅色() {
+    拍收回清单弹层("sublibrary/take-back-light", Theme::Light);
+}
+
+#[test]
+fn 子库_收回清单弹层_暗色() {
+    拍收回清单弹层("sublibrary/take-back-dark", Theme::Dark);
+}
+
 // ——— 任务屏（票 `gui-looks-like-the-design/25`）———
 //
 // **这一段垫的是合成数据（`demo` 模块），只在 `demo` 特性下编**：截图照正式构建跑时（不开 `demo`）
