@@ -551,19 +551,20 @@ impl App {
                 continue;
             }
             // **体检那一趟也先认**（`roots::Screen::settle_health`）：同上，整条只读。
-            let Some(done) = self.roots.settle_health(done) else {
+            let Some(done) = self.roots.settle_health(&mut self.site, done) else {
                 // **重新成型那一趟例外**（票 `gui-looks-like-the-design/29`）：它交回的是同一样
                 // 东西（一份新报告），可它**把变体整批换过了**——浏览屏那几页与屏头那些数因此
                 // 作废。这一句住在窗口里而不在库屏里，因为只有这儿够得着两屏（ADR-0005）。
                 if self.roots.take_reshaped() {
                     self.browse.invalidate(&self.site);
+                    self.browse.forget_fix_said();
                     self.recount();
                 }
                 continue;
             };
             // **各屏按任务号认领自己那一趟，不是它的就放过去。** 将来识别与刮削接上来
             // 时，各自在这儿多认一次。
-            if self.roots.settle(&self.site, &done) {
+            if self.roots.settle(&mut self.site, &done) {
                 self.browse.invalidate(&self.site);
                 self.recount();
                 // **识别跑完了，待确认队列自己重新列过**：那一屏的每一批都是识别结论
@@ -838,8 +839,15 @@ impl App {
             View::Library => {
                 let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
                 roots.ui(ui, site, board);
+                // **库屏上刚落过一笔成型纠正**（票 `verdict-store-and-sync/12`）：作品详情那一面缓着的待生效
+                // 跟着作废，回到那一面时照沉淀库重读——那一处标的是「待生效」，不再给纠正的门。
+                if roots.take_fixed() {
+                    self.browse.forget_page();
+                }
             }
             View::Browse => {
+                // 「N 处待生效」那一条上的「重新成型」在台上已有一趟时按不动：那一趟由库屏排、库屏记着。
+                self.browse.set_reshaping(self.roots.health().reshaping());
                 let (browse, site, board) = (&mut self.browse, &mut self.site, &mut self.board);
                 browse.ui(ui, site, board);
                 // **刮削面板里的优先级那一层刚保存了一份**：浏览屏手上缓着的那一份跟着换，
@@ -849,10 +857,14 @@ impl App {
                     browse.set_priorities(priorities);
                     browse.refresh(site);
                 }
-                // **作品详情那一面刚落过一笔成型纠正**（票 `gui-looks-like-the-design/29`）：
-                // 纠正只写沉淀库，中立库里的变体要重算一遍才跟着变。**全窗口只有库屏那一处排
-                // 重新成型**，报告才不会两份各说各的。
-                if browse.take_reshaped() {
+                // **作品详情那一面刚落过一笔成型纠正**（票 `gui-looks-like-the-design/29`）：纠正连同一条待生效
+                // 记录落进沉淀库，**不当场重新成型**（票 `verdict-store-and-sync/12`）——库屏那份缓着的待生效作废。
+                if browse.take_fixed() {
+                    self.roots.forget_pending();
+                }
+                // **那一面「N 处待生效」那一条上按了「重新成型」**：中立库里的变体要重算一遍才跟着变。
+                // **全窗口只有库屏那一处排重新成型**，报告才不会两份各说各的。
+                if browse.take_reshape_asked() {
                     let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
                     roots.reshape(site, board);
                 }

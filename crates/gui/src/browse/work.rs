@@ -150,6 +150,10 @@ pub struct Page {
     /// 这几个变体跟前有没有一处**成型存疑**（核心库 `Catalog::shaping_doubts_near`，判据与库体检那一格
     /// 同一处，ADR-0024）：「变体」那一面头上那块建议照它画（票 `gui-looks-like-the-design/29`）。
     doubts: Vec<romcat_core::shape::Doubt>,
+    /// 这份主库眼下**待生效**的那几处人工纠正（沉淀库 `Store::pending_fixes`，票 `verdict-store-and-sync/12`）：
+    /// 「N 处待生效」那一条照它画；纠正过、还没重新成型的那一处与那张卡标「待生效」，不再给纠正与撤销的门
+    /// （`PendingFixes::covers`）。
+    pending: romcat_core::verdict::PendingFixes,
 }
 
 /// 编辑态下一格的草稿。
@@ -194,6 +198,7 @@ impl Page {
         self.sublibraries.clear();
         self.exported = None;
         self.doubts.clear();
+        self.pending = romcat_core::verdict::PendingFixes::default();
         // **收藏与合集这两格也得清**（票 `gui-looks-like-the-design/13`）：忘了清，
         // 换到另一个作品时那两行会先画着上一个作品的合集，等重读那一趟落下来才改口。
         self.favorite = None;
@@ -324,12 +329,16 @@ impl Screen {
             Some((key, CardPress::Reveal)) => self.reveal(site, &key),
             Some((_, CardPress::Adjust(第几处))) => self.adjust_shaping(site, 第几处),
             Some((key, CardPress::UndoShaping)) => self.undo_shaping(site, &key),
+            // **全窗口只有库屏那一处排重新成型**：这里只记一笔，由窗口转过去（`App::ui`）。
+            Some((_, CardPress::Reshape)) => self.reshape_asked = true,
             None => {}
         }
         // **成型纠正那一层每一帧都画**：它开没开着记在这一屏上（`crate::dialog` 那条规矩）。
         self.fixer.ui(ui.ctx(), site);
+        // **落过一笔不当场重新成型**（票 `verdict-store-and-sync/12`）：纠正连同一条待生效记录落进沉淀库，
+        // 这一页重读（那一处标「待生效」、「N 处待生效」跟着加一），库屏那份缓着的待生效由窗口转告作废。
         if self.fixer.take_applied() {
-            self.reshaped = true;
+            self.fixed = true;
             if let Some(page) = self.page.as_mut() {
                 page.forget();
             }
@@ -637,10 +646,16 @@ impl Screen {
                 }
             }
         };
+        // **待生效**那几处（票 `verdict-store-and-sync/12`）：住沉淀库，与这一页的别的几格一起重读。
+        let pending = crate::shaping::read_pending(site).unwrap_or_else(|why| {
+            self.error = Some(why);
+            romcat_core::verdict::PendingFixes::default()
+        });
         let Some(page) = self.page.as_mut() else {
             return;
         };
         page.doubts = 存疑;
+        page.pending = pending;
         page.favorite = favorite;
         page.collections = collections;
         page.row = row;
@@ -943,13 +958,28 @@ impl Screen {
             None => {}
         }
         let mut 设首选 = None;
+        // **「N 处待生效」那一条**（票 `verdict-store-and-sync/12`）：成型纠正攒着，按一下才跑一趟全库；
+        // 跑之前说清眼下这一面上的变体还是旧的成型结构。
+        let 赶不上 = self.reshaping.map(|mark| page.pending.later_than(mark));
+        if crate::shaping::pending_ui(ui, page.pending.len(), 赶不上) {
+            设首选 = Some((String::new(), CardPress::Reshape));
+        }
+        if !page.pending.is_empty() {
+            ui.add_space(tokens.space.work_card_gap);
+        }
         // **成型存疑那一块建议**（设计稿 `shapeSuspect`，票 `gui-looks-like-the-design/29`）：
         // 哪一处存疑、凭什么，都由核心库答（`Catalog::shaping_doubts_near`，ADR-0024）。
         for (at, doubt) in page.doubts.iter().enumerate() {
+            // 纠正过、还没重新成型的那一处标「待生效」，不再给「调整成型…」（判据在核心库，`PendingFixes::covers`）。
+            let 待生效 = page.pending.covers(&doubt.items);
             let 按了 = look::note_box(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = look::step(1);
                 ui.label(crate::font::strong(doubt.kind.label()));
                 look::help(ui, &doubt.reason());
+                if 待生效 {
+                    crate::shaping::pending_tag(ui);
+                    return false;
+                }
                 look::small_buttons(ui, |ui| {
                     ui.scope(|ui| {
                         look::primary_button(ui.visuals_mut());
@@ -1000,7 +1030,10 @@ impl Screen {
                     .iter()
                     .find(|one| one.field == Field::TranslationGroup),
             };
-            if let Some(按了) = variant_card(ui, variant, detail, 文件, 简称, 汉化组) {
+            // 撤掉过、还没重新成型的那一张卡标「待生效」，不再给「撤销成型纠正」。
+            let 待生效 = page.pending.covers(std::slice::from_ref(&variant.row.key));
+            if let Some(按了) = variant_card(ui, variant, detail, 文件, 简称, 汉化组, 待生效)
+            {
                 设首选 = Some((variant.row.key.clone(), 按了));
             }
         }
@@ -2051,6 +2084,7 @@ fn variant_card(
     files: &[FileLine],
     short_name: &str,
     group: Option<&FieldShown>,
+    pending: bool,
 ) -> Option<CardPress> {
     let tokens = Tokens::builtin();
     work_card(
@@ -2091,8 +2125,13 @@ fn variant_card(
                         .clicked()
                 });
             // **人工纠正出来的变体才摆撤销**（票 `gui-looks-like-the-design/29`）：是不是人工纠正
-            // 出来的由核心库记着（`VariantRow::manual`），这一层不自己认。
+            // 出来的由核心库记着（`VariantRow::manual`），这一层不自己认。撤掉过、还没重新成型的
+            // 那一张摆「待生效」（票 `verdict-store-and-sync/12`）。
+            if detail.row.manual && pending {
+                crate::shaping::pending_tag(ui);
+            }
             let 撤成型 = detail.row.manual
+                && !pending
                 && look::small_buttons(ui, |ui| {
                     ui.button(crate::shaping::UNDO)
                         .on_hover_text(
@@ -3630,6 +3669,8 @@ enum CardPress {
     Adjust(usize),
     /// 「撤销成型纠正」：清掉这个变体上那几行人工纠正，回到成型规则原本的结果。
     UndoShaping,
+    /// 「N 处待生效」那一条上的「重新成型」（票 `verdict-store-and-sync/12`）：不属于哪一张卡，键是空的。
+    Reshape,
 }
 
 /// 头一个平台上的**首选变体**：那个平台上某个变体的详情里核心库排好的第一名（`VariantDetail::preferred_now`）。
