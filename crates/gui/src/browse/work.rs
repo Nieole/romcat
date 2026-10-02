@@ -627,10 +627,9 @@ impl Screen {
         page.sublibraries = sublibraries;
         page.exported = exported;
         page.platform_names = self.work.as_ref().map_or_else(String::new, |work| {
-            let manifest = romcat_core::platform::Manifest::builtin();
             work.platforms
                 .iter()
-                .map(|code| manifest.full_name(code).unwrap_or(code))
+                .map(|code| platform_full_name(code))
                 .collect::<Vec<_>>()
                 .join(" / ")
         });
@@ -3610,13 +3609,27 @@ fn head_of<'a>(work: &WorkDetail, details: &'a [VariantDetail]) -> Option<&'a st
         .find_map(VariantDetail::preferred_now)
 }
 
+/// 一个平台的**全名**（核心库平台表 `Manifest::full_name`）；表里没写全名的退回代号。头上「平台」那一格、合并向导第二步的组头
+/// 都问这一处（其余平台的全名归票 `gui-draws-the-rest-of-the-design/04`）。
+pub(super) fn platform_full_name(code: &str) -> &str {
+    // **内置清单只解一次**：`Manifest::builtin()` 要解一遍 TOML，合并向导每帧都问。
+    static 平台表: std::sync::OnceLock<romcat_core::platform::Manifest> =
+        std::sync::OnceLock::new();
+    平台表
+        .get_or_init(romcat_core::platform::Manifest::builtin)
+        .full_name(code)
+        .unwrap_or(code)
+}
+
 /// 平台色块标签（设计稿 `.hplat`）：平台色底、小号加粗的平台代号。字取令牌 `[color.platform-badge]`——两套主题都是白字，
 /// 照稿，与库体检、浏览屏卡面上的平台标同一格。
 ///
 /// 从前这里取 `on-accent`（挂单 `Q924`，随 `Q894` 危险按钮那一条），理由是「两套主题里它都接近白」——这个前提不成立：
 /// `on-accent` 暗色那一格是深色，压在 `MD`、`PSP` 这几种深平台色上几乎看不清。拿主意的人 2026-09-30 改裁照稿取白
 /// （挂单 `Q1236`，票 `gate-and-tests/06`）。
-fn platform_chip(ui: &mut egui::Ui, platform: &str) {
+///
+/// 合并向导第二步的组头、两处搜索结果那一框（`browse::merge`）摆的也是这一枚（设计稿那几处都是 `.hplat`）。
+pub(super) fn platform_chip(ui: &mut egui::Ui, platform: &str) {
     let tokens = Tokens::builtin();
     let 字色 = tokens.color.platform_badge.ink;
     let galley = ui.painter().layout_no_wrap(

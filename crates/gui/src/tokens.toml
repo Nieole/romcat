@@ -491,6 +491,17 @@ hero-facts-columns = 6    # 头上那几格事实一排几格（设计稿 .hfact
 hero-card-mark-offset = [4, 16]  # 头上那张字卡的水印伸出格子多少（右, 下）（设计稿 .tc-wm 的 right:-4px、bottom:-16px）
 hero-card-title-rows = 4  # 头上那张字卡的标题至多几行（设计稿 .tc-t 的 -webkit-line-clamp:4）
 merge-cover-width = 44    # 合并向导第一步每一行左边封面那一格的宽，高按 card-cover-ratio 折（设计稿 .mwit .mc 的 width:44px；圆角取 radius.small，稿上 4px）
+choice-card-padding = [10, 12]  # 整张是一颗按钮的选择卡（合并向导第一步那一行、「移出此作品」那两档）的内边距（上下, 左右）（设计稿 .mwit 与 .asmode 的 padding:10px 12px）；「移出此作品」头上那张变体卡也是这一对（稿上那个 .vrow 行内写的 padding:10px 12px）
+merge-card-gap    = 12    # 合并向导第一步那一张卡里圆点、封面、字、「移除」之间（设计稿 .mwit 的 gap:12px）
+mode-card-gap     = 10    # 「移出此作品」那两档一张卡里圆点与字之间（设计稿 .asmode 的 gap:10px）
+mode-indent       = 28    # 「移出此作品」那一档底下的输入框与说明缩进多少（设计稿 DLG.split 里 .field 的 padding-left:28px）
+search-list-max   = 170   # 搜索结果那一框最高多高，再多框里滚（设计稿 .srch 的 max-height:170px）
+search-row-padding = [7, 10]  # 搜索结果一行的内边距（上下, 左右）（设计稿 .srch button 的 padding:7px 10px）
+search-row-gap    = 10    # 搜索结果一行里几样之间（设计稿 .srch button 的 gap:10px）
+variant-group-head-padding = [9, 12]  # 合并向导第二步平台组头一排的内边距（上下, 左右）（设计稿 .vgrp>.row:first-child 的 padding:9px 12px）
+variant-row-padding = [8, 12]  # 合并向导第二步一行变体的内边距（上下, 左右）（设计稿 .vrow 的 padding:8px 12px）
+variant-row-gap   = 10    # 那一行里几列之间（设计稿 .vrow 的 gap:10px）
+variant-check-column = 22 # 那一行头一列勾选框那一格的宽（设计稿 .vrow 的 grid-template-columns 头一格 22px）
 media-strip-columns = 3   # 概览里媒体那一块摆几格（设计稿 .mstrip 的 repeat(3,1fr) 与 slice(0,3)）
 overview-columns  = [1.55, 1.0]  # 概览左右两栏的比例（设计稿 .ov 的 minmax(0,1.55fr) minmax(0,1fr)）
 work-card-columns = [0.9, 1.1]   # 变体卡身子左右两半的比例（设计稿 .vbody 的 minmax(0,.9fr) minmax(0,1.1fr)）
@@ -511,6 +522,8 @@ hero-tint         = 0.09  # 作品详情页头上那一块底色里调进几成�
 dist-bar-opacity  = 0.7   # 「细分」底下占比条上填的那一截淡到几成（设计稿 .dist .b i 的 opacity:.7）
 drill-tint        = 0.05  # 下钻之后就地那一框底色里调进几成强调色（设计稿 .drill 的 color-mix(… 5%)）
 suspicion-tint    = 0.06  # 疑似同一作品那张建议卡底色里调进几成强调色（设计稿 .sugg 的 color-mix(… 6%)）
+muted-option-opacity = 0.65  # 按不动、整格调淡的那一行带说明的勾选淡到几成（设计稿合并向导第三步「以后扫描到…也自动归入」那一格 <label class="opt" style="opacity:.65">）
+variant-off-opacity = 0.5  # 合并向导第二步取消勾选的那一行变体整行淡到几成（设计稿 .vrow.off 的 opacity:.5）
 
 # ── 阴影的形状：两套主题共用，颜色是各主题里同名的那一格（pop → pop-color） ──
 # check_tokens.py 核偏移（照稿）与扩散（照下面那条换算）；模糊进它的豁免表，换算时稿上那组数钉在脚本里。

@@ -1029,7 +1029,14 @@ fn option_row(
 /// （那一行 18.8 点排出来是 19），旁边那个名字就是这么高——拿字体行高去摆，记号会比字高出小半个点。
 fn option_line_height(ui: &egui::Ui) -> f32 {
     let 字号 = font_size(ui.ctx(), Tokens::builtin().font.size_small_plus);
-    egui::WidgetText::from(egui::RichText::new(" ").size(字号))
+    line_height(ui, &egui::FontId::proportional(字号))
+}
+
+/// 用这个字体**排出来的一行字**有多高（不是字体的行高 `Fonts::row_height`：排好的一段字的高取整到整像素，
+/// 旁边真画的那一行就是这么高）。要先定一行多高、再把几样竖直居中摆进去的地方用它。
+#[must_use]
+pub fn line_height(ui: &egui::Ui, font: &egui::FontId) -> f32 {
+    egui::WidgetText::from(egui::RichText::new(" ").font(font.clone()))
         .into_galley(
             ui,
             Some(egui::TextWrapMode::Extend),
@@ -1067,6 +1074,235 @@ pub fn radio_dot(ui: &mut egui::Ui, selected: bool) -> egui::Response {
         圈住记号(ui, &response, 圆点, true);
     }
     response
+}
+
+/// **只画不接点击的一枚单选圆点**（[`radio_dot`] 那一枚的样子，占同样大）：摆在一颗**整个都按得动**的东西里头
+/// （搜索结果那一框里的一行，[`search_list`]）——圆点自己接点击的话，正好按在圆点上的那一下就落不到那一行上。
+pub fn radio_mark(ui: &mut egui::Ui, selected: bool) {
+    let 行高 = option_line_height(ui);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(Tokens::builtin().layout.radio_diameter, 行高),
+        egui::Sense::hover(),
+    );
+    if ui.is_rect_visible(rect) {
+        paint_radio(ui.painter(), rect.center(), selected, palette(ui));
+    }
+}
+
+/// 选择卡左边那枚圆点竖直摆在哪儿（[`choice_card`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DotAt {
+    /// 整张卡竖直正中（设计稿 `.mwit` 的 `align-items:center`）：右边那几样也竖直居中。
+    Middle,
+    /// 对着右边头一行字（`size-body` 一行）的中线（设计稿 `.asmode`：圆点与粗体名同一行，说明挂在底下）：右边那几样顶对齐。
+    FirstLine,
+}
+
+/// 一张**整张是一颗按钮的选择卡**（设计稿 `.mwit`、`.asmode`）：左边一枚单选圆点（[`radio_dot`] 那一枚的样子），
+/// 隔 `gap`，右边由调用方摆。**点哪儿都算**——卡里另有按钮的（第一步那颗「移除」），那颗按钮摆在卡的上头、照旧接它自己的点击。
+///
+/// 面板底、`line` 描边、`radius.large` 圆角，内边距 `choice-card-padding`；指针在卡上时描边换 `line-2`；选中时描边换强调色、
+/// 外头再描一圈 `candidate-ring` 宽的 `accent-soft`（设计稿 `[aria-checked="true"]` 的 `box-shadow:0 0 0 3px`，与候选卡片同一圈）。
+/// 卡里的字不可选（选字会把点击吃掉）。拿到焦点时照全仓单选那一条**只圈圆点**（拿主意的人 2026-10-01 在票
+/// `gui-draws-the-rest-of-the-design/01` 裁）；读屏念的是 `label`。
+///
+/// 交回整张卡的点击与 `add` 交回的东西；自己不改任何状态，选中哪一张由调用方记。
+pub fn choice_card<R>(
+    ui: &mut egui::Ui,
+    selected: bool,
+    label: &str,
+    gap: f32,
+    dot: DotAt,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let [上下, 左右] = layout.choice_card_padding;
+    let palette = palette(ui);
+    let 底 = ui.painter().add(egui::Shape::Noop);
+    let mut 点位 = egui::Rect::NOTHING;
+    // 圆点那一格的高：对着头一行字时是 `size-body` 一行（与旁边那个粗体名同高，圆点落在它的中线上）。
+    let 头一行高 = match dot {
+        DotAt::Middle => layout.radio_diameter,
+        DotAt::FirstLine => line_height(
+            ui,
+            &egui::FontId::proportional(font_size(ui.ctx(), tokens.font.size_body)),
+        )
+        .max(layout.radio_diameter),
+    };
+    let shown = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        ui.style_mut().interaction.selectable_labels = false;
+        egui::Frame::new()
+            .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let 一排 = |ui: &mut egui::Ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    // 圆点那一格先占住位置，**等右边摆完再画**：竖直居中要等整张卡多高定下来才知道。
+                    点位 = ui
+                        .allocate_exact_size(
+                            egui::vec2(layout.radio_diameter, 头一行高),
+                            egui::Sense::hover(),
+                        )
+                        .0;
+                    add(ui)
+                };
+                match dot {
+                    DotAt::Middle => ui.horizontal(一排).inner,
+                    DotAt::FirstLine => ui.horizontal_top(一排).inner,
+                }
+            })
+            .inner
+    });
+    let response = shown.response;
+    let 整张 = response.rect;
+    let 圆点 = egui::Rect::from_center_size(
+        egui::pos2(
+            点位.center().x,
+            match dot {
+                DotAt::Middle => 整张.center().y,
+                DotAt::FirstLine => 点位.center().y,
+            },
+        ),
+        egui::Vec2::splat(layout.radio_diameter),
+    );
+    if ui.is_rect_visible(整张) {
+        let 圆角 = tokens.radius.large;
+        let 描边色 = if selected {
+            palette.accent
+        } else if ui.is_enabled() && ui.rect_contains_pointer(整张) {
+            palette.line_2
+        } else {
+            palette.line
+        };
+        let mut 形 = Vec::new();
+        if selected {
+            形.push(egui::Shape::Rect(egui::epaint::RectShape::stroke(
+                整张,
+                圆角,
+                egui::Stroke::new(layout.candidate_ring, palette.accent_soft),
+                egui::StrokeKind::Outside,
+            )));
+        }
+        形.push(egui::Shape::Rect(egui::epaint::RectShape::new(
+            整张,
+            圆角,
+            palette.panel,
+            egui::Stroke::new(layout.control_stroke, 描边色),
+            egui::StrokeKind::Inside,
+        )));
+        ui.painter().set(底, egui::Shape::Vec(形));
+        paint_radio(ui.painter(), 圆点.center(), selected, palette);
+        圈住记号(ui, &response, 圆点, true);
+    }
+    let enabled = ui.is_enabled();
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, label)
+    });
+    egui::InnerResponse::new(shown.inner, response)
+}
+
+/// 一框**搜索结果**（设计稿 `.srch`）：`line` 描边、`radius.medium` 圆角的一个框，最高 `search-list-max`，再多就在框里滚；
+/// 一行就是一颗按钮（`.srch button`）——内边距 `search-row-padding`、几样之间 `search-row-gap`、竖直居中，行间一条分隔线，
+/// 指针在那一行上时底换 `panel-2`，选中的那一行（`row` 交回真）底是 `accent-soft`（`DLG.split` 里挑中的那个作品）。
+/// 一行里摆什么由 `row` 画；行里的字不可选（选字会把点击吃掉）。一行都没有时框里只写 `empty`（说明那一档）。
+///
+/// 交回这一帧被按下的是第几行。
+pub fn search_list(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    rows: usize,
+    empty: &str,
+    mut row: impl FnMut(&mut egui::Ui, usize) -> bool,
+) -> Option<usize> {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let palette = palette(ui);
+    let [上下, 左右] = layout.search_row_padding;
+    let 线 = egui::Stroke::new(layout.control_stroke, palette.line);
+    let 圆角 = tokens.radius.medium;
+    let mut 按了 = None;
+    egui::Frame::new()
+        .stroke(线)
+        .corner_radius(圆角)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if rows == 0 {
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        help(ui, empty);
+                    });
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .id_salt(id_salt)
+                .max_height(layout.search_list_max)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for at in 0..rows {
+                        let 底 = ui.painter().add(egui::Shape::Noop);
+                        let shown = ui.scope_builder(
+                            egui::UiBuilder::new().sense(egui::Sense::click()),
+                            |ui| {
+                                ui.style_mut().interaction.selectable_labels = false;
+                                egui::Frame::new()
+                                    .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        // 一行多高由里头那几样说了算：平台色标（`tag-height`）与一行字，不是按钮那么高。
+                                        // 先明说这一行的高，几样才都对着同一条中线竖直居中（先摆的那枚圆点不会落在上头）。
+                                        ui.spacing_mut().interact_size.y = 0.0;
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(ui.available_width(), layout.tag_height),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.x =
+                                                    layout.search_row_gap;
+                                                row(ui, at)
+                                            },
+                                        )
+                                        .inner
+                                    })
+                                    .inner
+                            },
+                        );
+                        let 这一行 = shown.response.rect;
+                        let 底色 = if shown.inner {
+                            Some(palette.accent_soft)
+                        } else if ui.rect_contains_pointer(这一行) {
+                            Some(palette.panel_2)
+                        } else {
+                            None
+                        };
+                        if let Some(底色) = 底色 {
+                            // 头一行与末一行的底跟着框的圆角收，不戳出框外。
+                            let 角 = 圆角.saturating_sub(1);
+                            let mut 收角 = egui::CornerRadius::ZERO;
+                            if at == 0 {
+                                收角.nw = 角;
+                                收角.ne = 角;
+                            }
+                            if at + 1 == rows {
+                                收角.sw = 角;
+                                收角.se = 角;
+                            }
+                            ui.painter()
+                                .set(底, egui::Shape::rect_filled(这一行, 收角, 底色));
+                        }
+                        focus_ring(ui.ctx(), ui.clip_rect(), &shown.response);
+                        if shown.response.clicked() {
+                            按了 = Some(at);
+                        }
+                        if at + 1 < rows {
+                            divider(ui);
+                        }
+                    }
+                });
+        });
+    按了
 }
 
 /// 在 `center` 上画一枚单选圆点（[`radio_dot`] 那一枚的样子），颜色取这一套主题的令牌。
