@@ -205,14 +205,21 @@ impl Plan {
 
         if !self.rejected.is_empty() {
             heading(&mut out, "放不进目标存储");
+            // **几个、多大走核心那一笔账**（[`Plan::rejected_tally`]）：界面那一格印的是同一笔。
+            // 从前这里自己把每一份的字节加一遍，撞在一起的几份各算一遍（挂单 `Q1029`）。
+            let 放不进 = self.rejected_tally();
             let _ = writeln!(
                 out,
                 "{} 个、{}。**这一趟一个都不传**——传必然失败，而失败会在卡上留下\n\
                  半份文件、在清单里留下一条谎。这几个也**不会被删掉**：万一目标上已经\n\
                  有一份，那是这条声明自己可能就错了，不是它该被删的理由。",
-                thousands(self.rejected.len() as u64),
-                human_bytes(self.rejected.iter().map(|file| file.bytes).sum()),
+                thousands(放不进.files),
+                human_bytes(放不进.bytes),
             );
+            // 份数一份一份数、容量按落点算：不写明的话两个数读着对不上。
+            if let Some(口径) = self.rejected_bytes_basis() {
+                let _ = writeln!(out, "{口径}。");
+            }
             for reason in RejectReason::all() {
                 let rows: Vec<_> = self
                     .rejected
@@ -236,7 +243,7 @@ impl Plan {
                 }
                 // 归堆是核心一处的事，命令行与界面配出来的对子因此是同一批（ADR-0024）。
                 if reason == RejectReason::Collision {
-                    let 几处 = self.collisions();
+                    let 几处 = &self.collisions;
                     for 一处 in 几处.iter().take(EXAMPLES) {
                         let _ = writeln!(out, "  {}  撞上 {} 份", 一处.path, 一处.files.len());
                         for file in &一处.files {

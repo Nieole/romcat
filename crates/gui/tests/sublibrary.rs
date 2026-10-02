@@ -5035,6 +5035,72 @@ fn 同步过一趟之后那几个还缺着_补回那一格照旧摆得出而且�
     );
 }
 
+#[test]
+fn 差量预览排着时勾补回_台上那一趟先停掉_按新的勾排的那一趟起来() {
+    // 票 `verdict-store-and-sync/13`（挂单 `Q1029`）：勾一下「补回」要重排一趟，因为旧那一趟是按改之前
+    // 那个开关排的。从前只是**不认它了**、没停它——它照旧占着任务台「一次只跑一趟」的位子跑完，
+    // 新排的那一趟排在它后面，真库上勾一下要等两趟，而前一趟的结果没人要。
+    //
+    // 先拿一趟占位活把台上那个位子占住，于是那一趟差量预览稳稳排在队里，停它不带竞态
+    // （与「排差量预览按停之后……」那一条同一个办法）。跑着的那一趟走的也是同一个 `Board::stop`。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着位子");
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.preview(site, tasks);
+    }
+    let 旧的 = 场.app.sublibrary().previewing().expect("排上队了");
+
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.set_restore_missing(site, tasks, true);
+    }
+    let 新的 = 场
+        .app
+        .sublibrary()
+        .previewing()
+        .expect("勾上之后该重排一趟");
+    assert_ne!(新的, 旧的, "没有重排");
+    let 排着的: Vec<u64> = 场.app.tasks().queued().iter().map(|(id, _)| *id).collect();
+    assert!(
+        !排着的.contains(&旧的),
+        "按旧的勾排的那一趟还在队里，白跑一趟：{排着的:?}"
+    );
+    assert!(排着的.contains(&新的), "新排的那一趟不在队里：{排着的:?}");
+
+    占位.按停(场.app.tasks_mut());
+    场.等任务跑完();
+
+    // **旧那一趟记成已取消，排出来的只有新那一趟**：任务历史里说的就是台上真发生的事。
+    let history = 场.app.tasks().history();
+    let 旧那条 = history
+        .iter()
+        .find(|record| record.id == 旧的)
+        .expect("停掉的那一趟留了一条");
+    assert_eq!(旧那条.ending, Ending::Stopped, "旧那一趟没被停");
+    let 排完的: Vec<u64> = history
+        .iter()
+        .filter(|record| record.name.contains("排差量预览") && record.ending == Ending::Done(()))
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(排完的, [新的], "排完的不只新那一趟");
+
+    // 屏上认的是新那一趟：补回那几步照这个勾排；**停掉旧那一趟不算人按了停下**，不说「已取消」。
+    let screen = 场.app.sublibrary();
+    assert!(screen.restore_missing());
+    assert!(screen.previewing().is_none(), "跑完了却还记着一趟在排");
+    assert!(screen.prepared().is_some(), "新那一趟的差量没交回来");
+    assert!(
+        screen
+            .notice()
+            .is_none_or(|notice| !notice.contains("已取消")),
+        "旧那一趟被停，屏上却说成人按了停下：{:?}",
+        screen.notice(),
+    );
+}
+
 /// 在整张卡一帧画全的画面里（[`画两帧整张卡`] 那个高度）按一下**正好**写着 `那一段` 的地方，交回松开之后
 /// 再画两帧画出来的字。`最后一处` 为真时按画出来的最后一处——弹层盖在屏上面、画在最后，页脚上那一颗是它。
 ///
@@ -5293,7 +5359,8 @@ fn 落点撞车列出撞的是哪两份_排除其中一份之后另一份正常�
         .prepared()
         .expect("排得出来")
         .plan
-        .collisions();
+        .collisions
+        .clone();
     assert_eq!(撞车.len(), 1, "该只有一处撞车：{撞车:?}");
     assert_eq!(撞车[0].path, "SFC/幻想传说 汉化版.zip");
     assert_eq!(撞车[0].files.len(), 2, "撞的是两份");
@@ -5348,7 +5415,7 @@ fn 落点撞车列出撞的是哪两份_排除其中一份之后另一份正常�
     );
     场.排预览();
     let plan = &场.app.sublibrary().prepared().expect("重排得出来").plan;
-    assert!(plan.collisions().is_empty(), "还撞着：{:?}", plan.rejected);
+    assert!(plan.collisions.is_empty(), "还撞着：{:?}", plan.rejected);
     assert!(
         plan.steps
             .iter()
@@ -5393,12 +5460,12 @@ fn 放不进目标一栏含撞车超单文件上限与文件名不收的字符�
     // **几个小标题的数加得起来**：撞车那一段写的是「N 份，撞成 M 处」——只写「M 处」的话，
     // 栏上那个数（按份）与栏里那几个数就加不起来，人只会以为哪儿漏了。
     let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
-    let 撞上几份: usize = plan.collisions().iter().map(|一处| 一处.files.len()).sum();
+    let 撞上几份: usize = plan.collisions.iter().map(|一处| 一处.files.len()).sum();
     assert!(
         屏上.contains(&format!(
             "{} · {撞上几份} 份，撞成 {} 处",
             RejectReason::Collision.label(),
-            plan.collisions().len(),
+            plan.collisions.len(),
         )),
         "撞车那一段没把「几份」与「几处」一起说清：\n{屏上}",
     );
@@ -5406,6 +5473,68 @@ fn 放不进目标一栏含撞车超单文件上限与文件名不收的字符�
         撞上几份 as u64,
         plan.rejected_tally().files,
         "这份夹具里放不进目标的该全是撞车的",
+    );
+}
+
+#[test]
+fn 放不进目标那一格撞车的几份只算一次容量_屏上写明口径() {
+    // 票 `verdict-store-and-sync/13`（挂单 `Q1029`）：撞在一起的几份要的是卡上同一条路径，那一格的容量
+    // 从前把它们各算一遍。份数照旧一份一份数（大数字数的是文件），容量一条落点只算一次——
+    // 两个数的口径不一样，所以**写在屏上**（截图门看不到悬停）。
+    let ctx = headless::context();
+    let 另一块盘 = temp_dir("gui-sub-lib2-once");
+    写(&另一块盘.path().join("SFC/幻想传说 汉化版.zip"), &zip(9999));
+    let mut 场 = 现场::摆好带(Some(&另一块盘));
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+    assert_eq!(
+        plan.collisions.len(),
+        1,
+        "夹具该撞成一处：{:?}",
+        plan.rejected
+    );
+    let 大的那份 = plan.collisions[0]
+        .files
+        .iter()
+        .map(|one| one.bytes)
+        .max()
+        .expect("至少两份");
+    let 两份加起来: u64 = plan.collisions[0].files.iter().map(|one| one.bytes).sum();
+    assert_ne!(大的那份, 两份加起来);
+    let 放不进 = plan.rejected_tally();
+    assert_eq!(放不进.files, 2, "份数照旧一份一份数");
+    assert_eq!(放不进.bytes, 大的那份, "撞车的两份各算了一遍");
+    assert!(
+        屏上.contains(&human_bytes(大的那份)),
+        "第五格没画只算一次的那个容量：\n{屏上}",
+    );
+    assert!(
+        屏上.contains(romcat_core::sync::REJECTED_BYTES_BASIS),
+        "屏上没写明「放不进目标」那一格的容量口径：\n{屏上}",
+    );
+
+    // **没撞车就不说这句**：零的不写空话（差量账那一行小字的规矩）。
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        场.app
+            .sublibrary()
+            .prepared()
+            .expect("排得出来")
+            .plan
+            .collisions
+            .is_empty()
+    );
+    assert!(
+        !屏上.contains(romcat_core::sync::REJECTED_BYTES_BASIS),
+        "没撞车也写了撞车的口径：\n{屏上}",
     );
 }
 

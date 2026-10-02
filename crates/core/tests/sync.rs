@@ -693,6 +693,69 @@ fn 两个根里同一条相对路径落在卡上同一个文件上_排计划时�
     assert_eq!(desired.files[0].path, "FC/只有乙有.zip");
 }
 
+/// 期望状态里的一份：从 `根` 那块盘上的 `相对路径` 来，落在卡上同一条相对路径上。
+fn 一份(根: &str, 相对路径: &str, bytes: u64) -> DesiredFile {
+    let key = format!("{根}/{相对路径}");
+    DesiredFile {
+        path: 相对路径.to_string(),
+        kind: FileKind::Rom,
+        bytes,
+        unreadable: false,
+        source: key.clone(),
+        source_stamp: Stamp {
+            bytes,
+            mtime_ns: Some(1_700_000_000_000_000_000),
+        },
+        variant: key,
+        convert: None,
+    }
+}
+
+#[test]
+fn 三份撞到同一条落点_放不进目标的容量只算一份() {
+    // 票 `verdict-store-and-sync/13`（挂单 `Q1029`）：撞在一起的几份**最终一份都不落**，
+    // 可它们要的是卡上**同一条路径**——解开撞车之后那条路径上也只躺得下一份。各算一遍的话，
+    // 「放不进目标」那一格的容量就把同一个落点数了三遍。
+    //
+    // 一处里取**最大的那一份**：排除哪几份由人定，这个数要答的是「这条落点最多要多大地方」。
+    let dir = temp_dir("sync-collide-once");
+    let mut desired = Desired {
+        files: vec![
+            一份("甲", "FC/魂斗罗.zip", 1_000),
+            一份("乙", "FC/魂斗罗.zip", 3_000),
+            一份("丙", "FC/魂斗罗.zip", 2_000),
+            一份("甲", "GB/俄罗斯方块.zip", 500),
+            一份("乙", "GB/俄罗斯方块.zip", 500),
+            一份("甲", "FC/沙罗曼蛇.zip", 700),
+        ],
+        ..Desired::default()
+    };
+    desired.screen(&Filesystem::unlimited(), 0);
+    let plan = sync::plan(
+        &子库(dir.path(), None),
+        &desired,
+        &Manifest::default(),
+        &TargetState::default(),
+        Options::default(),
+    );
+
+    let 放不进 = plan.rejected_tally();
+    // **份数照旧一份一份数**：那一格的大数字数的是文件（词表**差量预览**），撞上的五份
+    // 这一趟一份都传不上去。
+    assert_eq!(放不进.files, 5, "{:?}", plan.rejected);
+    assert_eq!(放不进.variants, 5);
+    // **容量一条落点只算一次**：魂斗罗那一处取最大的 3000，俄罗斯方块那一处 500。
+    // 从前是五份各算一遍（7000）。
+    assert_eq!(
+        放不进.bytes,
+        3_000 + 500,
+        "撞车的几份各算了一遍：{:?}",
+        plan.rejected
+    );
+    // 没撞的那一份照旧要传，不进这一笔账。
+    assert!(plan.steps.iter().any(|step| step.path == "FC/沙罗曼蛇.zip"));
+}
+
 // ───────────────────────── 四、装得下吗：计划器那个数就是子库报告那个数（挂账 D76）
 
 /// 一棵目录树底下全部文件一共多少字节——**从盘上量**，不经过计划器。
