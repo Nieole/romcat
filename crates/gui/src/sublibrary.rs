@@ -1014,8 +1014,15 @@ impl Screen {
             return;
         }
         self.restore_missing = on;
-        // **正排着的那一趟先不认了**：它是按改之前那个开关排的，收回来的账与屏上这个勾
-        // 对不上。弃认之后 [`Self::preview`] 那道「已经在排了就不再排」的闸才让得过。
+        // **正排着的那一趟先停掉，再不认它**（票 `verdict-store-and-sync/13`，挂单 `Q1029`）：它是按改之前
+        // 那个开关排的，收回来的账与屏上这个勾对不上。只弃认不停的话，它照旧占着任务台「一次只跑一趟」
+        // 的位子跑完，新排的那一趟排在它后面——真库上勾一下要等两趟，前一趟的结果没人要。
+        // 排差量整条只读，停在哪儿都是干净的。停掉的那一趟交回来时号对不上，[`Self::settle`] 放过去，
+        // 屏上不说「已取消」：那不是人按的停下。
+        // 弃认之后 [`Self::preview`] 那道「已经在排了就不再排」的闸才让得过。
+        if let Some(id) = self.previewing {
+            tasks.stop(id);
+        }
         self.invalidate();
         self.preview(site, tasks);
     }
@@ -1181,7 +1188,10 @@ impl Screen {
     /// 选择集会做的事了，而「同步」按钮认的正是它（ADR-0016）。
     ///
     /// **正在台上排着的那一趟也一并不认了**：它是照旧那套规则排的，收回来同样是骗人。
-    /// 那趟活自己会跑完（整条只读，跑完也没有副作用），只是没人认领它。
+    /// 这里只弃认、不停它（这一层手上没有任务台）：那趟活自己会跑完（整条只读，跑完也没有
+    /// 副作用），只是没人认领它，跑完之前照旧占着「一次只跑一趟」的位子。手上有任务台、
+    /// 接着就要重排的那一处（[`Self::set_restore_missing`]）先把它停掉再来这里；
+    /// 换卡、新建、删子库这几处还没停（挂单 `Q1669`）。
     pub fn invalidate(&mut self) {
         self.prepared = None;
         self.previewing = None;
@@ -3104,8 +3114,9 @@ impl Screen {
     ) {
         look::help(ui, NOFIT_HELP);
         let name = self.picked.clone().unwrap_or_default();
-        // 撞车归堆由核心一处算（`Plan::collisions`）：命令行与这一屏配出来的对子是同一批。
-        let 撞车 = plan.collisions();
+        // 撞车归堆由核心一处算（`Collision::among`，排计划时归好存在 `Plan::collisions`）：
+        // 命令行、`--json` 与这一屏配出来的对子是同一批。
+        let 撞车 = &plan.collisions;
         let 撞上几份: u64 = 撞车.iter().map(|一处| 一处.files.len() as u64).sum();
         ui.add_space(step(2));
         // **写「几份（撞成几处）」而不是光写几处**：上头那颗分段按钮上的「放不进目标 N」
@@ -3425,6 +3436,12 @@ fn tally_ui(ui: &mut egui::Ui, plan: &romcat_core::sync::Plan, prepare_ms: f64) 
     .collect();
     if !变体数.is_empty() {
         补齐.push(format!("按变体数：{}", 变体数.join("、")));
+    }
+    // **第五格的容量口径**（票 `verdict-store-and-sync/13`，挂单 `Q1029`）：那一格的数一份一份数，容量却是
+    // 一条落点只算一次（`Plan::rejected_tally`）——两个数口径不一样，不写明就读着对不上。说不说、说哪句
+    // 由核心一处答（`Plan::rejected_bytes_basis`，没撞车时不说），命令行报告印的是同一句。
+    if let Some(口径) = plan.rejected_bytes_basis() {
+        补齐.push(口径.to_string());
     }
     if !补齐.is_empty() {
         look::help(ui, &plain(&补齐.join("；")));

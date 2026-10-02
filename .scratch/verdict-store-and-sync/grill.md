@@ -130,6 +130,7 @@
 **上游已答，只差动手：** 条目自带三处修法，谁来裁写的是编排者；(3) 由 ADR-0024（消费者不许再判一遍）定了方向：进 --json。。
 核查（2026-09-23）：(1) crates/gui/src/sublibrary.rs:968-977 set_restore_missing 先 invalidate 再 preview，被弃那趟不停；(2) crates/core/src/sync.rs:680 rejected_tally 撞车几份各算一遍、屏上无口径；(3) sync.rs:748-749 Collision derive Serialize 但 :698 collisions() 是方法，--json 里没有。
 （大小 S，来自票 `gui-looks-like-the-design/24`）
+**settled（2026-10-02）：** 票 `13` 照条目三处修法做——(1) 界面 `set_restore_missing` 先 `tasks.stop` 台上那一趟差量预览再弃认、重排（停掉的那一趟交回来号对不上，屏上不说「已取消」）；(2) 核心 `Plan::rejected_tally` 的容量一条落点只算一次、一处取最大的那一份（`Collision::bytes`），命令行报告不再自己另加一遍，口径句 `REJECTED_BYTES_BASIS` 由 `Plan::rejected_bytes_basis` 一处答说不说，界面差量账底下那行小字与 `romcat sublibrary plan` 报告印同一句；(3) 归堆挪成 `Collision::among`，排计划时存进字段 `Plan::collisions`，`--json` 里就有了（ADR-0024 推论 3：算的代码一份、结论存一份）。取最大的那一份（挂单 `Q1667`）、口径句摆小字行（`Q1668`）；换卡等几处仍只弃认不停（`Q1669`）、`--json` 还没有放不进目标那笔账（`Q1670`）。
 
 ### `Q587` — `romcat export` 只在开着 `--media` 时接 Ctrl-C，不开时照旧按不停
 

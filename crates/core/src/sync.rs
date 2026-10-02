@@ -713,6 +713,14 @@ pub struct Plan {
     pub convert_estimated: u64,
     /// 目标存储**放不下**的那些：本次既不新增也不删除，只报出来（ADR-0017 补充段）。
     pub rejected: Vec<Rejected>,
+    /// [放不进目标](Self::rejected)里**落点撞车**那几条，按撞在一起的那条落点归成的一处一处
+    /// （[`Collision::among`]，排计划那一刻归一次）。
+    ///
+    /// **它是字段不是现算的方法**（票 `verdict-store-and-sync/13`，挂单 `Q1029`）：`--json` 打的就是这份
+    /// 计划，方法进不了序列化——那时 `--json` 里只有平铺的 [`Self::rejected`]，读它的工具得自己按落点
+    /// 再归一次堆，那正是 ADR-0024 要挡的第二处判据。归堆的代码仍只有 [`Collision::among`] 那一份，
+    /// 这里存的是它的结论（ADR-0024 推论 3）。
+    pub collisions: Vec<Collision>,
     /// 目标**吃不下、而这一版转不了**的那些：照搬，但点名说出口。
     pub unsupported: Vec<Unsupported>,
     /// 这份计划用的是哪份**能力档案**。
@@ -744,32 +752,54 @@ impl Plan {
         distinct(self.surprises.iter().map(|one| one.variant.as_str()))
     }
 
-    /// **放不进目标的那几份**折成一笔账：几份、涉及几个变体、一共多大。
+    /// **放不进目标的那几份**折成一笔账：几份、涉及几个变体、多大。
     ///
-    /// 容量是**它们本来要占的**那么多：撞在一起的几份各算各的（最终一份都不落，所以这是
-    /// 「传不上去的一共多大」，不是「少占了多少」）。
+    /// 份数与变体数一份一份数（那一格的大数字数的是文件，词表**差量预览**）。
+    /// **容量一条落点只算一次**（票 `verdict-store-and-sync/13`，挂单 `Q1029`）：撞在一起的几份要的是卡上
+    /// **同一条路径**，解开撞车之后那条路径上也只躺得下一份——各算一遍的话，同一个落点就被数了几遍。
+    /// 一处撞车算它最大的那一份（[`Collision::bytes`]），别的几类照旧一份算一份。
+    /// 这条口径屏上与命令行都写着（[`Self::rejected_bytes_basis`]）。
     #[must_use]
     pub fn rejected_tally(&self) -> Tally {
+        let 不撞的: u64 = self
+            .rejected
+            .iter()
+            .filter(|one| one.reason != RejectReason::Collision)
+            .map(|one| one.bytes)
+            .sum();
+        let 撞的: u64 = self.collisions.iter().map(Collision::bytes).sum();
         Tally {
             files: self.rejected.len() as u64,
             variants: distinct(self.rejected.iter().map(|one| one.variant.as_str())),
-            bytes: self.rejected.iter().map(|one| one.bytes).sum(),
+            bytes: 不撞的 + 撞的,
         }
     }
 
+    /// [放不进目标那笔容量](Self::rejected_tally)要不要**写明口径**、写哪一句：这一趟有落点撞车时是
+    /// [`REJECTED_BYTES_BASIS`]，没有时不写（份数与容量这时本来就是一份一份对得上的）。
+    ///
+    /// 「什么时候说」与「说什么」都在这一处：命令行报告与界面那一行小字各问它一次，不各判一遍。
+    #[must_use]
+    pub fn rejected_bytes_basis(&self) -> Option<&'static str> {
+        (!self.collisions.is_empty()).then_some(REJECTED_BYTES_BASIS)
+    }
+}
+
+impl Collision {
     /// 把[放不进目标](Rejected)里**落点撞车**那几条，按撞在一起的那条落点归成一处一处。
+    /// 排计划时归一次，存进 [`Plan::collisions`]。
     ///
     /// 差量预览要回答的是「撞的是**哪两份**」——一条一条平铺着报，读的人得自己拿路径去
     /// 配对，而两条撞在一起的行 [`Rejected::path`] 一模一样（落点剥掉了根名，ADR-0013），
     /// 光看屏上那一列分不出是两份还是画重了。归堆这件事因此是这一处的事，不是画它那一层
-    /// 的事（ADR-0024）：命令行与界面配出来的对子必须是同一批。
+    /// 的事（ADR-0024）：命令行、`--json` 与界面配出来的对子必须是同一批。
     ///
     /// 归堆的键是**折起来的路径**（[`path::fold`]，小写 + NFC），与 [`Desired::screen`]
     /// 判撞车用的是同一个折法——只差大小写的那一种在目标上本来就是同一个文件。
     #[must_use]
-    pub fn collisions(&self) -> Vec<Collision> {
+    pub fn among(rejected: &[Rejected]) -> Vec<Self> {
         let mut 成堆: BTreeMap<String, Vec<&Rejected>> = BTreeMap::new();
-        for row in &self.rejected {
+        for row in rejected {
             if row.reason == RejectReason::Collision {
                 成堆.entry(path::fold(&row.path)).or_default().push(row);
             }
@@ -782,7 +812,7 @@ impl Plan {
                 // 与截图基线都吃着这个次序，得当场定死（与 `align` 那句「输入按路径排过，于是
                 // 这个选择是确定的」同一条纪律）。
                 files.sort_by(|a, b| a.source.cmp(&b.source));
-                Collision {
+                Self {
                     // 只差大小写的那一种，几条的落点写法各不相同：取按路径排在头一个的那个写法。
                     path: files
                         .iter()
@@ -795,6 +825,16 @@ impl Plan {
                 }
             })
             .collect()
+    }
+
+    /// 这一处**在「放不进目标」那笔容量里算多大**：撞上的几份里最大的那一份。
+    ///
+    /// 几份要的是卡上同一条路径，解开撞车之后那条路径上也只躺得下一份；留哪一份由人定
+    /// （排除其余几份，记成例外），所以这里答的是「这条落点最多要多大地方」——取最大的，
+    /// 不取头一份：头一份是谁只取决于主库侧那条键怎么排。
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.files.iter().map(|one| one.bytes).max().unwrap_or(0)
     }
 }
 
@@ -834,6 +874,13 @@ pub struct Collision {
     /// 同一个文件；分大小写的目标上这是一次保守误报，取舍见 [`plan`] 的函数文档。
     pub only_folded: bool,
 }
+
+/// **「放不进目标」那笔容量的口径句**：落点撞车的几份只算一次（[`Plan::rejected_tally`]）。
+///
+/// 那一格的份数一份一份数、容量却按落点算，不写明的话两个数读着对不上。命令行报告与界面印的是
+/// 这同一句（ADR-0024）；什么时候印由 [`Plan::rejected_bytes_basis`] 一处答。
+pub const REJECTED_BYTES_BASIS: &str =
+    "放不进目标的容量里，落点撞车的几份只算一次（取最大的那一份）";
 
 /// [`align`] 挪动了哪几条落点：原来的键 → 折齐之后的键。
 ///
@@ -1110,6 +1157,7 @@ pub fn plan(
         empty_variants: desired.empty_variants.clone(),
         unlistable_dirs: actual.unlistable_dirs,
         rejected: desired.rejected.clone(),
+        collisions: Collision::among(&desired.rejected),
         unsupported: desired.unsupported.clone(),
         ..Plan::default()
     };
@@ -2624,11 +2672,7 @@ mod tests {
         let mut desired = 期望状态(vec![甲, 乙, 另一条]);
         desired.screen(&Filesystem::unlimited(), 0);
 
-        let plan = Plan {
-            rejected: desired.rejected.clone(),
-            ..Plan::default()
-        };
-        let 撞车 = plan.collisions();
+        let 撞车 = Collision::among(&desired.rejected);
         assert_eq!(撞车.len(), 1, "撞的是一处：{撞车:?}");
         assert_eq!(撞车[0].path, "FC/魂斗罗.zip");
         assert!(!撞车[0].only_folded, "这两条逐字一样，不是只差大小写");
@@ -2657,11 +2701,7 @@ mod tests {
         乙.source = "乙/FC/contra.zip".to_string();
         let mut desired = 期望状态(vec![甲, 乙]);
         desired.screen(&Filesystem::unlimited(), 0);
-        let plan = Plan {
-            rejected: desired.rejected.clone(),
-            ..Plan::default()
-        };
-        let 撞车 = plan.collisions();
+        let 撞车 = Collision::among(&desired.rejected);
         assert_eq!(撞车.len(), 1);
         assert!(撞车[0].only_folded, "该说出这是只差大小写的那一种");
         // 落点取按路径排在头一个的那个写法——几条各有各的写法，得定一个。
