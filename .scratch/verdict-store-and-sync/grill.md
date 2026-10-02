@@ -58,6 +58,7 @@
 核查（2026-09-23）：crates/core/src/identify.rs:2171-2184 ordered()：主文件优先、同为主文件取大的，未跳过非游戏资产；消费者 representative（:2168）→content_print / find_verdict。
 依赖／可并：Q725（若首选变体选内容锚）、Q921
 （大小 S，来自票 `one-criterion-per-thing/04`）
+**settled（2026-10-02）：** 票 `05` 照裁定做、不迁——`identify::ordered()` 排之前先跳过非游戏资产（问 `classify::non_game_asset`，键与挑作品那一侧同一条凑法），`content_print` / `content_prints` / `find_verdict` 与收藏、合集一个字没改、照旧问它。带 BIOS 的包里，裁决钉在游戏那一份上，别的带同一份 BIOS 的变体、单放的那份 BIOS 都不再被它管到。整个变体只有非游戏资产时照旧拿它代表、游戏那一份拿不到判据时不退到 BIOS（这是一个岔路口，记在挂单 `Q1587`、待拿主意的人裁）。
 
 ### `Q713` — 标题这一侧的待确认队列眼下只是报告里一个数与十个例子，没有一条能一条条裁的列表
 
