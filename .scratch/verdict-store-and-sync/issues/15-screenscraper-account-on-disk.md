@@ -7,6 +7,8 @@
 
 收挂单 `Q1063`：见 `../grill.md` 里那一条。
 
+收差距（`../../gui-draws-the-rest-of-the-design/gaps-scrape-dialog.md`，2026-10-02 盘点时撞见）：设置屏 `settings.rs` 约 657 行那句说服务端配额「写在刮削面板上」，可刮削面板从来没画过服务端配额——改成实话（配额在哪看得到，或者照实说眼下看不到）。另：刮削弹层没账号时要指向设置屏（gui-draws 票 17 的 `F-7`），那一问「有没有账号」由本票立的那一处答。
+
 **Blocked by:** None (can start immediately)
 
 **Status:** ready-for-agent
