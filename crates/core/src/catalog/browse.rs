@@ -26,8 +26,8 @@
 //! ## 变体表那一列**作品名**也下推（挂账 D161，票 `parking-3/11`）
 //!
 //! 翻库时人认的是**作品**，不是那些各路来源攒出来的文件名——所以变体表上有作品名
-//! 这一列。它一度是「取回来之后拿 [`Catalog::work_names`] 在内存里对」的：那张表真库
-//! 9,226 行，整份读进来只为在页上补几十格，而且补出来的东西**进不了 `ORDER BY` /
+//! 这一列。它一度是「取回来之后拿 [`Catalog::work_names`] 在内存里对」的：那张表真库上
+//! 九千多行（见台账 `docs/library-facts.md`），整份读进来只为在页上补几十格，而且补出来的东西**进不了 `ORDER BY` /
 //! `WHERE`**，于是想按作品找就只能退回「键里含」那个框。
 //!
 //! 现在它是 [`Catalog::variant_browse_page`] 那一趟 `LEFT JOIN work` 带回来的：
@@ -402,12 +402,12 @@ const WORK_NAME: &str = "work_name";
 ///
 /// `work.id` 是主键，这条 `LEFT JOIN` 每行一次索引查——它换来的是**作品名下推**
 /// （ADR-0005）。不这么做只剩两条路，两条都是这一层从头到尾在躲的事：
-/// 把那张作品表整份读进内存在页上补（真库 9,226 行），或者逐行去问一次。
+/// 把那张作品表整份读进内存在页上补（真库上九千多行，见台账 `docs/library-facts.md`），或者逐行去问一次。
 ///
 /// **`LEFT` 那半个字不能省**：还没认出作品的变体（`adapter::converge` 的
 /// `Anchor::Loose`）会被内连接**整批**筛掉，一个都不剩——那不是排序，那是换了一批行。
-/// 真库上这一批有一千七百多个（`docs/library-facts.md`：作品 9,226 个，
-/// 而主列表 10,978 行，差出来的那些一行一个变体）。
+/// 真库上这一批有一千七百多个：作品九千多个，而主列表一万出头行，差出来的那些一行一个变体
+/// （两个数都见台账 `docs/library-facts.md`：主列表行数记在「作品级主列表翻一页要多久」那一节，合成数据照真库的形状摆）。
 ///
 /// **它同时是「行数一个不多一个不少」的依据**，而那正是
 /// [`Catalog::variant_total`]（不连这张表，只 `COUNT(*) FROM variant`）与这一趟敢共用
@@ -669,7 +669,7 @@ impl Catalog {
     /// 取一页**变体表画出来的行**：变体自己那一行，连它的**作品名**。
     ///
     /// **作品名是这一趟查询自己带回来的**（`LEFT JOIN work`），不是取回来之后拿
-    /// [`work_names`](Self::work_names) 在内存里对——那张表真库上 9,226 行，而这一层
+    /// [`work_names`](Self::work_names) 在内存里对——那张表真库上九千多行（见台账 `docs/library-facts.md`），而这一层
     /// 从头到尾在躲的就是「先把全库读进来」（ADR-0005、挂账 D161）。于是
     /// [`VariantOrder::Work`] 那一档排得成，筛也筛得动（`作品^…` 走
     /// `catalog::filter`），两样都落在 `ORDER BY` / `WHERE` 里。
@@ -919,7 +919,7 @@ impl Catalog {
 
 // ══ 作品级的主列表 ═══════════════════════════════════════════════════════════
 //
-// 变体表是**磁盘上有什么**，主列表是**我有哪些游戏**。真库里 46,444 个变体收敛成
+// 变体表是**磁盘上有什么**，主列表是**我有哪些游戏**。真库里四万多个变体（见台账 `docs/library-facts.md`）收敛成
 // 一万出头的行，六成作品下面挂着不止一个变体——翻库时人认的是后者，变体在详情面板里挑。
 //
 // ## 为什么不是把变体表在界面里聚合
@@ -1162,7 +1162,8 @@ pub struct WorkRow {
     /// **不对外**：要的是正题就从 `title` 取。把它交出去，就会有调用方自己拿它去剥
     /// ——剥哪个名字、剥完空了怎么办，那是第二个判据（ADR-0024）。
     main_key: Option<String>,
-    /// **平台集合**。一部作品可以横跨好几个平台，真库上 9,226 个作品里有 2,314 个如此。
+    /// **平台集合**。一部作品可以横跨好几个平台，真库上九千多个作品里有两千多个如此
+    /// （作品数见台账 `docs/library-facts.md`；横跨的那个数台账没收，出处是票 `rom-metadata-automation/16`，挂单 `Q1459`）。
     pub platforms: Vec<String>,
     /// 底下挂着几个变体。**按当前筛选算**——屏上写着几个，批量操作就作用于那几个。
     pub variants: u64,
@@ -1439,7 +1440,7 @@ impl Search {
     ///
     /// **写成集合成员判定而不是相关子查询**（挂单 Q108）：`EXISTS` 里带着
     /// `t.work = work.name` 就与外层绑死了，SQLite 只能**逐个变体行**去 `title` 里探一次
-    /// ——真库形状上那是 46,428 次探查，实测单这一条 52 毫秒。写成
+    /// ——真库形状上那是四万多次探查（变体数见台账 `docs/library-facts.md`），实测单这一条五十多毫秒。写成
     /// `work.name IN (SELECT …)` 之后子查询与外层无关，一次算完存进一张临时索引，
     /// 每一行只剩一次查表。**筛出来的是同一批行**：两种写法对每一行的真假完全一致。
     fn alias(pattern: &str) -> (String, Box<dyn ToSql>) {
@@ -3131,11 +3132,17 @@ impl WorkVariant {
     /// 而它的候选就摆在旁边的悬停里。
     #[must_use]
     pub fn confidence_label(&self) -> &'static str {
-        let confidence = self.confidence();
-        if confidence.is_none() && self.state.is_none() {
+        if self.never_identified() {
             return NOT_RUN_LABEL;
         }
-        Tier::of(confidence).label()
+        Tier::of(self.confidence()).label()
+    }
+
+    /// 这个变体是不是**还没识别**：一条候选都没有、也一行结论都没有。先看候选、再问跑没跑过，理由见
+    /// [`confidence_label`](Self::confidence_label)。那个词、[`no_candidate_hint`](Self::no_candidate_hint) 那句话、
+    /// [`unlinked_hint`](Self::unlinked_hint) 那句话都照它分，**三处同进同出**。
+    fn never_identified(&self) -> bool {
+        self.candidates.is_empty() && self.state.is_none()
     }
 
     /// 一条候选都没有时，**该说哪一句、指向哪一步**；有候选就是 `None`（不必说）。
@@ -3151,12 +3158,38 @@ impl WorkVariant {
         if !self.candidates.is_empty() {
             return None;
         }
-        Some(if self.state.is_none() {
+        Some(if self.never_identified() {
             "连识别都还没跑过——那是还没识别，不是「撞过没撞上」。\
              先跑一趟 `romcat identify`。"
         } else {
             "识别跑过了，一条候选都没有——那是没有候选，不是「撞过没撞上」。"
         })
+    }
+
+    /// **认不出作品的那一行**，侧边详情头上那块提示框里接在「名字是怎么来的」后头那一句（设计稿 `.dpane` 那块 `.note`，
+    /// 票 `gui-draws-the-rest-of-the-design/05`）。`queued` 是这个变体眼下在不在待确认队列里
+    /// （[`crate::triage::is_queued`]，调用方问好交进来）。
+    ///
+    /// 照稿按**有没有候选**分两种：在队列里、有候选的说「它有 N 个候选，可以在待确认中选择」；一条候选都没有的说
+    /// 「文件内容无法与官方数据库匹配」。三处不照稿逐字：
+    ///
+    /// - **不在队列里就不说「可以在待确认中选择」**——那里没有它，那颗按钮也不摆。
+    /// - **还没识别的单说一句**：它连撞都还没撞过，说「无法匹配」就把**还没识别**说成了**没有候选**——
+    ///   与 [`no_candidate_hint`](Self::no_candidate_hint) 同一条判据（`never_identified`）。
+    /// - **跳过的也单说一句**：词表里跳过是「不该撞 DAT」，说「无法匹配」就成了「撞过没撞上」，正是那一条要分开的两件事。
+    #[must_use]
+    pub fn unlinked_hint(&self, queued: bool) -> String {
+        match self.candidates.len() {
+            0 if self.never_identified() => {
+                "还没识别：识别跑过之后才知道它属于哪个作品。".to_owned()
+            }
+            0 if self.state == Some(State::Skipped) => {
+                "识别结论是跳过：它不该拿去撞官方数据库。".to_owned()
+            }
+            0 => "文件内容无法与官方数据库匹配。".to_owned(),
+            n if queued => format!("它有 {n} 个候选，可以在待确认中选择。"),
+            n => format!("它有 {n} 个候选。"),
+        }
     }
 }
 
@@ -3194,7 +3227,7 @@ pub fn variant_short_name(
 ///
 /// 三层里的头两层（**作品** → **变体**）在这儿；第三层**文件**跟着选中的那个变体走
 /// （[`Catalog::variant_members`](Catalog::variant_members)），因为一个变体可以是
-/// 一整个目录，真库上最大的一份底下有 21,436 个文件——不选中就整份读出来，
+/// 一整个目录，真库上最大的一份底下有两万多个文件（见台账 `docs/library-facts.md`）——不选中就整份读出来，
 /// 点一行的代价会跟着最大的那个变体走。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkDetail {
@@ -3481,6 +3514,78 @@ mod tests {
         assert_eq!(
             一行(作品(), &[], Some(Confidence::Low), true).meta_label(),
             "完整"
+        );
+    }
+
+    /// 认不出作品的那一个变体：`state` 是这一轮的结论（`None` 是还没识别），带 `candidates` 条没采纳的候选。
+    fn 散着的变体(state: Option<State>, candidates: usize) -> WorkVariant {
+        let key = "主库/GBC/精灵宝可梦 银.7z".to_string();
+        let 一条 = Candidate {
+            member_key: key.clone(),
+            inner: String::new(),
+            confidence: Confidence::Low,
+            accepted: false,
+            source: "中文离线源".to_string(),
+            dat: "中文离线源.dat".to_string(),
+            platform: "GBC".to_string(),
+            game: "Pocket Monsters - Gin (Japan)".to_string(),
+            rom: "rom.gbc".to_string(),
+            hashed_as: crate::dat::Convention::AsIs,
+            dat_convention: crate::dat::Convention::AsIs,
+            evidence: "名称模糊匹配".to_string(),
+            chinese: None,
+            serial: None,
+            release_id: None,
+        };
+        WorkVariant {
+            row: VariantRow {
+                key: key.clone(),
+                platform: Some("GBC".to_string()),
+                rule: "单文件".to_string(),
+                main_key: key,
+                files: 1,
+                bytes: 0,
+                unreadable_files: 0,
+                manual: false,
+                work_id: None,
+                release_id: None,
+            },
+            state,
+            reason: None,
+            candidates: vec![一条; candidates],
+        }
+    }
+
+    /// 认不出作品那一行提示框的后半句（票 `gui-draws-the-rest-of-the-design/05`）：照稿按有没有候选分两种，
+    /// 另外三种照词表说准——**还没识别**没撞过、**跳过**不该撞（都不是「撞过没撞上」），不在队列里不说「可以在待确认中选择」。
+    #[test]
+    fn 认不出作品那一行的提示句照稿分两种_还没识别与跳过各说各的() {
+        let 匹配不上 = "文件内容无法与官方数据库匹配。";
+        // 照稿那两种。
+        assert_eq!(
+            散着的变体(Some(State::Unmatched), 2).unlinked_hint(true),
+            "它有 2 个候选，可以在待确认中选择。"
+        );
+        assert_eq!(
+            散着的变体(Some(State::Unmatched), 0).unlinked_hint(true),
+            匹配不上
+        );
+        assert_eq!(
+            散着的变体(Some(State::NoEvidence), 0).unlinked_hint(false),
+            匹配不上
+        );
+        // 不在队列里：有候选也不指去待确认。
+        assert_eq!(
+            散着的变体(Some(State::Unmatched), 2).unlinked_hint(false),
+            "它有 2 个候选。"
+        );
+        // 还没识别、跳过：都不说「无法匹配」。
+        let 还没识别 = 散着的变体(None, 0).unlinked_hint(false);
+        assert!(还没识别.starts_with("还没识别"), "{还没识别}");
+        let 跳过 = 散着的变体(Some(State::Skipped), 0).unlinked_hint(false);
+        assert!(
+            跳过.contains("跳过") && !跳过.contains("无法与官方数据库匹配"),
+            "{跳过}"
         );
     }
 }

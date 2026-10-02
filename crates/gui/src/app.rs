@@ -738,6 +738,12 @@ impl App {
             self.sublibrary.open(&self.site, &name);
             self.view = View::Sublibraries;
         }
+        // **浏览屏侧边详情里那颗「在待确认中处理」**（挂单 `Q810`）：换到待确认屏，逐条那一档、光标停在那一条上。
+        // 浏览屏够不着那一屏，只留一个记号（同上几个跳转）。
+        if let Some(key) = self.browse.take_queue_jump() {
+            self.queue.reveal(&self.site, &key);
+            self.view = View::Queue;
+        }
         // **各屏空态上那几颗捷径**（票 `gui-self-sufficient/09`）：按下去的那一屏排不了
         // 活——排一趟**工序**要同时够得着库屏那一段与**任务台**，而只有这儿够得着两边
         // （ADR-0005，与上面那几个跳转记号同理）。所以那几屏只留一个记号，这一趟取走、

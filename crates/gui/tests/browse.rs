@@ -5311,3 +5311,261 @@ fn 挑选模式留在浏览屏_换个平台再加一条_累计当场更新() {
         "加完第二条之后挑选栏不该收掉：\n{屏上}"
     );
 }
+
+/// **侧边详情头上「N 个变体」后头接「· 汉化／官中」**（设计稿 `.dhead` 那一行 `${w.v} 个变体 · ${w.zh}`，
+/// 挂单 `Q929`，票 `gui-draws-the-rest-of-the-design/05`）。哪一个由核心库答（`Catalog::work_chinese_mark`，
+/// 与首选变体那条规则同一处判、详情页「中文版本」那一格同一问）；一个中文的都没有就只写「N 个变体」。
+///
+/// 三种各挑一部：先按「中文」那一维筛出汉化／官中的那一批（另一条路数出来的，不是界面印的那一格），
+/// 再在里头挑核心库答的正是那一种的——汉化压过官中，同一部作品底下两种都有的算汉化。
+#[test]
+fn 侧边详情头上几个变体后头接汉化或官中_一个中文的都没有就不接() {
+    use romcat_core::catalog::browse::WorkRow;
+
+    let ctx = headless::context();
+    let mut app = 界面(4_000);
+    跑(&ctx, &mut app, 2);
+    let 挑一部 = |app: &mut App, 筛: Option<ChineseMark>| -> (WorkRow, usize) {
+        let (_, site) = app.browse_and_site();
+        let query = WorkQuery {
+            chinese: 筛.map(|mark| mark.label().to_owned()),
+            ..WorkQuery::default()
+        };
+        site.catalog
+            .work_page(&query, 0, 400)
+            .expect("取得出一页")
+            .into_iter()
+            .find_map(|row| {
+                // 点开之后侧边详情照**屏上那份**筛选读（这里是不筛），不是照拿来挑的那份。
+                let work = site
+                    .catalog
+                    .work_detail(&WorkQuery::default(), &row.anchor)
+                    .expect("读得出")
+                    .expect("有这一行");
+                let 答的 = site.catalog.work_chinese_mark(&work).expect("答得出");
+                (答的 == 筛).then_some((row, work.variants.len()))
+            })
+            .unwrap_or_else(|| panic!("合成数据里该有一部中文版本是 {筛:?} 的作品"))
+    };
+    for 筛 in [
+        Some(ChineseMark::FanTranslated),
+        Some(ChineseMark::Official),
+        None,
+    ] {
+        let (row, 几个) = 挑一部(&mut app, 筛);
+        {
+            let (browse, site) = app.browse_and_site();
+            browse.open_work(&site.catalog, &row.anchor);
+        }
+        跑(&ctx, &mut app, 1);
+        let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+        let 该写的 = match 筛 {
+            Some(mark) => format!("{几个} 个变体 · {}", mark.label()),
+            None => format!("{几个} 个变体"),
+        };
+        assert!(
+            屏上.lines().any(|line| line == 该写的),
+            "「{}」那一部侧边详情头上该写「{该写的}」：\n{屏上}",
+            row.name,
+        );
+    }
+}
+
+/// 三个认不出作品的变体：两个在待确认队列里（一个带一条候选、一个一条候选都没有——**没有候选**的未命中照样在队列里，
+/// 「手工指定」正是接它的那条主路），一个还没识别、不在队列里。键按字母排，要跳去的那两个都不排在头一条上
+/// ——光标默认停在头一条，跳过去「停在头一条」证明不了什么。
+fn 三个认不出作品的变体() -> App {
+    use shared::档;
+
+    let mut app = shared::小库(
+        &[
+            ("FC", "甲 头一条.zip", 档::待裁决),
+            ("GBA", "乙 带一条候选.zip", 档::待裁决),
+            ("SFC", "丙 一条候选都没有.zip", 档::没有候选),
+            ("WS", "丁 还没识别.zip", 档::还没识别),
+        ],
+        shared::干净工作目录("romcat-测试-浏览-在待确认中处理"),
+    );
+    app.show_view(View::Browse);
+    app
+}
+
+/// **侧边详情里那颗「在待确认中处理」**（设计稿 `prototype.html` `data-act=goobo`，挂单 `Q810`，
+/// 票 `gui-draws-the-rest-of-the-design/05`）：变体在待确认队列里才摆；按下去换到待确认屏、逐条那一档，
+/// **光标停在那一条上**——右边详情画的、键盘那几下作用的，都是它。
+///
+/// 按的是屏上那颗真按钮，换屏走的是窗口那一趟（`App::route`），与人点下去是同一条路。
+#[test]
+fn 队列里的变体按在待确认中处理跳到待确认屏而且那一条被选中() {
+    let ctx = headless::context();
+    let mut app = 三个认不出作品的变体();
+    跑(&ctx, &mut app, 2);
+    for 要去的 in [
+        "主库/GBA/乙 带一条候选.zip",
+        "主库/SFC/丙 一条候选都没有.zip",
+    ] {
+        app.show_view(View::Browse);
+        {
+            let (browse, site) = app.browse_and_site();
+            browse.open_work(&site.catalog, &WorkAnchor::Loose(要去的.to_owned()));
+        }
+        跑(&ctx, &mut app, 1);
+        shared::点正好(&ctx, "在待确认中处理", |ui| app.ui(ui));
+        assert_eq!(app.view(), View::Queue, "按下去没换到待确认屏（{要去的}）");
+        let queue = app.queue();
+        assert_eq!(
+            queue.mode(),
+            romcat_gui::queue::Mode::OneByOne,
+            "该停在逐条那一档：选中的那一条只在那一档里画得出来",
+        );
+        let 选中的 = queue
+            .queue()
+            .selected()
+            .get(queue.at())
+            .map(|item| item.variant.key.as_str());
+        assert_eq!(选中的, Some(要去的), "光标没停在跳过来的那一条上");
+    }
+}
+
+/// **不在待确认队列里就不摆「在待确认中处理」**（挂单 `Q810` 已裁），提示框那一句照稿按**有没有候选**分两种：
+/// 在队列里、有候选的说「它有 N 个候选，可以在待确认中选择」；一条候选都没有的说「无法与官方数据库匹配」。
+///
+/// 「不在队列里」造的是真库上那两种：**裁过「认不出」**（沉淀库里钉着一条路径锚裁决，中立库一个字没动——
+/// 在不在队列里得由核心库连沉淀库一起答，光看候选数、识别结论答不对），与**还没识别**。还没识别的那一个
+/// 不说「无法匹配」：它连撞都还没撞过（词表**还没识别**与**没有候选**是两件事）。
+#[test]
+fn 不在队列里的变体不摆在待确认中处理_提示句按有没有候选分两种() {
+    use romcat_core::verdict::{Anchor, Decision, Verdict};
+
+    const 带候选: &str = "主库/GBA/乙 带一条候选.zip";
+    const 没候选: &str = "主库/SFC/丙 一条候选都没有.zip";
+    const 还没识别: &str = "主库/WS/丁 还没识别.zip";
+    const 按钮: &str = "在待确认中处理";
+    let ctx = headless::context();
+    let mut app = 三个认不出作品的变体();
+    跑(&ctx, &mut app, 2);
+    let 点开看 = |app: &mut App, key: &str| -> Vec<String> {
+        {
+            let (browse, site) = app.browse_and_site();
+            browse.open_work(&site.catalog, &WorkAnchor::Loose(key.to_owned()));
+        }
+        跑(&ctx, app, 1);
+        画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)))
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    let 提示 = |屏上: &[String]| -> String {
+        屏上
+            .iter()
+            .find(|line| line.starts_with("这个名字是从文件名剥出来的正题"))
+            .cloned()
+            .unwrap_or_else(|| panic!("提示框没画出来：\n{}", 屏上.join("\n")))
+    };
+
+    // 一、在队列里、带一条候选：照稿那一句，摆按钮。
+    let 屏上 = 点开看(&mut app, 带候选);
+    assert!(
+        提示(&屏上).ends_with("它有 1 个候选，可以在待确认中选择。"),
+        "{}",
+        提示(&屏上)
+    );
+    assert!(屏上.iter().any(|line| line == 按钮), "在队列里的该摆按钮");
+
+    // 二、在队列里、一条候选都没有：「无法与官方数据库匹配」那一句，照样摆按钮（手工指定接的正是它）。
+    let 屏上 = 点开看(&mut app, 没候选);
+    assert!(
+        提示(&屏上).contains("无法与官方数据库匹配"),
+        "{}",
+        提示(&屏上)
+    );
+    assert!(
+        屏上.iter().any(|line| line == 按钮),
+        "一条候选都没有的未命中也在队列里，该摆按钮"
+    );
+
+    // 三、同一个变体裁成「认不出」（路径锚，只落沉淀库）：退出队列，按钮不在，提示句仍是「无法匹配」那一种。
+    {
+        let (_, site) = app.browse_and_site();
+        let library = site.library_identity.clone();
+        site.store
+            .put(&Verdict::now(
+                Anchor::Path {
+                    library,
+                    variant_key: 没候选.to_owned(),
+                },
+                Decision::Unknown,
+            ))
+            .expect("写得进沉淀库");
+    }
+    let 屏上 = 点开看(&mut app, 没候选);
+    assert!(
+        !屏上.iter().any(|line| line == 按钮),
+        "不在队列里的不该摆按钮：\n{}",
+        屏上.join("\n")
+    );
+    assert!(
+        提示(&屏上).contains("无法与官方数据库匹配"),
+        "{}",
+        提示(&屏上)
+    );
+
+    // 四、还没识别：不在队列里，按钮不在；也不说「无法匹配」——它还没撞过。
+    let 屏上 = 点开看(&mut app, 还没识别);
+    assert!(
+        !屏上.iter().any(|line| line == 按钮),
+        "还没识别的不在队列里"
+    );
+    let 那一句 = 提示(&屏上);
+    assert!(
+        !那一句.contains("无法与官方数据库匹配") && 那一句.contains("还没识别"),
+        "{那一句}"
+    );
+}
+
+/// 跳过去之后，**左边待选列表也停在那一条上**：那一条排在一屏之外时，列表得滚到看得见它
+/// （选中的那一行铺着浅底，人要从左边认出「眼下在处理哪一条」）。只有右边详情换了、左边还停在开头，
+/// 人看见的是一列与手上那一条毫不相干的行。
+#[test]
+fn 跳到待确认屏之后左边待选列表滚到那一条() {
+    use shared::档;
+
+    let 名字们: Vec<String> = (0..60).map(|at| format!("{at:03}.zip")).collect();
+    let 手上的: Vec<(&str, &str, 档)> = 名字们
+        .iter()
+        .map(|名字| ("FC", 名字.as_str(), 档::待裁决))
+        .collect();
+    let mut app = shared::小库(
+        &手上的,
+        shared::干净工作目录("romcat-测试-浏览-跳过去滚到那一条"),
+    );
+    app.show_view(View::Browse);
+    let ctx = headless::context();
+    跑(&ctx, &mut app, 2);
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(
+            &site.catalog,
+            &WorkAnchor::Loose("主库/FC/050.zip".to_owned()),
+        );
+    }
+    跑(&ctx, &mut app, 1);
+    shared::点正好(&ctx, "在待确认中处理", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 画在 = shared::画着的每一处(&这一帧, &|text| text == "050.zip");
+    // 一处在右边详情抬头，一处在左边待选列表里——两处横着不在同一列上。
+    let 最左 = 画在
+        .iter()
+        .map(|one| one.left())
+        .fold(f32::INFINITY, f32::min);
+    let 最右 = 画在
+        .iter()
+        .map(|one| one.left())
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        画在.len() >= 2 && 最右 - 最左 > 100.0,
+        "左边待选列表里没画出跳过来的那一条（画在：{画在:?}）：\n{}",
+        画出来的字(&这一帧),
+    );
+}

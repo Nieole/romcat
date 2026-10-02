@@ -82,6 +82,7 @@ use romcat_core::catalog::browse::{
 use romcat_core::catalog::identify::{NOT_RUN_LABEL, Tier};
 use romcat_core::catalog::{Catalog, VariantDetail};
 use romcat_core::collection::{self, Applied, FAVORITE};
+use romcat_core::dat::chinese::ChineseMark;
 use romcat_core::filename::Rules;
 use romcat_core::report::{human_bytes, thousands};
 use romcat_core::scrape::Priorities;
@@ -480,6 +481,10 @@ pub struct Screen {
     /// [`Self::work`] 底下每个变体的**变体简称**，次序与 `work.variants` 一样。核心库拼的
     /// （`Catalog::variant_short_names`），点开那一行时问一次，卡片照印。
     short_names: Vec<String>,
+    /// [`Self::work`] 的**中文版本**（核心库 `Catalog::work_chinese_mark`，与首选变体那条规则同一处判、作品详情页
+    /// 「中文版本」那一格同一问）：侧边详情头上「N 个变体」后头接「· 汉化／官中」（挂单 `Q929`）。点开那一行时问一次；
+    /// 一个中文的都没有是 `None`。
+    chinese: Option<ChineseMark>,
     /// 详情面板里**选中的那一个变体**。变体级的操作只作用于它。
     variant: Option<String>,
     /// 选中那个变体的详情：文件、媒体、标题集合、首选变体、刮削字段。
@@ -570,7 +575,7 @@ pub struct Screen {
     ///
     /// 记着它有两个用处：屏上照实写「算不出」而不是一直「正在算…」
     /// （没人在算的时候印「正在算…」与印 0 是同一种假话），
-    /// 以及**别每帧重排**那一趟 343 毫秒的活。
+    /// 以及**别每帧重排**那一趟三百多毫秒的活。
     sublibrary_survey_failed: Option<String>,
     /// 正在算的那一趟**各台现状**（`survey`）是第几号；`None` 是没在算。
     ///
@@ -587,9 +592,18 @@ pub struct Screen {
     /// 与 `returned` 分开：那个是「改完了送回去」，这个是「去建一台新的」，
     /// 两件事落在同一格里的话，窗口那一层分不出该不该开表单。
     new_sublibrary_asked: bool,
+    /// 认不出作品的那一行（那一个变体）**在不在待确认队列里**：`(键, 答)`。核心库答的（`triage::is_queued`，
+    /// 与列队列同一句判据），界面不另判；侧边详情那颗「在待确认中处理」照它摆（挂单 `Q810`）。
+    ///
+    /// **点开一行时作废、画侧边详情时补问一次**（[`Self::sync_queued`]），不每帧查库：那一问要读沉淀库，
+    /// 而沉淀库那份连接撞上写锁要等十秒（同 [`Self::sync_standing`] 的道理）。
+    queued: Option<(String, bool)>,
+    /// **有人按了「在待确认中处理」**：那一个变体的键。窗口那一层下一帧取走，换到待确认屏、光标停在它上面
+    /// （ADR-0005：屏与屏之间不互相拿着，与「新建子库…」那个记号同一个办法）。
+    queue_jump: Option<String>,
     /// 那一层「加入到」那一列此刻列着哪几台，**连它们各自那几个数**。
     ///
-    /// 条数一查就有；选中多少、多大要折一遍事实（343 毫秒），所以先摆 `None`
+    /// 条数一查就有；选中多少、多大要折一遍事实（三百多毫秒），所以先摆 `None`
     /// （屏上写「正在算…」），算完再填。
     sublibrary_devices: Vec<sublibrary::Device>,
     /// 预估那一块此刻是什么状况。
@@ -700,6 +714,7 @@ impl Screen {
             pool: None,
             gallery: Gallery::new(),
             short_names: Vec::new(),
+            chinese: None,
             list_covers: false,
             view: BrowseView::Table,
             card_size: CardSize::Medium,
@@ -724,6 +739,8 @@ impl Screen {
             sublibrary_estimated_for: None,
             sublibrary_devices: Vec::new(),
             new_sublibrary_asked: false,
+            queued: None,
+            queue_jump: None,
             sublibrary_estimate: sublibrary::Estimate::Working,
             join_collection_dialog: None,
             join_for: None,
@@ -1314,7 +1331,7 @@ impl Screen {
             return;
         }
         // **上一趟算砸了就别再自动重排**：不挡的话第一趟一失败，`reports` 还是空的、
-        // 守卫全不命中，于是**每帧排一趟 343 毫秒的活**。
+        // 守卫全不命中，于是**每帧排一趟三百多毫秒的活**。
         if self.sublibrary_survey_failed.is_some() {
             return;
         }
@@ -1347,7 +1364,7 @@ impl Screen {
 
     /// **排一趟预估**（票 `gui-looks-like-the-design/23`，挂单 `Q1181`）。
     ///
-    /// 它折一遍事实（真机 343 毫秒）再走一趟排计划那半条线——**摆不上画帧线**，
+    /// 它折一遍事实（真机上三百多毫秒）再走一趟排计划那半条线——**摆不上画帧线**，
     /// 所以排任务台。回来之前弹层上写「正在算…」，**不写 0**。
     ///
     /// **换一台、换一种加入方式就重排**：上一趟那个数是照上一档算的，留着不动的话
@@ -1582,11 +1599,11 @@ impl Screen {
     /// 「加入到」那一列要的东西分两档取：
     ///
     /// - **条数与上限一查就有**，当场读；
-    /// - **选中多少、多大**要折一遍事实（`facts()` 走全库，真机 343 毫秒），
+    /// - **选中多少、多大**要折一遍事实（`facts()` 走全库，真机上三百多毫秒；台账没收，出处是票 `gui-looks-like-the-design/23` 的挂单 `Q1181`，见挂单 `Q1459`），
     ///   **摆不上画帧线**——先摆 `None`（屏上写「正在算…」），那一趟排任务台（挂单 `Q1181`）。
     ///
     /// **「已经有同一条规则了」当场答**：它只要读一遍那台的规则（`Rule::same_one_in`，
-    /// 比树不比原文，`Q1180`），不用折事实。让「按不动」去等那趟 343 毫秒的活，
+    /// 比树不比原文，`Q1180`），不用折事实。让「按不动」去等那趟三百多毫秒的活，
     /// 人会在它还亮着的时候按下去。
     fn open_add_to_sublibrary(&mut self, site: &Site) {
         let 这一条 = self.query.to_rule().ok().flatten();
@@ -2255,6 +2272,11 @@ impl Screen {
         std::mem::take(&mut self.new_sublibrary_asked)
     }
 
+    /// **侧边详情里按了「在待确认中处理」吗**：按了是那一个变体的键；取过就没（窗口一帧问一次）。
+    pub fn take_queue_jump(&mut self) -> Option<String> {
+        self.queue_jump.take()
+    }
+
     /// 把「更新到子库」那一下取走。**取过就没了**：窗口一帧问一次。
     pub fn take_return(&mut self) -> Option<String> {
         self.returned.take()
@@ -2636,6 +2658,8 @@ impl Screen {
         if let Some(page) = self.page.as_mut() {
             page.forget();
         }
+        // 「在不在待确认队列里」也照上一趟问的：裁完一批、识别跑完，窗口都走到这儿（`invalidate`）。
+        self.queued = None;
         let Some(anchor) = self.opened.clone() else {
             self.work = None;
             self.cover = None;
@@ -2663,6 +2687,17 @@ impl Screen {
                 }
             },
             None => Vec::new(),
+        };
+        // **中文版本也是点开时问一次**（侧边详情头上那一句「· 汉化／官中」）。
+        self.chinese = match &self.work {
+            Some(work) => match catalog.work_chinese_mark(work) {
+                Ok(mark) => mark,
+                Err(error) => {
+                    self.error = Some(format!("中立库读不动：{error}"));
+                    None
+                }
+            },
+            None => None,
         };
         // **头上那一格贴哪张，点开时问核心库一次**：与表上那一行行首是同一处挑的。
         let cover = match &self.work {
@@ -3253,6 +3288,32 @@ impl Screen {
                 }
             },
         };
+    }
+
+    /// 点开的是**认不出作品的那一行**时，问一次核心库它那一个变体在不在待确认队列里（[`Self::queued`]）。
+    /// 问过、而且还是那一个，是空操作；认出作品的那一行不问（侧边详情只在认不出作品时摆那颗按钮，照稿）。
+    fn sync_queued(&mut self, site: &Site) {
+        let Some(WorkAnchor::Loose(key)) = self.work.as_ref().map(|work| &work.anchor) else {
+            self.queued = None;
+            return;
+        };
+        if self.queued.as_ref().is_some_and(|(asked, _)| asked == key) {
+            return;
+        }
+        let key = key.clone();
+        let 在 = match romcat_core::triage::is_queued(
+            &site.catalog,
+            &site.store,
+            &site.library_identity,
+            &key,
+        ) {
+            Ok(在) => 在,
+            Err(error) => {
+                self.error = Some(format!("{error}"));
+                false
+            }
+        };
+        self.queued = Some((key, 在));
     }
 
     /// 缓着的那份压制清单，**只在它确实是这个作品的时候才算数**。
@@ -4943,7 +5004,11 @@ impl Screen {
             look::help(ui, "点主列表里的一行，看它包含哪几个变体。");
             return;
         }
+        // 「在待确认中处理」摆不摆，先问好（画的时候只借着读）。
+        self.sync_queued(site);
         let mut pick: Option<String> = None;
+        // 按了「在待确认中处理」：那一个变体的键。
+        let mut 去待确认: Option<String> = None;
         // 点了哪一格图。
         let mut open: Option<crate::media::Clicked> = None;
         // 点了「查看详情」或「编辑元数据」：要打开作品详情页的哪一面、进不进编辑态。
@@ -4979,14 +5044,31 @@ impl Screen {
                         suspicion::cards(ui, &this.suspicions, &work.name, &this.suspicion_titles);
                 }
                 // 认不出作品的那一行：名字是怎么来的——没有作品链接**本身就是一条信息**（照稿摆在两颗按钮底下）。
-                if matches!(work.anchor, WorkAnchor::Loose(_)) {
+                // **它在待确认队列里才摆「在待确认中处理」**（挂单 `Q810`）：在不在由核心库答（[`Self::queued`]），
+                // 不在的话那颗按下去落不到任何一条上。
+                if let WorkAnchor::Loose(key) = &work.anchor {
+                    let 在队列里 = this
+                        .queued
+                        .as_ref()
+                        .is_some_and(|(asked, 在)| asked == key && *在);
+                    // 后半句由核心库挑（`WorkVariant::unlinked_hint`）：照稿按有没有候选分两种，还没识别的单说。
+                    let 后半句 = work
+                        .variants
+                        .first()
+                        .map(|variant| variant.unlinked_hint(在队列里))
+                        .unwrap_or_default();
                     pane_gap(ui);
                     look::note_box(ui, |ui| {
-                        ui.label(
-                            "这个名字是从文件名剥出来的正题（剥掉了汉化组、版本号这类记号）：\
-                             识别还没认出它属于哪个作品，所以这一行就是它自己。",
-                        );
+                        ui.label(format!(
+                            "这个名字是从文件名剥出来的正题（剥掉了汉化组、版本号这类记号）。{后半句}"
+                        ));
                     });
+                    if 在队列里 {
+                        pane_gap(ui);
+                        if queue_button(ui) {
+                            去待确认 = Some(key.clone());
+                        }
+                    }
                 }
 
                 pane_gap(ui);
@@ -5036,6 +5118,9 @@ impl Screen {
         if let Some(key) = pick {
             self.pick(&site.catalog, &key);
         }
+        if 去待确认.is_some() {
+            self.queue_jump = 去待确认;
+        }
         if let Some(deed) = 建议 {
             self.do_suspicion(site, &deed);
         }
@@ -5067,7 +5152,7 @@ impl Screen {
 
     /// 侧边详情**头上那一块**（设计稿 `.dhead`）：左边封面或字卡（令牌 `detail-cover-width` 那么宽、
     /// 高按 `card-cover-ratio` 折），右边它是什么（作品 / 未关联作品的变体）、叫什么、哪个平台哪一年、
-    /// 底下几个变体。
+    /// 底下几个变体与中文版本（「· 汉化／官中」，[`Self::chinese`]）。
     ///
     /// 认不出作品的那一行**标题是正题**（`WorkDetail::title`，与表上那一行主栏同一处剥）；说这个名字是怎么来的
     /// 那块提示框摆在这一块底下两颗按钮之后（`Self::detail_panel`，照稿的次序）。
@@ -5124,7 +5209,11 @@ impl Screen {
                     },
                     work.year.as_deref().unwrap_or("年份未知"),
                 ));
-                ui.weak(format!("{} 个变体", work.variants.len()));
+                // 照稿 `${w.v} 个变体 · ${w.zh}`：一个中文的都没有就只写几个变体（挂单 `Q929`）。
+                ui.weak(match self.chinese {
+                    Some(mark) => format!("{} 个变体 · {}", work.variants.len(), mark.label()),
+                    None => format!("{} 个变体", work.variants.len()),
+                });
             });
         });
     }
@@ -5815,6 +5904,18 @@ fn page_buttons(ui: &mut egui::Ui) -> Option<(work::Tab, bool)> {
             }
         })
         .inner
+    })
+}
+
+/// 认不出作品那一行提示框底下那颗小号主按钮「在待确认中处理」（设计稿 `.btn.sm.pri`、`data-act=goobo`）。按下去返回 `true`。
+fn queue_button(ui: &mut egui::Ui) -> bool {
+    look::small_buttons(ui, |ui| {
+        ui.scope(|ui| {
+            look::primary_button(ui.visuals_mut());
+            ui.button("在待确认中处理")
+        })
+        .inner
+        .clicked()
     })
 }
 
