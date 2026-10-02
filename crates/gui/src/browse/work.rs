@@ -815,7 +815,10 @@ impl Screen {
             .inner
     }
 
-    /// 六个面那一排（设计稿 `.tabs`）：一面一格，选中那一面正文色、底下一道强调色线；带数的面在名字后头跟一个小号等宽的数。
+    /// 六个面那一排（设计稿 `.tabs`）：一面一格，选中那一面最深那一档字色（`ink`）、底下一道强调色线；带数的面在名字后头跟一个小号等宽的数。
+    ///
+    /// 那几格走共用的下划线标签（[`look::underline_tabs`]，手动例外弹层、差量预览异常那一块同一个）；这一排左右留白
+    /// 与底下那道横贯整块正文的分隔线是这一页自己的（设计稿 `.tabs` 的 `padding`、`border-bottom`）。
     fn tabs_ui(&mut self, ui: &mut egui::Ui) {
         let tokens = Tokens::builtin();
         let Some(眼下) = self.page.as_ref().map(Page::tab) else {
@@ -835,93 +838,17 @@ impl Screen {
             Tab::Media => 媒体数,
             _ => None,
         };
-        let (字色, 强字色, 弱字色, 强调, 线) = {
-            let visuals = ui.visuals();
-            (
-                visuals.text_color(),
-                visuals.strong_text_color(),
-                visuals.weak_text_color(),
-                visuals.selection.stroke.color,
-                visuals.widgets.noninteractive.bg_stroke,
-            )
-        };
+        let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+        let 这一排: Vec<(Tab, &str, Option<u64>)> = Tab::ALL
+            .into_iter()
+            .map(|tab| (tab, tab.label(), 数(tab).map(|n| n as u64)))
+            .collect();
         let mut 换到 = None;
         let 这一排 = ui
             .horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = tokens.space.tabs_gap;
+                ui.spacing_mut().item_spacing.x = 0.0;
                 ui.add_space(tokens.space.tabs_padding);
-                for tab in Tab::ALL {
-                    let on = tab == 眼下;
-                    let 名字体 = if on {
-                        egui::FontId::new(tokens.font.size_body, font::strong_family())
-                    } else {
-                        egui::FontId::proportional(tokens.font.size_body)
-                    };
-                    let 名 = ui.painter().layout_no_wrap(
-                        tab.label().to_owned(),
-                        名字体,
-                        egui::Color32::PLACEHOLDER,
-                    );
-                    let 数字 = 数(tab).map(|n| {
-                        ui.painter().layout_no_wrap(
-                            thousands(n as u64),
-                            egui::FontId::monospace(tokens.font.size_caption),
-                            弱字色,
-                        )
-                    });
-                    let 宽 = 名.size().x
-                        + 数字
-                            .as_ref()
-                            .map_or(0.0, |galley| tokens.space.tab_count_gap + galley.size().x)
-                        + 2.0 * tokens.space.tab_padding;
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(宽, tokens.layout.tab_height),
-                        egui::Sense::click(),
-                    );
-                    let 色 = if on || response.hovered() {
-                        强字色
-                    } else {
-                        字色
-                    };
-                    let 名在 = egui::pos2(
-                        rect.left() + tokens.space.tab_padding,
-                        rect.center().y - 名.size().y / 2.0,
-                    );
-                    let 名宽 = 名.size().x;
-                    ui.painter().galley(名在, 名, 色);
-                    if let Some(数字) = 数字 {
-                        let 在 = egui::pos2(
-                            名在.x + 名宽 + tokens.space.tab_count_gap,
-                            rect.center().y - 数字.size().y / 2.0,
-                        );
-                        ui.painter().galley(在, 数字, 弱字色);
-                    }
-                    if on {
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_max(
-                                egui::pos2(
-                                    rect.left(),
-                                    rect.bottom() - tokens.layout.tab_underline,
-                                ),
-                                rect.max,
-                            ),
-                            0.0,
-                            强调,
-                        );
-                    }
-                    response.widget_info(|| {
-                        egui::WidgetInfo::selected(
-                            egui::WidgetType::SelectableLabel,
-                            true,
-                            on,
-                            tab.label(),
-                        )
-                    });
-                    look::focus_ring(ui.ctx(), ui.clip_rect(), &response);
-                    if response.clicked() {
-                        换到 = Some(tab);
-                    }
-                }
+                换到 = look::underline_tabs(ui, look::TabsSize::Page, &这一排, 眼下);
             })
             .response
             .rect;

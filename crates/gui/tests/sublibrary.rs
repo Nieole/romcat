@@ -38,7 +38,9 @@ use romcat_gui::app::{App, View};
 use romcat_gui::headless;
 
 mod shared;
-use shared::{占位活, 悬停在, 正好那一段画在哪儿, 点一下, 画出来的字};
+use shared::{
+    占位活, 悬停在, 正好那一段画在哪儿, 点一下, 画出来的字, 画着的每一处
+};
 
 /// 这一趟拿来当目标的那个 fixture 目录里，维护者自己拷进去的东西叫什么。
 const 存档: &str = "我自己拷进来的存档.sav";
@@ -1621,7 +1623,7 @@ fn 排过差量预览之后卡拔了再按同步_屏上说清插上读卡器_任
 }
 
 #[test]
-fn 差量预览摆得出新增与净变化而且步骤全部展开得了() {
+fn 差量预览摆得出新增与净变化而且计划那几步一步都没截() {
     let mut 场 = 现场::摆好();
     场.建子库("掌机", "");
     场.加规则("掌机", "平台=SFC");
@@ -1645,20 +1647,9 @@ fn 差量预览摆得出新增与净变化而且步骤全部展开得了() {
         "维护者自己拷进去的文件混进了计划",
     );
 
-    // **超长时能全部展开**：默认只摆头几条，按一下摊开全部；重排一次又收回去。
-    assert!(
-        !场.app.sublibrary().expanded(),
-        "一进来就摊开会把同步按钮挤没了"
-    );
-    场.app.sublibrary_and_site().0.expand(true);
-    assert!(场.app.sublibrary().expanded());
-    场.排预览();
-    assert!(!场.app.sublibrary().expanded(), "重排一次没收回去");
-
-    // **摊开之后那张表真的画了几行**，而且一步都没截：这一份计划几步就画几行。
-    // 靠的不是「一屏碰巧摆得下」：摊开那一下把表滚到视口顶上，上面那几段多高都不影响。
+    // **计划那几步那个框里真的画了几步**，而且一步都没截：这一份计划只有两步，框里摆得下，几步就画几步
+    // （框里摆不下时滚得到最后一步，见 `排过差量预览之后计划那几步装在一个定高的框里_…`）。
     let ctx = headless::context();
-    场.app.sublibrary_and_site().0.expand(true);
     画两帧(&ctx, &mut 场);
     assert_eq!(
         场.app.sublibrary().steps_drawn(),
@@ -1669,7 +1660,152 @@ fn 差量预览摆得出新增与净变化而且步骤全部展开得了() {
             .plan
             .steps
             .len(),
-        "摊开之后画出来的行数与计划的步数对不上",
+        "框里画出来的步数与计划的步数对不上",
+    );
+}
+
+/// 一帧里**正好**写着 `那一段` 的那几段字，各自被裁在哪个框里（`ClippedShape::clip_rect`），按画出来的次序。
+///
+/// 装在一个框里滚的那几行，裁剪框就是那个框的视口——量它，不比像素、也不必让界面把框的 `Rect` 漏出来。
+fn 裁在哪个框里(output: &egui::FullOutput, 那一段: &str) -> Vec<egui::Rect> {
+    fn 有(shape: &egui::epaint::Shape, 那一段: &str) -> bool {
+        match shape {
+            egui::epaint::Shape::Text(text) => text.galley.text() == 那一段,
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().any(|one| 有(one, 那一段)),
+            _ => false,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .filter(|clipped| 有(&clipped.shape, 那一段))
+        .map(|clipped| clipped.clip_rect)
+        .collect()
+}
+
+/// 整张卡一帧画全的那份输入（同 [`画两帧整张卡`]：视口拉到 2400 高）。
+fn 整张卡的输入() -> egui::RawInput {
+    let mut input = headless::input();
+    input.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(headless::VIEWPORT[0], 2400.0),
+    ));
+    input
+}
+
+/// 设计稿 `.steplist` 的 `max-height:150px`：计划那几步那个框最高多高。
+const 稿上那几步的框最高: f32 = 150.0;
+
+#[test]
+fn 排过差量预览之后计划那几步装在一个定高的框里_没有全部展开_在框里滚得到最后一步() {
+    // 票 `gui-draws-the-rest-of-the-design/14`（差距 D-08，岔路口 F-4 裁 A）：稿上 `.steplist` 是**一个框**——
+    // 描边、圆角、最高 150、框里滚；从前那一段是「摆头 6 条 + 全部展开 / 收起来 + 一张可拖列宽的表」。
+    // 抬头那句「这一趟要动的 N 步（先删后传）」与类别那一列去掉，「共 N 步，先删后传」并进框里末一行。
+    // **一步都不截**照旧（parking-3/08 那条「八千步滚到第五千步」）：框里滚到底，最后一步摆得出来。
+    let 第二个根 = temp_dir("gui-sub-many");
+    for 第几个 in 0..40 {
+        写(
+            &第二个根
+                .path()
+                .join(format!("GBA/第{第几个:02}个 汉化版.zip")),
+            &zip(512),
+        );
+    }
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好带(Some(&第二个根));
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=GBA");
+    场.排预览();
+    let (头一步, 最后一步, 几步) = {
+        let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+        (
+            plan.steps.first().expect("有步").path.clone(),
+            plan.steps.last().expect("有步").path.clone(),
+            plan.steps.len(),
+        )
+    };
+    assert!(
+        几步 > 40,
+        "前提：计划里四十多步，一个 150 高的框摆不下：{几步}"
+    );
+
+    let mut 帧 = headless::frame(&ctx, 整张卡的输入(), |ui| 场.app.ui(ui));
+    for _ in 0..2 {
+        帧 = headless::frame(&ctx, 整张卡的输入(), |ui| 场.app.ui(ui));
+    }
+    let 屏上 = 画出来的字(&帧);
+    assert!(
+        !屏上.contains("全部展开"),
+        "还留着「全部展开」那一下：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("这一趟要动的"),
+        "还留着计划那一段的抬头（F-4 裁去掉）：\n{屏上}"
+    );
+    assert!(
+        !屏上.lines().any(|line| line == "ROM" || line == "元数据"),
+        "还留着「元数据 / ROM / 媒体」那一列（F-4 裁去掉）：\n{屏上}"
+    );
+    // **定高的框**：头一步裁在一个不高过稿上 150 的框里，而不是整块屏体。
+    let 框 = 裁在哪个框里(&帧, &头一步);
+    let [框] = 框.as_slice() else {
+        panic!("头一步「{头一步}」该正好画一处：{框:?}\n{屏上}");
+    };
+    assert!(
+        框.height() <= 稿上那几步的框最高 + 0.5,
+        "头一步没装在定高的框里：裁剪框 {框:?}，稿上最高 {稿上那几步的框最高}"
+    );
+    assert!(
+        !屏上.contains(&最后一步),
+        "四十多步全摊在卡上了，框没起作用（最后一步「{最后一步}」一开始就看得见）：\n{屏上}"
+    );
+
+    // **在框里滚到底**：指针先停进框里一帧，再往下滚，滚到 egui 说停了为止。
+    // 横向取头一步那段字的中线：只竖着滚的框，裁剪框横向放到了整块屏体那么宽，它的中心不在卡上。
+    let 头一步那段字 = 画着的每一处(&帧, &|text| text == 头一步);
+    let 停在 = egui::pos2(头一步那段字[0].center().x, 框.center().y);
+    let mut input = 整张卡的输入();
+    input.events.push(egui::Event::PointerMoved(停在));
+    headless::frame(&ctx, input, |ui| 场.app.ui(ui));
+    let mut input = 整张卡的输入();
+    input.events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -100_000.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    headless::frame(&ctx, input, |ui| 场.app.ui(ui));
+    for _ in 0..240 {
+        if !ctx.input(|input| input.is_scrolling()) {
+            break;
+        }
+        headless::frame(&ctx, 整张卡的输入(), |ui| 场.app.ui(ui));
+    }
+    let mut 帧 = headless::frame(&ctx, 整张卡的输入(), |ui| 场.app.ui(ui));
+    for _ in 0..2 {
+        帧 = headless::frame(&ctx, 整张卡的输入(), |ui| 场.app.ui(ui));
+    }
+    let 屏上 = 画出来的字(&帧);
+    assert!(
+        屏上.contains(&最后一步),
+        "框里滚到底，最后一步「{最后一步}」还是摆不出来：\n{屏上}"
+    );
+    let 末一行 = format!("共 {几步} 步，先删后传");
+    assert!(
+        屏上.lines().any(|line| line == 末一行),
+        "框里末一行不是「{末一行}」：\n{屏上}"
+    );
+    assert!(
+        裁在哪个框里(&帧, &末一行)
+            .iter()
+            .all(|那个框| 那个框.height() <= 稿上那几步的框最高 + 0.5),
+        "「{末一行}」不在那个框里",
+    );
+    // 一帧画几行只跟框有多高有关（`steps_drawn` 是量具）。
+    assert!(
+        场.app.sublibrary().steps_drawn() < 几步,
+        "框里一帧把 {几步} 步全画了，虚拟化没起作用：{}",
+        场.app.sublibrary().steps_drawn(),
     );
 }
 
@@ -2044,10 +2180,10 @@ fn 排差量预览按停之后一个字节都没写而且再排一次照样排�
 }
 
 #[test]
-fn 这一屏画得出来_摊开与收起都不炸() {
+fn 这一屏画得出来_排过差量预览之后也不炸() {
     // headless 的一帧钉的是**状态转换**不是像素（规格「接缝二」）：卡片、容量条、
-    // 差量步骤表这三样各自都要真的走一遍画的那条路——它们里头有 id、有画笔、
-    // 有一张虚拟化的表，编得过不等于画得出来。
+    // 计划那几步这三样各自都要真的走一遍画的那条路——它们里头有 id、有画笔、
+    // 有一个虚拟化的框，编得过不等于画得出来。
     let ctx = headless::context();
     let mut 场 = 现场::摆好();
     场.建子库("掌机", "1GB");
@@ -2056,11 +2192,8 @@ fn 这一屏画得出来_摊开与收起都不炸() {
     场.加规则("备份卡", "平台=GBA");
     场.求值();
     场.排预览();
-    for 摊开 in [false, true] {
-        场.app.sublibrary_and_site().0.expand(摊开);
-        for _ in 0..2 {
-            headless::frame(&ctx, headless::input(), |ui| 场.app.ui(ui));
-        }
+    for _ in 0..2 {
+        headless::frame(&ctx, headless::input(), |ui| 场.app.ui(ui));
     }
     // 「从浏览添加…」跳去浏览屏之后那一屏照样画得出来——例外那一栏是新长出来的。
     场.从浏览添加();
@@ -2622,28 +2755,24 @@ fn 造计划(name: &str, steps: usize) -> romcat_core::sync::Plan {
     }
 }
 
-/// 把滚动位置按到「第 `at` 步」那一行上，像素。
+/// 画三帧计划那几步那个框，框里滚到「第 `滚到第几步` 步」那一行上；返回（这一帧画了几步，这一帧画出来的字）。
 ///
-/// 一行的行距在 `egui_extras` 里是 `行高 + item_spacing.y`，**照样式算而不是写死一个
-/// 数**——样式一动，写死的那个数会悄悄滚到别处去。这一份上下文没改过间距
-/// （`headless::context` 只装字体），所以拿的就是默认那套，与 `bench::row_pitch` 同一条。
-fn 滚到第几步(at: usize) -> f32 {
-    at as f32 * (romcat_gui::table::ROW_HEIGHT + egui::Style::default().spacing.item_spacing.y)
-}
-
-/// 画三帧那张步骤表，返回（这一帧画了几行，这一帧画出来的字）。
+/// 框里一行多高**照令牌与字体算而不是写死一个数**（`sublibrary::step_row_pitch`，画那个框的也是它）——
+/// 样式一动，写死的那个数会悄悄滚到别处去。与 `bench` 量帧率那一趟同一条。它要字体，所以在帧里问。
 ///
-/// 三帧：头一帧 egui 还在量滚动区有多大，列宽与滚动位置要下一帧才落定。
-fn 画步骤表(
+/// 三帧：头一帧 egui 还在量滚动区有多大，滚动位置要下一帧才落定。
+fn 画那几步的框(
     ctx: &egui::Context,
     plan: &romcat_core::sync::Plan,
-    scroll_to: Option<f32>,
+    滚到第几步: Option<usize>,
 ) -> (usize, String) {
     let mut 画了 = 0;
     let mut 屏上 = String::new();
     for _ in 0..3 {
         let out = headless::frame(ctx, headless::input(), |ui| {
-            画了 = romcat_gui::sublibrary::steps_table(ui, plan, scroll_to);
+            let scroll_to =
+                滚到第几步.map(|at| at as f32 * romcat_gui::sublibrary::step_row_pitch(ui.ctx()));
+            画了 = romcat_gui::sublibrary::step_list(ui, plan, scroll_to);
         });
         屏上 = 画出来的字(&out);
     }
@@ -2652,14 +2781,15 @@ fn 画步骤表(
 
 #[test]
 fn 八千步的计划滚到第五千步那一行照样摆得出来() {
-    // 挂账 `D158`：真机量级上一次同步动上万个文件（实测合成数据 8,206 步），而表列满
+    // 挂账 `D158`：真机量级上一次同步动上万个文件（合成数据实测两万多步，数见台账 `docs/library-facts.md`
+    // 「一次同步动几步」；这里造的八千步是那条挂账当年的量级），而表列满
     // 2,000 条就打住——想在界面上确认第 5,000 步是什么就得转去命令行，
     // 而**同步前必须看一遍它要做什么**是 ADR-0016 的硬要求。
     let ctx = headless::context();
     let plan = 造计划("八千步", 8_206);
     let 第五千步 = plan.steps[5_000].path.clone();
 
-    let (画了, 屏上) = 画步骤表(&ctx, &plan, Some(滚到第几步(5_000)));
+    let (画了, 屏上) = 画那几步的框(&ctx, &plan, Some(5_000));
     assert!(
         屏上.contains(&第五千步),
         "第 5,000 步（{第五千步}）没摆在屏上：\n{屏上}",
@@ -2679,10 +2809,42 @@ fn 八千步的计划滚到第五千步那一行照样摆得出来() {
     // 这里强按一个越界的偏移，`body.rows` 算出来的头一行会落在总数之外，一行都不画。
     let 末 = plan.steps.len() - 1;
     let 最后一步 = plan.steps[末].path.clone();
-    let (_, 屏上) = 画步骤表(&ctx, &plan, Some(滚到第几步(末)));
+    let (_, 屏上) = 画那几步的框(&ctx, &plan, Some(末));
     assert!(
         屏上.contains(&最后一步),
         "最后一步（{最后一步}）滚不到：\n{屏上}",
+    );
+}
+
+#[test]
+fn 转换那一步照稿写主库那一份的相对路径跟着转为zip() {
+    // 票 `gui-draws-the-rest-of-the-design/14`（差距 D-11）：稿上那一行是「SFC/…汉化版.sfc → 转为 zip」。
+    // 核心 `Step::convert` 现成；那半句由核心一处答（`Conversion::shown`），命令行报告印的是同一句。
+    use romcat_core::capability::{Conversion, Recipe};
+    let mut plan = 造计划("转换", 2);
+    plan.steps[1].source = "库/SFC/勇者斗恶龙Ⅲ 汉化版.sfc".to_string();
+    plan.steps[1].path = "SFC/勇者斗恶龙Ⅲ 汉化版.zip".to_string();
+    plan.steps[1].convert = Some(Conversion {
+        recipe: Recipe::Rezip,
+        path: "SFC/勇者斗恶龙Ⅲ 汉化版.zip".to_string(),
+        bytes: 4096,
+        estimated: true,
+        source_bytes: 4096,
+        inner: None,
+        inner_name: None,
+    });
+    let ctx = headless::context();
+    let (_, 屏上) = 画那几步的框(&ctx, &plan, None);
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == "SFC/勇者斗恶龙Ⅲ 汉化版.sfc → 转为 zip"),
+        "转换那一步没写「→ 转为 zip」：\n{屏上}"
+    );
+    // 不转的那一步照旧写目标上的路径，后头什么都不跟。
+    assert!(
+        屏上.lines().any(|line| line == plan.steps[0].path),
+        "不转的那一步路径不对：\n{屏上}"
     );
 }
 
@@ -2697,9 +2859,9 @@ fn 翻行画几行只跟视口有多高有关与总步数无关() {
     let 短 = 造计划("两千步", 2_000);
     let 长 = 造计划("八千步", 8_206);
     for 第几步 in [0, 500, 1_500] {
-        let offset = Some(滚到第几步(第几步));
-        let (短画了, _) = 画步骤表(&ctx, &短, offset);
-        let (长画了, _) = 画步骤表(&ctx, &长, offset);
+        let offset = Some(第几步);
+        let (短画了, _) = 画那几步的框(&ctx, &短, offset);
+        let (长画了, _) = 画那几步的框(&ctx, &长, offset);
         assert!(短画了 > 0, "滚到第 {第几步} 步一行都没画");
         assert_eq!(
             短画了, 长画了,
@@ -4196,10 +4358,16 @@ fn 手动例外两栏逐条写作品平台体积备注与时间_每条都撤得�
 
     // 包含那一栏：表头六列齐，作品、平台、体积、备注、时间逐格写得出。
     let 屏上 = 画两帧(&ctx, &mut 场);
+    // 两栏是下划线标签（与差量预览异常那一块同一个共用件），名字后头跟着这一栏几条。
+    for (栏, 几条) in [("包含", 1), ("排除", 1)] {
+        assert_eq!(
+            栏名后头跟的数(&屏上, 栏),
+            Some(几条),
+            "「{栏}」那一栏后头跟的数不对：\n{屏上}"
+        );
+    }
     for 那一行 in [
         "手动例外 · 掌机",
-        "包含 1",
-        "排除 1",
         "作品",
         "平台",
         "体积",
@@ -4630,6 +4798,15 @@ fn 摆出异常(场: &mut 现场) {
     场.排预览();
 }
 
+/// 一排下划线标签上，**名字是 `栏名` 的那一格后头跟的数**（`look::underline_tabs`：名字一段、数另一段，
+/// 画出来的字里是紧挨着的两行）。屏上没有那样一格时是 `None`。
+fn 栏名后头跟的数(屏上: &str, 栏名: &str) -> Option<u64> {
+    let 行: Vec<&str> = 屏上.lines().collect();
+    行.windows(2)
+        .filter(|两行| 两行[0] == 栏名)
+        .find_map(|两行| 两行[1].trim().parse::<u64>().ok())
+}
+
 /// 这一趟计划里，某一类异常有几条。
 fn 这一类几条(场: &现场, kind: romcat_core::sync::SurpriseKind) -> usize {
     场.app
@@ -4675,11 +4852,12 @@ fn 三方对比照稿一排五个大数字_新增删除不动异常与放不进�
     };
     for (数, 字段) in [
         (
-            format!("＋{}", plan.adds.files),
+            // 正负号照稿（拿主意的人 2026-10-01 裁 `F-10`，差距 D-07）：ASCII 加号、U+2212 减号。
+            format!("+{}", plan.adds.files),
             vec!["新增".to_string(), human_bytes(plan.adds.bytes)],
         ),
         (
-            format!("－{}", plan.deletes.files),
+            format!("\u{2212}{}", plan.deletes.files),
             vec![
                 "删除".to_string(),
                 "释放".to_string(),
@@ -4719,14 +4897,10 @@ fn 三方对比照稿一排五个大数字_新增删除不动异常与放不进�
         "这份夹具该凑出至少三类异常：{:?}",
         plan.surprises,
     );
-    // 分段开关上那一颗整段写着「<栏名> <数>」。**认「后面就是一个数」那一条**：
-    // 同样以栏名打头的还有五格里的小字（「放不进目标 · 12.79 KiB」），它跟的不是光一个数。
+    // 下划线标签那一格：名字一段、后头跟着的数另一段（`look::underline_tabs`）。**认「名字后头紧跟一个数」那一处**：
+    // 同样写着栏名的还有五格里的小字（「放不进目标」后头跟的是「12.79 KiB」），它跟的不是光一个数。
     let 栏上的数 = |栏: romcat_gui::sublibrary::Anomaly| -> u64 {
-        let 前缀 = format!("{} ", 栏.shown());
-        屏上
-            .lines()
-            .filter_map(|line| line.strip_prefix(&前缀))
-            .find_map(|尾巴| 尾巴.trim().parse::<u64>().ok())
+        栏名后头跟的数(&屏上, 栏.shown())
             .unwrap_or_else(|| panic!("屏上没有「{}」那一栏：\n{屏上}", 栏.shown()))
     };
     let 四类加起来: u64 = romcat_gui::sublibrary::Anomaly::all()
@@ -4786,6 +4960,35 @@ fn 三方对比照稿一排五个大数字_新增删除不动异常与放不进�
             );
         }
     }
+    // **净变化并进那行小字**（拿主意的人 2026-10-01 裁 `F-2`）：「净变化 …；同步完之后目标上占 …（眼下 …）」
+    // 跟在「按变体数」那一行里，不另起一行；「排它用了 N ms」是调试数，不印。
+    let 净变化 = format!(
+        "净变化 {}{}",
+        if plan.net_bytes >= 0 { "+" } else { "\u{2212}" },
+        human_bytes(plan.net_bytes.unsigned_abs()),
+    );
+    let 那行小字 = 屏上
+        .lines()
+        .find(|line| line.starts_with("按变体数："))
+        .unwrap_or_default();
+    assert!(
+        那行小字.contains(&净变化)
+            && 那行小字.contains(&format!(
+                "同步完之后目标上占 {}（眼下 {}）",
+                human_bytes(plan.after_bytes),
+                human_bytes(plan.actual_bytes),
+            )),
+        "净变化与同步完之后占多少没并进那行小字（{净变化}）：\n{屏上}",
+    );
+    assert!(
+        !屏上.contains("排它用了"),
+        "还印着「排它用了 N ms」：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains('＋') && !屏上.contains('－'),
+        "还有全角的正负号：\n{屏上}"
+    );
+
     // **零的那几档不写空话**（照票 26 的裁定）：这份夹具里删除是零，小字里就不该提删除的变体数。
     assert_eq!(
         plan.deletes.variants, 0,
@@ -4831,13 +5034,13 @@ fn 更新那一档不并进新增_小字里单说一句() {
 
     // **反向断言**：新增那个大数字就是新增本身，不是新增加更新。
     assert!(
-        屏上.lines().any(|line| line == format!("＋{新增几个}")),
+        屏上.lines().any(|line| line == format!("+{新增几个}")),
         "新增那个大数字不是 {新增几个}：\n{屏上}",
     );
     assert!(
         !屏上
             .lines()
-            .any(|line| line == format!("＋{}", 新增几个 + 更新几个)),
+            .any(|line| line == format!("+{}", 新增几个 + 更新几个)),
         "更新被悄悄算进了新增那个大数字：\n{屏上}",
     );
     // **更新那一档在小字里单说一句**，摆在屏上而不是悬停里。
@@ -4853,6 +5056,93 @@ fn 更新那一档不并进新增_小字里单说一句() {
         屏上.contains(&format!("更新 {更新几个变体} 个")),
         "小字里少了更新那一档的变体数：\n{屏上}",
     );
+}
+
+/// `那一段` 那段字**底下贴着一道下划线**：一块实心的长条，粗正好是令牌 `tab-underline`，横着罩住那段字的中线，
+/// 上沿落在那段字底下一格标签高之内（设计稿 `.tabs` / `.dtabs` 选中那一格的 `box-shadow:inset 0 -2px 0 var(--accent)`）。
+///
+/// 下划线标签页与分段开关（`.seg`：凹陷底里一颗白底描边的药丸）一眼分得开的就是这一道线——量它，不比像素。
+fn 底下有下划线(output: &egui::FullOutput, 那一段: &str) -> bool {
+    fn 收(shape: &egui::epaint::Shape, 粗: f32, out: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Rect(rect)
+                if (rect.rect.height() - 粗).abs() < 0.01 && rect.fill.a() > 0 =>
+            {
+                out.push(rect.rect);
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, 粗, out)),
+            _ => {}
+        }
+    }
+    let 粗 = romcat_gui::tokens::Tokens::builtin().layout.tab_underline;
+    let mut 线 = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, 粗, &mut 线);
+    }
+    画着的每一处(output, &|text| text == 那一段)
+        .iter()
+        .any(|字| {
+            线.iter().any(|一道| {
+                一道.x_range().contains(字.center().x)
+                    && 一道.top() >= 字.bottom()
+                    && 一道.top() - 字.bottom() < 40.0
+            })
+        })
+}
+
+/// 整张卡一帧画全（同 [`画两帧整张卡`]），交出后一帧的整份产出。
+fn 整张卡两帧(ctx: &egui::Context, 场: &mut 现场) -> egui::FullOutput {
+    headless::frame(ctx, 整张卡的输入(), |ui| 场.app.ui(ui));
+    headless::frame(ctx, 整张卡的输入(), |ui| 场.app.ui(ui))
+}
+
+#[test]
+fn 异常那一排是下划线标签页_与手动例外弹层那一排是同一个共用件() {
+    // 票 `gui-draws-the-rest-of-the-design/14`（差距 D-12、D-13）：稿上异常那一块的头一排是 `.dtabs` **下划线标签**——
+    // 选中那一格正文色、粗、底下一道强调色线，条数等宽小字跟在名字后；没有「异常」那个小标题。
+    // 从前那一排是分段开关（`look::segmented`）。手动例外弹层那一排（稿上同是 `.dtabs`）同一写法跟着换。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+
+    let 帧 = 整张卡两帧(&ctx, &mut 场);
+    let 屏上 = 画出来的字(&帧);
+    assert!(
+        !屏上.lines().any(|line| line == "异常"),
+        "还留着「异常」那个小标题（标签页本身就是抬头）：\n{屏上}"
+    );
+    assert!(
+        底下有下划线(&帧, "设备上缺失"),
+        "选中的那一栏底下没有那道下划线：\n{屏上}"
+    );
+    assert!(
+        !底下有下划线(&帧, "被修改过"),
+        "没选中的那一栏底下也画了下划线"
+    );
+    // 换一栏，线跟着走。
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(
+            romcat_core::sync::SurpriseKind::Changed,
+        ));
+    let 帧 = 整张卡两帧(&ctx, &mut 场);
+    assert!(
+        底下有下划线(&帧, "被修改过"),
+        "换到「被修改过」之后线没跟过去"
+    );
+    assert!(!底下有下划线(&帧, "设备上缺失"), "换走之后旧那一栏还画着线");
+
+    // 手动例外弹层那一排：同一个共用件，同一道线。
+    场.管理例外("掌机");
+    headless::frame(&ctx, headless::input(), |ui| 场.app.ui(ui));
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| 场.app.ui(ui));
+    assert!(
+        底下有下划线(&帧, "包含"),
+        "手动例外弹层那一排不是下划线标签：\n{}",
+        画出来的字(&帧)
+    );
+    assert!(!底下有下划线(&帧, "排除"), "没选中的「排除」底下也画了线");
 }
 
 #[test]
@@ -4904,6 +5194,112 @@ fn 四类异常分栏列出_每一栏写明工具不会做什么() {
     assert_eq!(这一类几条(&场, SurpriseKind::Gone), 1);
     assert_eq!(这一类几条(&场, SurpriseKind::Changed), 1);
     assert!(这一类几条(&场, SurpriseKind::Occupied) >= 1);
+}
+
+/// 这一帧里**只描边不铺底**的那几个框（`Shape::Rect`，描边有宽、底色全透明）各在哪儿：列表框、外框那一类。
+fn 描边框(output: &egui::FullOutput) -> Vec<egui::Rect> {
+    fn 收(shape: &egui::epaint::Shape, out: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Rect(rect) if rect.stroke.width > 0.0 && rect.fill.a() == 0 => {
+                out.push(rect.rect);
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, &mut out);
+    }
+    out
+}
+
+#[test]
+fn 异常每一栏的条目装进列表框_另有几个是框里末一行_行尾照旧写选择集还要不要它() {
+    // 票 `gui-draws-the-rest-of-the-design/14`（差距 D-15）：稿上每一栏的条目装在 `.lst` 框里——描边、圆角、
+    // 行间分隔线、等宽；「另有 17 个」是**框里末一行**。从前不装框，「……另有 N 个」弱字落在框外。
+    // 行尾「选择集还要它 / 已经不要它了」留（拿主意的人 2026-10-01 裁 `F-6` B）。
+    let 第二个根 = temp_dir("gui-sub-gone");
+    for 第几个 in 0..12 {
+        写(
+            &第二个根.path().join(format!("GBA/第{第几个:02}个.zip")),
+            &zip(512),
+        );
+    }
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好带(Some(&第二个根));
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=GBA");
+    场.排预览();
+    场.同步到底();
+    for 第几个 in 0..12 {
+        fs::remove_file(场.卡.path().join(format!("GBA/第{第几个:02}个.zip"))).expect("删得掉");
+    }
+    场.排预览();
+    let 缺的: Vec<String> = 场
+        .app
+        .sublibrary()
+        .prepared()
+        .expect("排得出来")
+        .plan
+        .surprises
+        .iter()
+        .filter(|one| one.kind == romcat_core::sync::SurpriseKind::Gone)
+        .map(|one| one.path.clone())
+        .collect();
+    assert_eq!(缺的.len(), 12, "前提：卡上缺了十二个：{缺的:?}");
+
+    let 帧 = 整张卡两帧(&ctx, &mut 场);
+    let 屏上 = 画出来的字(&帧);
+    let 头一个 = 画着的每一处(&帧, &|text| text == 缺的[0]);
+    let 另有 = 画着的每一处(&帧, &|text| {
+        text.starts_with("另有 ") && text.ends_with(" 个")
+    });
+    let 说明 = 画着的每一处(&帧, &|text| {
+        text.starts_with("清单里有、设备上找不到的文件")
+    });
+    let ([头一个], [另有], [说明]) = (头一个.as_slice(), 另有.as_slice(), 说明.as_slice())
+    else {
+        panic!("头一个缺的、「另有 N 个」、那一栏的说明该各画一处：\n{屏上}");
+    };
+    // **列表框**：一个只描边的框，罩住头一个与「另有 N 个」，罩不住上头那句说明（那句在框外，异常那一块的外框才罩得住它）。
+    let 框 = 描边框(&帧);
+    assert!(
+        框.iter().any(|一个| {
+            一个.contains_rect(*头一个) && 一个.contains_rect(*另有) && !一个.contains_rect(*说明)
+        }),
+        "条目与「另有 N 个」没装进同一个列表框：框 {框:?}\n{屏上}",
+    );
+    assert!(另有.top() > 头一个.bottom(), "「另有 N 个」不在条目底下");
+    assert!(
+        !屏上.contains("……另有"),
+        "还写着框外那句「……另有 N 个」：\n{屏上}"
+    );
+    assert!(
+        屏上.lines().any(|line| line == "选择集还要它"),
+        "行尾那句「选择集还要它」没了（F-6 裁留）：\n{屏上}"
+    );
+}
+
+#[test]
+fn 补回那一格是带说明的勾选_说明缩进挂在名字底下() {
+    // 票 `gui-draws-the-rest-of-the-design/14`（差距 D-16）：稿上「同步时补回这 N 个文件」是 `.opt`——方框对着名字那一行，
+    // 说明小字**缩进挂在名字底下**（gd-01 立的 `look::checkbox_option`）。从前勾选框一行、说明另起一行顶格。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+    let 帧 = 整张卡两帧(&ctx, &mut 场);
+    let 屏上 = 画出来的字(&帧);
+    let 名字 = 画着的每一处(&帧, &|text| text.starts_with("同步时补回这 "));
+    let 说明 = 画着的每一处(&帧, &|text| text.starts_with("只补清单里记录过的文件"));
+    let ([名字], [说明]) = (名字.as_slice(), 说明.as_slice()) else {
+        panic!("补回那一格的名字与说明该各画一处：\n{屏上}");
+    };
+    assert!(
+        (说明.left() - 名字.left()).abs() < 0.5,
+        "说明没缩进到与名字左沿对齐：名字 {名字:?}，说明 {说明:?}"
+    );
+    assert!(说明.top() >= 名字.bottom() - 0.5, "说明不在名字底下");
 }
 
 #[test]
@@ -5369,16 +5765,18 @@ fn 落点撞车列出撞的是哪两份_排除其中一份之后另一份正常�
         .sublibrary_and_site()
         .0
         .show_anomaly(romcat_gui::sublibrary::Anomaly::NoFit);
-    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    let 帧 = 整张卡两帧(&ctx, &mut 场);
+    let 屏上 = 画出来的字(&帧);
     assert!(屏上.contains("落点撞车"), "没说这是落点撞车：\n{屏上}");
     assert!(
         屏上.contains("撞上的一个都不放行"),
         "没把「一个都不放行」写在屏上：\n{屏上}",
     );
-    // **撞的是哪两份**：两条完整的键都画出来了，两颗「排除这一份」各摆一颗。
+    // **撞的是哪两份**：照稿写「根名 · 相对路径」（`table::root_and_path`，差距 D-18）——落点剥掉了根名，
+    // 两份只有根名分得开（挂单 `Q57`）。两颗「排除这一份」各摆一颗。
     for 键 in [
-        "库/SFC/幻想传说 汉化版.zip",
-        "另一块盘/SFC/幻想传说 汉化版.zip",
+        "库 · SFC/幻想传说 汉化版.zip",
+        "另一块盘 · SFC/幻想传说 汉化版.zip",
     ] {
         assert!(
             屏上.lines().any(|line| line == 键),
@@ -5389,6 +5787,20 @@ fn 落点撞车列出撞的是哪两份_排除其中一份之后另一份正常�
         屏上.lines().filter(|line| *line == "排除这一份").count(),
         撞车[0].files.len(),
         "撞上几份就该摆几颗「排除这一份」：\n{屏上}",
+    );
+    // **一处一个框，头一行落点、右头一枚「撞车」标签**（差距 D-17）：标签与落点同一行、在它右边。
+    let 落点 = 画着的每一处(&帧, &|text| text == "SFC/幻想传说 汉化版.zip");
+    let 标签 = 画着的每一处(&帧, &|text| text == "撞车");
+    assert!(
+        落点.iter().any(|路径| 标签.iter().any(|签| {
+            (签.center().y - 路径.center().y).abs() < 4.0 && 签.left() > 路径.right()
+        })),
+        "落点那一行右头没有「撞车」标签：落点 {落点:?}，标签 {标签:?}\n{屏上}",
+    );
+    // **撞车每份不再印体积**（拿主意的人 2026-10-01 裁 `F-6` B）：小的那一份（4 KiB）只在它那一行上印过。
+    assert!(
+        !屏上.lines().any(|line| line == human_bytes(4096)),
+        "撞车那几份还各印着体积：\n{屏上}",
     );
 
     // 排除其中一份：**记成这个子库的一条排除例外**（ADR-0016，不是第二套机制），

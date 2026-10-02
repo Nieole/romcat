@@ -519,12 +519,22 @@ pub struct Space {
     pub health_tile_padding: [f32; 2],
     /// 一格里标题、数、小字之间（设计稿 `.htile` 的 `gap`）。
     pub health_tile_gap: f32,
-    /// 体检明细一行的内边距：`[上下, 左右]`（设计稿 `.lst>div`）。
-    pub health_list_padding: [f32; 2],
+    /// 列表框一行的内边距：`[上下, 左右]`（设计稿 `.lst>div`）。库体检明细与差量预览异常那一块里的条目共用。
+    pub list_padding: [f32; 2],
     /// 差量账一格的内边距（上下, 左右）。
     pub diff_tile_padding: [f32; 2],
     /// 差量账格与格之间。
     pub diff_gap: f32,
+    /// 差量预览计划那几步一行的内边距：`[上下, 左右]`（设计稿 `.steplist div`）。
+    pub step_list_padding: [f32; 2],
+    /// 那一行动作词、路径、大小几格之间（设计稿 `.steplist div` 的 `gap`）。
+    pub step_list_gap: f32,
+    /// 差量预览异常那一块头上那一排标签左右留白（设计稿 `.anom .dtabs`）。
+    pub anomaly_tabs_padding: f32,
+    /// 异常那一块正文的内边距：`[上下, 左右]`（设计稿 `.anom .ab`）。
+    pub anomaly_body_padding: [f32; 2],
+    /// 正文里一样与一样之间（设计稿 `.anom .ab` 的 `gap`）。
+    pub anomaly_body_gap: f32,
     /// 侧边详情媒体格之间。
     pub thumb_gap: f32,
     /// 侧边详情头上封面与字之间。
@@ -695,6 +705,12 @@ pub struct Space {
     pub tab_padding: f32,
     /// 面名与后头那个数之间（设计稿 `.tabs button small`）。
     pub tab_count_gap: f32,
+    /// 弹层与差量预览异常那一块的下划线标签之间（设计稿 `.dtabs` 的 `gap`）。
+    pub dialog_tabs_gap: f32,
+    /// 那一排一格左右留白（设计稿 `.dtabs button`）。
+    pub dialog_tab_padding: f32,
+    /// 那一格名字与后头那个数之间（设计稿 `.dtabs button small`）。
+    pub dialog_tab_count_gap: f32,
     /// 作品详情页一面的正文内边距：`[上, 左右, 下]`（设计稿 `.tabp`）。
     pub tab_panel_padding: [f32; 3],
     /// 作品详情页一张卡与下一张之间（设计稿 `.vcard` 的 `margin-bottom`）。
@@ -1058,6 +1074,12 @@ pub struct Layout {
     pub tab_height: f32,
     /// 选中那一面底下那道强调色线的粗（设计稿 `.tabs button[aria-selected]`）。
     pub tab_underline: f32,
+    /// 弹层与差量预览异常那一块的下划线标签一格的高（设计稿 `.dtabs button`）。
+    pub dialog_tab_height: f32,
+    /// 差量预览计划那几步那个框最高多高，超过就在框里滚（设计稿 `.steplist` 的 `max-height`）。
+    pub step_list_max_height: f32,
+    /// 那一行动作词那一格的宽（设计稿 `.steplist div` 的 `grid-template-columns` 头一列）。
+    pub step_list_op_width: f32,
     /// 作品详情页元数据那一面一行里 `[名那一列, 动作那一列]` 的宽（设计稿 `.mrow`）。
     pub meta_row_columns: [f32; 2],
     /// 来源标签的高（设计稿 `.srcb`）。

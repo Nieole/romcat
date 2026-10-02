@@ -514,6 +514,17 @@ pub struct Step {
     pub convert: Option<Conversion>,
 }
 
+impl Step {
+    /// **这一步写多大**：删除那一步是它释放多少（[`Self::was`]），新增是它落到卡上多大（[`Self::bytes`]），
+    /// 重传取前后两份里大的那个。
+    ///
+    /// 命令行报告逐条印的、按类别折账的与差量预览框里那一列写的是同一个数——只在这一处判（ADR-0024）。
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.bytes.max(self.was)
+    }
+}
+
 /// 目标上一件**对不上**的事。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum SurpriseKind {

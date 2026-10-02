@@ -1046,7 +1046,7 @@ fn findings_ui(
     要处理: &mut Option<usize>,
 ) {
     let tokens = Tokens::builtin();
-    let [上下, 左右] = tokens.space.health_list_padding;
+    let [上下, 左右] = tokens.space.list_padding;
     let 字号 = look::font_size(ui.ctx(), tokens.font.size_caption_plus);
     let rows = report.finding_rows(finding);
     let 线 = ui.visuals().widgets.noninteractive.bg_stroke;

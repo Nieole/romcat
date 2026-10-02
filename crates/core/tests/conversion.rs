@@ -260,6 +260,15 @@ fn 卡带的_7z_重打包成_zip_而且产物零解压读得回去() {
         那一步.path, "SFC/魂斗罗.zip",
         "落点是产物——相对子库根，不带根名"
     );
+    // **那半句说出口是「转为 zip」**（设计稿差量预览那一行），命令行报告印的是同一句：
+    // 界面那一行与报告各问 `Conversion::shown` 一次，不各拼一份（票 `gui-draws-the-rest-of-the-design/14`）。
+    let 那半句 = 那一步.convert.as_ref().expect("转").shown();
+    assert_eq!(那半句, "转为 zip");
+    assert!(
+        plan.render_text().lines().any(|line| line.trim() == 那半句),
+        "命令行报告没印「{那半句}」：\n{}",
+        plan.render_text(),
+    );
 
     let 转之前 = 取证(&现场.库根.join("SFC/魂斗罗.7z"));
     let outcome = 现场.跑(&desired, &plan, None);

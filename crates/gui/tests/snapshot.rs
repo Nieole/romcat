@@ -3091,7 +3091,7 @@ fn 库屏_移除根弹层_暗色() {
 /// 子库那几张的现场：几个临时目录（跟着窗口一起活到拍完）与窗口本身。
 struct 子库现场 {
     主库: TempDir,
-    /// 第二个**根**（主库是一组根）：只有差量异常那两对要它——两个根里同一条相对路径
+    /// 第二个**根**（主库是一组根）：只有差量异常那几对要它——两个根里同一条相对路径
     /// 剥掉根名之后落在卡上同一个文件上，那正是**落点撞车**。别的几张摆 `None`。
     _另一块盘: Option<TempDir>,
     _工作区: TempDir,
@@ -3281,7 +3281,7 @@ impl 子库现场 {
         screen.open(site, name);
     }
 
-    /// 排一趟差量预览，等它收回来；跟着把「排它用了 N ms」钉死。
+    /// 排一趟差量预览，等它收回来。
     fn 排一遍差量(&mut self) {
         {
             let (screen, site, tasks) = self.app.sublibrary_site_and_tasks();
@@ -3299,7 +3299,6 @@ impl 子库现场 {
             "差量没排出来：{:?}",
             screen.error(),
         );
-        screen.pin_prepare_ms(排它用了多少毫秒);
     }
 
     /// 按一下「算一遍容量」，等它收回来。内存里的库就地跑完，认领在 `App::poll_tasks` 里。
@@ -3742,18 +3741,14 @@ fn 子库_手动例外空态_暗色() {
 // 东西。与超限那一对同一个处置（挂单 `Q895`）：画面放高，整张卡一次拍全，不滚——滚到底拍的话
 // 图顶上那一行只露出下半截，字被切掉一半，看着像画坏了（票 20 第二段对稿时被打回过）。
 
-/// 差量异常那两对拍的是哪一台。
+/// 差量异常那几对拍的是哪一台。
 const 摆着异常的那一台: &str = "RG35XX Plus";
 
-/// 差量账旁边那句「排它用了 N ms」在基线里定死成这个数（`sublibrary::Screen::pin_prepare_ms`）。
-/// 照实画的话一趟一个样——与例外那张表上的时刻同一个用处。
-const 排它用了多少毫秒: f64 = 343.0;
-
-/// 差量异常那两对的画面：宽照旧，高 1180——整张卡连差量账、步骤、异常那一块与底下的
+/// 差量异常那几对的画面：宽照旧，高 1180——整张卡连差量账、步骤、异常那一块与底下的
 /// 「同步」都要拍全（[`搭一扇`]，模块文档「视口定死」那一节的第二处例外）。
 const 差量那几对的画面: [f32; 2] = [1280.0, 1180.0];
 
-/// **差量异常那两对的现场**：一台在位的设备，库是**两个根**，清单里记着两条，卡上被人动过手脚。
+/// **差量异常那几对的现场**：一台在位的设备，库是**两个根**，清单里记着两条，卡上被人动过手脚。
 ///
 /// 四类异常在这一屏上各有一条：
 ///
@@ -3810,10 +3805,10 @@ fn 拍差量异常(名字: &str, 主题: Theme, 摆在哪一栏: romcat_gui::sub
     let harness = 开一扇(主题, 差量那几对的画面, move |ui| {
         现场.app.ui(ui);
     });
-    // **「看得全」写成断言**：五个栏名与底下那颗「同步」都整个在画面里。哪天卡片长高、
+    // **「看得全」写成断言**：异常那一排标签（头一格与末一格）与底下那颗「同步」都整个在画面里。哪天卡片长高、
     // 异常那一块被挤出画面，这里当场红，不会悄悄拍一张截掉半块的基线。
     let 视口 = egui::Rect::from_min_size(egui::Pos2::ZERO, 差量那几对的画面.into());
-    for 该在画面里 in ["异常", "同步"] {
+    for 该在画面里 in ["设备上缺失", "元数据读不到", "同步"] {
         let 在 = 正好画着的每一处(harness.output(), 该在画面里);
         assert!(
             在.iter().any(|rect| 视口.contains_rect(*rect)),
@@ -3874,6 +3869,24 @@ fn 子库_差量异常_被修改过_暗色() {
         "sublibrary/anomalies-changed-dark",
         Theme::Dark,
         romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Changed),
+    );
+}
+
+#[test]
+fn 子库_差量异常_目标位置被占用_浅色() {
+    拍差量异常(
+        "sublibrary/anomalies-occupied-light",
+        Theme::Light,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Occupied),
+    );
+}
+
+#[test]
+fn 子库_差量异常_目标位置被占用_暗色() {
+    拍差量异常(
+        "sublibrary/anomalies-occupied-dark",
+        Theme::Dark,
+        romcat_gui::sublibrary::Anomaly::Surprise(romcat_core::sync::SurpriseKind::Occupied),
     );
 }
 

@@ -684,7 +684,7 @@ library_literals = [
     (r"\.health\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "space", "health-grid-gap", None), (2, "space", "health-grid-padding", 0), (3, "space", "health-grid-padding", 1)]),
     (r"\.htile\{[^}]*?gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "space", "health-tile-gap", None), (2, "space", "health-tile-padding", 0), (3, "space", "health-tile-padding", 1)]),
     (r"\.htile b\{[^}]*?font-size:(\d+)px", [(1, "font", "size-health-value", None)]),
-    (r"\.lst>div\{[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "health-list-padding", 0), (2, "space", "health-list-padding", 1)]),
+    (r"\.lst>div\{[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "list-padding", 0), (2, "space", "list-padding", 1)]),
     (r'<div class="empty" style="padding:(\d+)px">扫描完成后生成体检报告', [(1, "space", "health-empty-padding", None)]),
     (r'<th style="width:(\d+)px">平台</th><th class="r" style="width:(\d+)px">份数</th><th class="r" style="width:(\d+)px">单份大小</th><th style="width:(\d+)px">', [(i + 1, "layout", "health-dup-columns", i) for i in range(4)]),
     (r"\.diff\{[^}]*?gap:(\d+)px", [(1, "space", "diff-gap", None)]),
@@ -701,6 +701,14 @@ sublibrary_literals = [
     (r'<input class="input" style="width:(\d+)px" data-dgi="note"', [(1, "layout", "exception-note-width", None)]),
     (r"\.vrow\{[^}]*?grid-template-columns:\d+px minmax\(0,1fr\) (\d+)px (\d+)px (\d+)px (\d+)px", [(i + 1, "layout", "merge-row-columns", i) for i in range(4)]),
     (r'<table class="tbl ctbl"><thead><tr><th style="width:(\d+)px">字段</th>', [(1, "layout", "conflict-key-width", None)]),
+    # 差量预览（票 gui-draws-the-rest-of-the-design/14）：计划那几步的框、异常那一块与它头上那一排下划线标签。
+    (r"\.steplist\{max-height:(\d+)px", [(1, "layout", "step-list-max-height", None)]),
+    (r"\.steplist div\{[^}]*?grid-template-columns:(\d+)px 1fr auto;gap:(\d+)px;padding:(\d+)px (\d+)px", [(1, "layout", "step-list-op-width", None), (2, "space", "step-list-gap", None), (3, "space", "step-list-padding", 0), (4, "space", "step-list-padding", 1)]),
+    (r"(?m)^\.dtabs\{[^}]*?gap:(\d+)px", [(1, "space", "dialog-tabs-gap", None)]),
+    (r"\.dtabs button\{height:(\d+)px;padding:0 (\d+)px", [(1, "layout", "dialog-tab-height", None), (2, "space", "dialog-tab-padding", None)]),
+    (r"\.dtabs button small\{[^}]*?margin-left:(\d+)px", [(1, "space", "dialog-tab-count-gap", None)]),
+    (r"\.anom \.dtabs\{[^}]*?padding:0 (\d+)px", [(1, "space", "anomaly-tabs-padding", None)]),
+    (r"\.anom \.ab\{padding:(\d+)px (\d+)px;[^}]*?gap:(\d+)px", [(1, "space", "anomaly-body-padding", 0), (2, "space", "anomaly-body-padding", 1), (3, "space", "anomaly-body-gap", None)]),
 ]
 literals += check_literals(sublibrary_literals)
 
