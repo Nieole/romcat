@@ -9,6 +9,7 @@
 收挂单 `Q614`：见 `../grill.md` 里那一条。
 收挂单 `Q616`：见 `../grill.md` 里那一条。
 收挂单 `Q996`：见 `../grill.md` 里那一条。
+收挂单 `Q1450`（2026-10-02 拿主意的人裁）：作品详情页头上「平台」那一格允许折成两行——平台全名一律带厂名之后「Nintendo Super Famicom」一行放不下、被截成「Nintendo Super F…」；别的几格照旧一行。改完重批受影响的 `work/*` 基线（编排者对稿、拿主意的人点头）。
 
 **Blocked by:** None (can start immediately)
 
