@@ -269,6 +269,10 @@ pub struct Screen {
     health: crate::health::Section,
     /// 正在跑的那几趟活的任务号，用来禁掉重复按下。
     running: Vec<(u64, Job)>,
+    /// 扫描那几趟排上台那一刻读到的**待生效**记录排到哪一条（任务号 → 那一条的号）：扫完一遍会照沉淀库里的
+    /// 人工纠正重新成型（ADR-0022），那一刻之前记下的待生效就跟着生效了，认领时拿它去清
+    /// （票 `verdict-store-and-sync/12`）。
+    scan_pending: Vec<(u64, romcat_core::verdict::PendingMark)>,
     /// 点了「移除…」、那一层还开着的那个根（[`Removing`]）。
     removing: Option<Removing>,
     /// 刚移掉的那个根叫什么，等窗口那一层取走（[`Screen::take_removed`]）。
@@ -310,6 +314,7 @@ impl Screen {
             roots: Vec::new(),
             sources: Vec::new(),
             running: Vec::new(),
+            scan_pending: Vec::new(),
             removing: None,
             removed: None,
             error: None,
@@ -601,8 +606,13 @@ impl Screen {
         let checkpoint = site.checkpoint_path(&self.workspace, name);
         // **人工纠正也在这条线程上取**：它住沉淀库（票 `one-criterion-per-thing/07`），
         // 后台那条线程手里没有沉淀库。旧库里记着的那几条，开现场时已经搬过去了。
-        let shaping_overrides = match site.shaping_overrides() {
-            Ok(overrides) => overrides,
+        // 连同这一刻**待生效**记录排到哪一条一起取（票 `verdict-store-and-sync/12`）：扫完会照这一份重新成型，
+        // 那几处跟着生效，认领时清掉（[`Screen::settle`]）。
+        let romcat_core::verdict::ShapingInput {
+            overrides: shaping_overrides,
+            pending,
+        } = match site.store.shaping_input(&site.library_identity) {
+            Ok(input) => input,
             Err(error) => {
                 self.error = Some(format!("沉淀库读不出来：{error}"));
                 return;
@@ -638,6 +648,7 @@ impl Screen {
         });
         self.error = None;
         self.running.push((id, Job::Scan(name.to_string())));
+        self.scan_pending.push((id, pending));
         self.sync_scan_board();
     }
 
@@ -715,7 +726,7 @@ impl Screen {
     /// 任务台交回来一趟跑完的活。**不是自己那一趟就放过去。**
     ///
     /// 返回「认领了没有」，好让上一层知道要不要接着问别的屏。
-    pub fn settle(&mut self, site: &Site, done: &romcat_core::task::Finished<Product>) -> bool {
+    pub fn settle(&mut self, site: &mut Site, done: &romcat_core::task::Finished<Product>) -> bool {
         // **工序那一段自己认领自己排的那几趟**：它按任务号认，不是它的就往下走。
         if self.stages.settle(site, done) {
             return true;
@@ -725,6 +736,26 @@ impl Screen {
         };
         let (_, job) = self.running.remove(at);
         self.sync_scan_board();
+        // **扫完一遍就照沉淀库重新成型过了**（ADR-0022，`ScanOutcome::shaped`）：排它那一刻之前记下的**待生效**
+        // 那几处跟着生效，清掉（票 `verdict-store-and-sync/12`）。被按停的那一趟没成型，一处都不清。
+        let mark = self
+            .scan_pending
+            .iter()
+            .position(|(id, _)| *id == done.id)
+            .map(|at| self.scan_pending.remove(at).1);
+        if let (Some(mark), Ending::Done(Product::Scanned(outcome))) = (mark, &done.ended)
+            && outcome.shaped
+        {
+            if let Err(error) = site
+                .store
+                .settle_pending_fixes(&site.library_identity, mark)
+            {
+                self.error = Some(format!(
+                    "扫完重新成型过了，待生效的人工纠正没清掉（{error}）；按「重新成型」再跑一趟就是"
+                ));
+            }
+            self.health.forget_pending();
+        }
         if job == Job::Fetch(Source::Dat) {
             self.stages.set_dat_on_board(false);
         }
@@ -943,6 +974,8 @@ impl Screen {
         // 画八格之前先把**平台纠正**那一份合出来：目录与内容平台不符那一格数的是「还没处理的那几组」
         // （票 `gui-looks-like-the-design/28`），那个数由核心库交（`PlatformCorrections::remaining`）。
         self.health.ensure_corrections(site);
+        // 「N 处待生效」那一条与成型存疑明细里那几枚「待生效」照沉淀库里的待生效记录画（票 `verdict-store-and-sync/12`）。
+        self.health.ensure_pending(site);
         let health = &mut self.health;
         foldable_panel(
             ui,
@@ -957,7 +990,8 @@ impl Screen {
         self.health.dialog_ui(ui.ctx(), site);
         // **平台纠正**那一层同理（票 `gui-looks-like-the-design/28`）：目录与内容平台不符那一格点进去开的是它。
         self.health.platfix_ui(ui.ctx(), site);
-        // **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：成型存疑明细里一行一颗「处理…」开的是它。
+        // **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：成型存疑明细里一行一颗「处理…」开的是它；
+        // 「N 处待生效」那一条上的「重新成型」也在这一下排上台（票 `verdict-store-and-sync/12`）。
         self.health.fixer_ui(ui.ctx(), site, tasks);
         if 要体检 {
             self.health.check(site, tasks);
@@ -975,10 +1009,20 @@ impl Screen {
         self.health.check(site, tasks);
     }
 
-    /// 排一趟**重新成型**上任务台（[`crate::health::Section::reshape`]）：作品详情那一面落过一笔
-    /// 人工纠正之后，窗口转到这儿来排——**全窗口只有一处排它**，报告才不会两份各说各的。
+    /// 排一趟**重新成型**上任务台（[`crate::health::Section::reshape`]）：作品详情那一面「N 处待生效」那一条上
+    /// 按了「重新成型」，窗口转到这儿来排——**全窗口只有一处排它**，报告才不会两份各说各的。
     pub fn reshape(&mut self, site: &mut Site, tasks: &mut Tasks) {
         self.health.reshape(site, tasks);
+    }
+
+    /// 别处（作品详情那一面）刚落过一笔成型纠正：库体检那份缓着的待生效扔掉，下一帧重读。
+    pub fn forget_pending(&mut self) {
+        self.health.forget_pending();
+    }
+
+    /// 这一屏上刚落过一笔成型纠正（[`crate::health::Section::take_fixed`]）：窗口据此让作品详情那一面重读。
+    pub fn take_fixed(&mut self) -> bool {
+        self.health.take_fixed()
     }
 
     /// 库体检里点了疑似同一作品那一格、而且确实有建议（[`crate::health::Section::take_jump`]）：
@@ -1000,11 +1044,14 @@ impl Screen {
 
     /// 任务台交回来的是不是**库体检**那一趟（[`crate::health::Section::settle`]）：是就认领、交回 `None`；「上次体检」
     /// 记的是这一屏的钟此刻（[`Self::set_clock`]）。
+    ///
+    /// 要 `site` 是为了重新成型那一趟跑完时清掉照着跑过的待生效记录（票 `verdict-store-and-sync/12`）。
     pub fn settle_health(
         &mut self,
+        site: &mut Site,
         done: romcat_core::task::Finished<Product>,
     ) -> Option<romcat_core::task::Finished<Product>> {
-        self.health.settle(done, self.clock.now())
+        self.health.settle(site, done, self.clock.now())
     }
 
     /// 右边那一栏：根、数据源、导出设置三块，**各自收得起来**（[`Fold`]），次序照设计稿。

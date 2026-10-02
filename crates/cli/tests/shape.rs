@@ -275,6 +275,97 @@ fn 人工纠正熬得过删掉中立库重扫() {
     assert_eq!(shaping["variants"], 4, "两个 zip 仍是一个变体：{shaping}");
 }
 
+/// 往这个工作目录的沉淀库里记**一处待生效**的人工纠正：`FC/甲.zip` 与 `FC/乙.zip` 合成一个变体——界面上
+/// 「合成一个变体」落下的就是这一样（票 `verdict-store-and-sync/12`），命令行没有记它的入口。
+fn 界面上合成甲乙(workspace: &Path) {
+    use romcat_core::verdict::{ShapingFix, ShapingFixKind, Store};
+    use romcat_core::workspace::{self, Slug};
+
+    let mut store = Store::open(&workspace::verdict_store_path(workspace)).expect("开得出沉淀库");
+    let 甲 = "库/FC/甲.zip".to_string();
+    let 乙 = "库/FC/乙.zip".to_string();
+    store
+        .record_shaping_fix(
+            &Slug::Named("主库").text(),
+            &ShapingFix {
+                kind: ShapingFixKind::Merge,
+                spot: "库/FC".to_string(),
+                items: vec![甲.clone(), 乙.clone()],
+                set: [(甲.clone(), 甲.clone()), (乙, 甲)].into_iter().collect(),
+                clear: Vec::new(),
+            },
+        )
+        .expect("记得下");
+}
+
+/// 这个工作目录的沉淀库里，`主库` 眼下几处待生效。
+fn 待生效几处(workspace: &Path) -> usize {
+    use romcat_core::verdict::Store;
+    use romcat_core::workspace::{self, Slug};
+
+    Store::open(&workspace::verdict_store_path(workspace))
+        .expect("开得出沉淀库")
+        .pending_fixes(&Slug::Named("主库").text())
+        .expect("读得出")
+        .len()
+}
+
+#[test]
+fn 界面上攒着的待生效_命令行成一趟型或扫一遍就生效_待生效记录清掉() {
+    // 界面上的成型纠正攒着、按一下「重新成型」才跑（票 `verdict-store-and-sync/12`）。命令行 `shape` 与
+    // `scan` 也照沉淀库里的人工纠正重新成型——跑完那几处已经生效，界面上再说「眼下还是旧结构」就是假话，
+    // 所以它们照着跑过的待生效一样清掉。
+    let workspace = temp_dir("cli-shape-pending-ws");
+    let library = 建库();
+    assert!(
+        扫(workspace.path(), library.path(), "主库")
+            .status
+            .success()
+    );
+
+    界面上合成甲乙(workspace.path());
+    assert_eq!(待生效几处(workspace.path()), 1, "前提：一处待生效");
+    let json = workspace.path().join("成过型.json");
+    let out = romcat(
+        workspace.path(),
+        &[
+            "shape",
+            "--library",
+            "主库",
+            "--json",
+            &json.display().to_string(),
+            "--quiet",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        成型(workspace.path(), "成过型.json")["manual"],
+        1,
+        "那一处生效了"
+    );
+    assert_eq!(
+        待生效几处(workspace.path()),
+        0,
+        "`romcat shape` 照着成过型，待生效还在"
+    );
+
+    界面上合成甲乙(workspace.path());
+    assert!(
+        扫(workspace.path(), library.path(), "主库")
+            .status
+            .success()
+    );
+    assert_eq!(
+        待生效几处(workspace.path()),
+        0,
+        "`romcat scan` 扫完照着成过型，待生效还在"
+    );
+}
+
 #[test]
 fn 键打错了当场报错而不是记一条永远不生效的纠正() {
     let workspace = temp_dir("cli-merge-typo-ws");

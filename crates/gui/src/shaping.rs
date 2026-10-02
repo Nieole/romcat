@@ -9,12 +9,20 @@
 //!
 //! 「哪一处存疑」由核心库判（`shape::shaping_doubts`，票 27 立的那一处）；「这一下落成哪几行人工纠正」
 //! 「合成之后主文件是谁、附属文件是哪几条」「撤销要清掉哪几条」由核心库答（[`fix`]）。这一层只做三件事：
-//! 把那份预览画出来、把人勾中的那几条转发过去、把落库与重新成型排上任务台。
+//! 把那份预览画出来、把人勾中的那几条转发过去落库、人按「重新成型」时把那一趟排上任务台。
 //!
 //! ## 盘上一个字节都不动（ADR-0004）
 //!
-//! 按下去只往**沉淀库**写几行，再把**中立库**里的变体重算一遍。主库里的文件不移动、不改名、不生成
-//! 播放列表——屏上那句话因此也是这么写的。
+//! 按下去只往**沉淀库**写几行；**中立库**里的变体要等人按「重新成型」重算一遍。主库里的文件不移动、
+//! 不改名、不生成播放列表——屏上那句话因此也是这么写的。
+//!
+//! ## 攒着，按一下才重跑（票 `verdict-store-and-sync/12`，挂单 `Q1045`）
+//!
+//! 成型是整份条目表的纯函数（`shape::plan`），变体表整批换（ADR-0022）——没有「只重算这一处」。所以按下去
+//! **不当场重新成型**：纠正连同一条**待生效**记录一起落进沉淀库（`Store::record_shaping_fix`，一个事务），
+//! 屏上累计「N 处待生效」，并说清眼下看到的变体还是旧的成型结构；人按一下「重新成型」（[`reshape`]）才跑
+//! 一趟全库，跑完清掉照着跑的那几条待生效（`Store::settle_pending_fixes`）。窗口关了那几处不丢——它们住
+//! 沉淀库。纠正过、还没生效的那一处标「待生效」，不再给纠正的门（`PendingFixes::covers`）。
 //!
 //! ## 记为人工纠正，不是记为裁决
 //!
@@ -32,7 +40,7 @@ use romcat_core::shape::{self, Doubt, DoubtKind, fix};
 use romcat_core::site::Site;
 use romcat_core::task::{Cutoff, Handle};
 use romcat_core::triage::same_work;
-use romcat_core::verdict::NotSameWork;
+use romcat_core::verdict::{NotSameWork, PendingFixes, PendingMark, ShapingFix, ShapingInput};
 
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
@@ -54,9 +62,11 @@ pub const FIX: &str = "调整成型";
 pub const FIX_NOTE: &str = "成型规则把磁盘上的文件聚成变体。规则会出错，这里可以手动纠正；\
      记为人工纠正，按路径永久记住，删掉中立库重扫也还在。";
 
-/// 那一层末尾那一句：盘上动没动、撤销在哪儿。
-pub const FIX_FOOTNOTE: &str =
-    "盘上的文件不移动、不改名；撤销在作品详情的「变体」那一面，撤掉就回到成型规则原本的结果。";
+/// 那一层末尾那一句：盘上动没动、什么时候生效、撤销在哪儿。
+///
+/// **按下去不当场生效**（票 `verdict-store-and-sync/12`）：按之前就说清，免得人以为按完屏上就变。
+pub const FIX_FOOTNOTE: &str = "盘上的文件不移动、不改名。按下去先记下、待生效，按一次「重新成型」跑一趟全库才变；\
+     撤销在作品详情的「变体」那一面，撤掉就回到成型规则原本的结果。";
 
 /// 「取消」。
 pub const CANCEL: &str = "取消";
@@ -78,6 +88,83 @@ pub const UNDO: &str = "撤销成型纠正";
 
 /// 重新成型那一趟在任务台上叫什么。
 pub const RESHAPE_TASK: &str = "重新成型 · 全库";
+
+/// 「N 处待生效」那一条上那颗按钮：按一下跑一趟全库（[`reshape`]）。
+pub const RESHAPE: &str = "重新成型";
+
+/// 纠正过、还没重新成型的那一处，原先摆纠正那颗按钮的地方摆的这一枚标签（设计稿 `DLG.shapes` 那一行右头的
+/// `.tag`，稿上写「已纠正」——纠正过的那一处重新成型之后就不再是存疑、行没了，标得出来的只有还没生效的这一段）。
+pub const PENDING: &str = "待生效";
+
+/// 「N 处待生效」那一条上的话：几处、眼下看到的是什么、按哪一颗才生效（票 `verdict-store-and-sync/12`
+/// 验收：**跑之前屏上说清眼下看到的还是旧结构**）。
+///
+/// `late`：台上**有没有一趟重新成型**（排着队也算）——没有是 `None`；有就是这几处里有几处是那一趟读人工纠正
+/// **之后**才记下的（`PendingFixes::later_than`），那一趟跑完它们照旧待生效，得再按一次。
+#[must_use]
+pub fn pending_line(count: usize, late: Option<usize>) -> String {
+    let 几处 = thousands(数(count));
+    match late {
+        None => format!(
+            "{几处} 处待生效：人工纠正已经记下，眼下看到的变体还是旧的成型结构；按「{RESHAPE}」跑一趟全库之后才生效。"
+        ),
+        Some(0) => format!("{几处} 处待生效：正在重新成型，跑完之后生效。"),
+        Some(late) => format!(
+            "{几处} 处待生效：正在重新成型，跑完之后其中 {} 处生效；另外 {} 处是跑起来之后才记下的，跑完还得再按一次「{RESHAPE}」。",
+            thousands(数(count.saturating_sub(late))),
+            thousands(数(late)),
+        ),
+    }
+}
+
+/// 画「N 处待生效」那一条（提示框，右头一颗「重新成型」）。一处都没有就什么都不画。交回这一帧按没按那一颗。
+///
+/// 库体检那一块、成型存疑那一格的明细、作品详情的变体那一面画的都是这一条：几处由沉淀库答
+/// （`Store::pending_fixes`），这里只画。`late` 同 [`pending_line`]；台上有一趟时那一颗按不动——一次只跑一趟。
+pub fn pending_ui(ui: &mut egui::Ui, count: usize, late: Option<usize>) -> bool {
+    if count == 0 {
+        return false;
+    }
+    look::note_box(ui, |ui| {
+        ui.horizontal(|ui| {
+            let 按钮宽 = look::small_button_width(ui, RESHAPE);
+            let 剩 = (ui.available_width() - 按钮宽 - ui.spacing().item_spacing.x).max(0.0);
+            ui.scope(|ui| {
+                ui.set_width(剩);
+                ui.add(egui::Label::new(pending_line(count, late)).wrap());
+            });
+            look::small_buttons(ui, |ui| {
+                ui.scope(|ui| {
+                    look::primary_button(ui.visuals_mut());
+                    ui.add_enabled(late.is_none(), egui::Button::new(RESHAPE))
+                        .on_hover_text("照沉淀库里的人工纠正把全库的变体重算一遍，顺手重新体检；一个字节都不读主库")
+                        .on_disabled_hover_text("台上已经有一趟重新成型，跑完再看")
+                        .clicked()
+                })
+                .inner
+            })
+        })
+        .inner
+    })
+}
+
+/// 纠正过（合成、拆开、撤销）、还没重新成型的那一处，原先摆纠正那颗按钮的地方摆的这一枚「待生效」：
+/// 库体检明细的那一行、作品详情的那块建议与那张变体卡用的都是它。
+pub fn pending_tag(ui: &mut egui::Ui) -> egui::Response {
+    look::inline_tag(ui, PENDING)
+        .on_hover_text("这一处的人工纠正已经记下、还没重新成型；按「重新成型」之后生效")
+}
+
+/// 读这份主库眼下**待生效**的那几处（`Store::pending_fixes`）。读不动交回那句话，拿着它的那一屏照实说、
+/// 当一处都没有——那一条不画，比画一个说不准的数好。
+///
+/// # Errors
+/// 沉淀库读不动时交回给人看的那句话。
+pub fn read_pending(site: &Site) -> Result<PendingFixes, String> {
+    site.store
+        .pending_fixes(&site.library_identity)
+        .map_err(|why| format!("待生效的人工纠正读不出来：{why}"))
+}
 
 /// 合成的预览里最多逐条列几个**附属文件**，其余写「另有 N 个」。
 ///
@@ -154,7 +241,7 @@ pub struct Fixer {
     open: Option<Spot>,
     /// 按下去之后那句回话：`Ok` 是落成了，`Err` 是没落成。画在开它的那一屏上。
     said: Option<Result<String, String>>,
-    /// 落过一笔、该重新成型了：拿着它的那一屏每帧问一次（[`Self::take_applied`]）。
+    /// 刚落过一笔：待生效的那几处变了，拿着它的那一屏每帧问一次（[`Self::take_applied`]）。
     applied: bool,
 }
 
@@ -177,7 +264,13 @@ impl Fixer {
         self.said = None;
     }
 
-    /// **刚落过一笔人工纠正**：拿着它的那一屏据此排一趟重新成型。问过就清掉。
+    /// 只收掉那句回话：重新成型跑完了，那句「……；待生效」说的已经不是眼下的事（票 `verdict-store-and-sync/12`）。
+    pub fn forget_said(&mut self) {
+        self.said = None;
+    }
+
+    /// **刚落过一笔人工纠正**：拿着它的那一屏据此重读待生效的那几处（**不**排重新成型——攒着，人按一下才跑）。
+    /// 问过就清掉。
     pub fn take_applied(&mut self) -> bool {
         std::mem::take(&mut self.applied)
     }
@@ -202,7 +295,7 @@ impl Fixer {
         }
     }
 
-    /// 画开着的那一层。交回 `true` 表示这一帧落过一笔（拿着它的那一屏据此排重新成型）。
+    /// 画开着的那一层。落过一笔就放下 [`Self::take_applied`] 那个记号。
     ///
     /// **每一帧都画**：弹层开没开着记在这一层上，不跟着底下那一屏的面板收起。
     pub fn ui(&mut self, ctx: &egui::Context, site: &mut Site) {
@@ -255,33 +348,36 @@ impl Fixer {
         }
     }
 
-    /// 往**沉淀库**落这一处的人工纠正。交回画在底下那一屏上的那句回话。
+    /// 往**沉淀库**落这一处的人工纠正，连同一条**待生效**记录（一个事务）。交回画在底下那一屏上的那句回话。
+    ///
+    /// **不当场重新成型**：中立库里的变体等人按「重新成型」才重算。
     fn apply(&mut self, site: &mut Site, spot: &Spot) -> Result<String, String> {
-        let (overrides, 说的) = match spot.kind {
+        // 落哪几行、那条待生效记录牵涉哪几条，都由核心库折（`fix::merging` / `fix::splitting`，ADR-0024）。
+        let (fix, 说的) = match spot.kind {
             DoubtKind::UnmergedDiscs => {
                 let picked = spot.picked();
-                let (overrides, merged) =
-                    fix::merge(&picked).ok_or_else(|| NEED_TWO.to_string())?;
+                let (fix, merged) =
+                    fix::merging(&spot.at, &picked).ok_or_else(|| NEED_TWO.to_string())?;
                 let 话 = format!(
                     "已把 {} 个变体合成一个（记为人工纠正）：主文件是 {}，附属文件 {} 个；盘上的文件一个字节都没动",
                     thousands(数(picked.len())),
                     name_of(&merged.main),
                     thousands(数(merged.companions.len())),
                 );
-                (overrides, 话)
+                (fix, 话)
             }
             DoubtKind::CrowdedTree => {
-                // `read_spot` 那道闸保证这里至少两份，`fix::split` 因此交不回 `None`。
-                let overrides = fix::split(&spot.contents)
+                // `read_spot` 那道闸保证这里至少两份，`fix::splitting` 因此交不回 `None`。
+                let fix = fix::splitting(&spot.at, &spot.contents)
                     .ok_or_else(|| "这一处只剩一份内容了，没什么可拆的。".to_string())?;
                 let 话 = format!(
-                    "已拆成 {} 个变体（记为人工纠正）：它们各自参与下一趟识别；盘上的文件一个字节都没动",
+                    "已拆成 {} 个变体（记为人工纠正）：重新成型之后它们各自参与下一趟识别；盘上的文件一个字节都没动",
                     thousands(数(spot.contents.len())),
                 );
-                (overrides, 话)
+                (fix, 话)
             }
         };
-        record(site, &overrides, &[])?;
+        record(site, &fix)?;
         self.applied = true;
         Ok(说的)
     }
@@ -292,12 +388,11 @@ impl Fixer {
     /// `spot` 由核心库折（`Catalog::shaping_fix_group`）：**拆开**那一处落的是那几份内容各一行，
     /// 只撤其中一份回不到成型规则原本的结果。
     ///
-    /// 清完要重新成型，这几条才回到规则算出来的地方——所以它也把[该重新成型了](Self::take_applied)
-    /// 那个记号放下。
+    /// 清完要重新成型，这几条才回到规则算出来的地方——撤销与合成、拆开一样**攒着**：落的是一条待生效记录，
+    /// 也把 [`Self::take_applied`] 那个记号放下。
     pub fn undo(&mut self, site: &mut Site, spot: &[fix::Members]) {
-        let keys = fix::undo(spot);
         let 几份 = spot.len();
-        self.said = Some(record(site, &BTreeMap::new(), &keys).map(|()| {
+        self.said = Some(record(site, &fix::undoing(spot)).map(|()| {
             if 几份 > 1 {
                 format!(
                     "已撤销这一处的人工纠正（同一下拆出来的 {} 份一起撤）：重新成型之后回到成型规则原本的结果",
@@ -318,20 +413,12 @@ fn 数(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
-/// 往沉淀库记这一批人工纠正：`set` 是要落的几行，`clear` 是要清掉的几条键。
-fn record(site: &mut Site, set: &BTreeMap<String, String>, clear: &[String]) -> Result<(), String> {
-    let library = site.library_identity.clone();
-    for key in clear {
-        site.store
-            .clear_shaping_override(&library, key)
-            .map_err(|why| format!("这一下没记进沉淀库：{why}"))?;
-    }
-    for (key, to) in set {
-        site.store
-            .set_shaping_override(&library, key, to)
-            .map_err(|why| format!("这一下没记进沉淀库：{why}"))?;
-    }
-    Ok(())
+/// 往沉淀库记这一处人工纠正：落的几行、清的几条键与那条**待生效**记录在一个事务里（`Store::record_shaping_fix`）。
+fn record(site: &mut Site, fix: &ShapingFix) -> Result<(), String> {
+    site.store
+        .record_shaping_fix(&site.library_identity, fix)
+        .map(|_| ())
+        .map_err(|why| format!("这一下没记进沉淀库：{why}"))
 }
 
 /// 从中立库摊开一处存疑：那几个变体连成员（多碟），或者那几份独立内容（目录）。
@@ -558,16 +645,19 @@ fn name_of(key: &str) -> String {
 }
 
 /// **重新成型**那一趟：照沉淀库里的人工纠正把中立库里的变体整批重算，顺手把**库体检**也重跑一趟
-/// ——屏上那份「成型存疑」的名单正是它折出来的。
+/// ——屏上那份「成型存疑」的名单正是它折出来的。人按「重新成型」才排它（票 `verdict-store-and-sync/12`）。
 ///
-/// 交回任务号；台上那条线程自己开一份写得动的中立库（`rusqlite::Connection` 不是 `Sync`，界面这条线程
-/// 手里那一份交不过去），与扫描、识别、刮削同一条路。**只活在内存里的库就地跑完**（合成数据那一路）。
+/// 交回（任务号, 读人工纠正那一刻待生效记录排到哪一条）：跑完之后拿后者去清（`Store::settle_pending_fixes`）
+/// ——跑着的时候人又纠正的那一处没赶上这一趟，照旧待生效。台上那条线程自己开一份写得动的中立库
+/// （`rusqlite::Connection` 不是 `Sync`，界面这条线程手里那一份交不过去），与扫描、识别、刮削同一条路。
+/// **只活在内存里的库就地跑完**（合成数据那一路）。
 ///
 /// # Errors
 /// 沉淀库读不出来、或者中立库里还没有遍历记录时交回那句话。
-pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<u64, String> {
-    let overrides = site
-        .shaping_overrides()
+pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<(u64, PendingMark), String> {
+    let ShapingInput { overrides, pending } = site
+        .store
+        .shaping_input(&site.library_identity)
         .map_err(|why| format!("沉淀库读不出来：{why}"))?;
     let scan = match site.catalog.last_traversal() {
         Ok(Some(traversal)) => traversal.scan,
@@ -585,17 +675,18 @@ pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<u64, String> {
         .store
         .not_same_works(&site.library_identity)
         .unwrap_or_default();
-    match site.catalog.file().map(Path::to_path_buf) {
-        Some(file) => Ok(tasks.queue(RESHAPE_TASK, move |task| {
+    let id = match site.catalog.file().map(Path::to_path_buf) {
+        Some(file) => tasks.queue(RESHAPE_TASK, move |task| {
             let mut catalog =
                 Catalog::open(&file).map_err(|why| Cutoff::failed(why.to_string()))?;
             reshape_run(&mut catalog, &overrides, &dismissed, scan, task)
-        })),
+        }),
         // 只活在内存里的那一份分不出第二份连接，就地跑完（同库体检那一处）。
-        None => Ok(tasks.run_here(RESHAPE_TASK, |task| {
+        None => tasks.run_here(RESHAPE_TASK, |task| {
             reshape_run(&mut site.catalog, &overrides, &dismissed, scan, task)
-        })),
-    }
+        }),
+    };
+    Ok((id, pending))
 }
 
 /// 重新成型加一趟体检，交回那份新报告。

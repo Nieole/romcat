@@ -15,6 +15,10 @@
 //!
 //! 撤销是同一批键上的删除（[`undo`]）：那几行没了，下一趟成型照规则重算，回到规则原本的结果。
 //!
+//! 界面上按下去落的是**一笔**：那几行连同一条**待生效**记录（[`merging`] / [`splitting`] / [`undoing`] 交出
+//! `ShapingFix`，`Store::record_shaping_fix` 一个事务落下）——不当场重新成型，人按「重新成型」才跑一趟全库
+//! （票 `verdict-store-and-sync/12`）。
+//!
 //! ## 判据只在这一处（ADR-0024）
 //!
 //! 「主文件挑哪一个」「合成之后附属文件是哪几条」「撤销要清掉哪几条」都在这里答。界面只画
@@ -28,6 +32,8 @@
 //! 变体」。主文件因此**只能是已经在盘上的那几条成员里的一条**。
 
 use std::collections::BTreeMap;
+
+use crate::verdict::{ShapingFix, ShapingFixKind};
 
 /// 一个变体连它的成员：纠正落的那几行记的是**成员**的键，不是变体的键。
 ///
@@ -136,6 +142,60 @@ pub fn undo(spot: &[Members]) -> Vec<String> {
     keys.sort();
     keys.dedup();
     keys
+}
+
+/// **合成**这一处、落进沉淀库的那一笔（[`ShapingFix`]，`Store::record_shaping_fix`），连同合成之后长什么样
+/// （屏上那句回话要说主文件是谁）。`at` 是那一处（成型存疑的 `at`）。
+///
+/// 那条**待生效**记录「牵涉哪几条」记的是**勾中的那几个变体的键**——与成型存疑「多碟没合在一起」那一处的
+/// `items` 同一种键，屏上才认得出「这一处纠正过、还没生效」（`PendingFixes::covers`）。**判据在这儿**，
+/// 不在界面里拼（ADR-0024）。少于两个交回 `None`（同 [`merge`]）。
+#[must_use]
+pub fn merging(at: &str, selected: &[Members]) -> Option<(ShapingFix, Merged)> {
+    let (set, merged) = merge(selected)?;
+    let mut items: Vec<String> = selected.iter().map(|one| one.key.clone()).collect();
+    items.sort();
+    Some((
+        ShapingFix {
+            kind: ShapingFixKind::Merge,
+            spot: at.to_string(),
+            items,
+            set,
+            clear: Vec::new(),
+        },
+        merged,
+    ))
+}
+
+/// **拆开**这一处、落进沉淀库的那一笔。牵涉的是**那几份内容的键**——与成型存疑「一个目录被当成一个变体」
+/// 那一处的 `items` 同一种键。少于两份交回 `None`（同 [`split`]）。
+#[must_use]
+pub fn splitting(at: &str, contents: &[String]) -> Option<ShapingFix> {
+    let set = split(contents)?;
+    let mut items = contents.to_vec();
+    items.sort();
+    Some(ShapingFix {
+        kind: ShapingFixKind::Split,
+        spot: at.to_string(),
+        items,
+        set,
+        clear: Vec::new(),
+    })
+}
+
+/// **撤销**这一处、落进沉淀库的那一笔：清掉 [`undo`] 交出的那几条键。牵涉的是**那几个变体的键**——作品详情
+/// 变体卡认「这张卡撤过、还没生效」认的就是它；那一处记成头一个变体的键。
+#[must_use]
+pub fn undoing(spot: &[Members]) -> ShapingFix {
+    let mut items: Vec<String> = spot.iter().map(|one| one.key.clone()).collect();
+    items.sort();
+    ShapingFix {
+        kind: ShapingFixKind::Undo,
+        spot: items.first().cloned().unwrap_or_default(),
+        items,
+        set: BTreeMap::new(),
+        clear: undo(spot),
+    }
 }
 
 #[cfg(test)]

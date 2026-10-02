@@ -1145,3 +1145,63 @@ fn 采用一条带修订的候选_裁决记着修订_删库重扫之后版本那
         "删库重扫之后裁决照沉淀库重放，修订跟着回来",
     );
 }
+
+// ——— 成型纠正的待生效记录（票 `verdict-store-and-sync/12`，挂单 `Q1045`）———
+
+#[test]
+fn 成型纠正待生效_删掉中立库之后还在_重扫照它成型() {
+    // 界面上连着纠正几处成型，纠正先落沉淀库、记一条**待生效**，人按一下才跑一趟全库。那条记录与纠正本身
+    // 一样住沉淀库：删掉中立库它还在，删库之后头一趟扫描照着它成型。
+    let 主库 = 摆好主库();
+    let 工作目录 = temp_dir("verdict-store-pending-ws");
+    let (库文件, mut site) = 开现场(工作目录.path());
+    扫(&mut site, 主库.path());
+    let library = site.library_identity.clone();
+    site.store
+        .record_shaping_fix(
+            &library,
+            &verdict::ShapingFix {
+                kind: verdict::ShapingFixKind::Merge,
+                spot: "库/FC".to_string(),
+                items: vec![日版.to_string(), 汉化.to_string()],
+                set: BTreeMap::from([
+                    (日版.to_string(), 日版.to_string()),
+                    (汉化.to_string(), 日版.to_string()),
+                ]),
+                clear: Vec::new(),
+            },
+        )
+        .expect("记得下");
+    assert_eq!(
+        site.catalog.variants().expect("读得出").len(),
+        2,
+        "记下待生效不改中立库：还没成型"
+    );
+    drop(site);
+
+    删库(&库文件);
+    let (_, mut site) = 开现场(工作目录.path());
+    let 待生效 = site.store.pending_fixes(&library).expect("读得出");
+    assert_eq!(
+        待生效
+            .fixes()
+            .iter()
+            .map(|fix| (fix.spot.as_str(), fix.items.clone()))
+            .collect::<Vec<_>>(),
+        vec![("库/FC", vec![日版.to_string(), 汉化.to_string()])],
+        "删掉中立库，待生效的那一处还在"
+    );
+    扫(&mut site, 主库.path());
+    let 变体: Vec<(String, bool)> = site
+        .catalog
+        .variants()
+        .expect("读得出")
+        .into_iter()
+        .map(|row| (row.key, row.manual))
+        .collect();
+    assert_eq!(
+        变体,
+        vec![(日版.to_string(), true)],
+        "删库之后头一趟扫描照那一处纠正成型"
+    );
+}

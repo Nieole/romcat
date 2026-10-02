@@ -420,10 +420,16 @@ pub struct Screen {
     /// **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：作品详情「变体」那一面
     /// 「调整成型…」与「撤销成型纠正」开的就是它。
     fixer: crate::shaping::Fixer,
-    /// 刚落过一笔人工纠正、等窗口去库屏那一处排一趟重新成型（[`Screen::take_reshaped`]）。
+    /// 刚落过一笔人工纠正：纠正连同一条待生效记录落进了沉淀库，等窗口让库屏那份缓着的待生效作废
+    /// （[`Screen::take_fixed`]）。**不当场重新成型**（票 `verdict-store-and-sync/12`）。
+    fixed: bool,
+    /// 「N 处待生效」那一条上按了「重新成型」，等窗口去库屏那一处排一趟（[`Screen::take_reshape_asked`]）。
     ///
     /// **全窗口只有库屏那一处排它**：两处各排一趟的话，报告会有两份各说各的。
-    reshaped: bool,
+    reshape_asked: bool,
+    /// 台上那一趟重新成型读人工纠正那一刻待生效排到哪一条，台上没有是 `None`（由窗口每帧从库屏那一处抄过来，
+    /// [`Screen::set_reshaping`]）：有就那一颗按不动，那一条说清几处赶不上这一趟。
+    reshaping: Option<romcat_core::verdict::PendingMark>,
     /// 子库屏「从浏览添加…」或「✎」跳过来了，正在改这个子库的选择集。`None` 是平常的浏览。
     editing: Option<Editing>,
     /// 「更新到子库」按完了，等窗口把人送回子库屏（[`crate::app::App::route`]）。
@@ -661,7 +667,9 @@ impl Screen {
             workspace: workspace.clone(),
             scrape: scrape::Panel::new(workspace),
             fixer: crate::shaping::Fixer::default(),
-            reshaped: false,
+            fixed: false,
+            reshape_asked: false,
+            reshaping: None,
             editing: None,
             returned: None,
             touched: None,
@@ -2814,9 +2822,32 @@ impl Screen {
         &self.fixer
     }
 
-    /// 刚落过一笔人工纠正：窗口据此去库屏那一处排一趟重新成型。问过就清掉。
-    pub fn take_reshaped(&mut self) -> bool {
-        std::mem::take(&mut self.reshaped)
+    /// 刚落过一笔人工纠正：窗口据此让库屏那份缓着的待生效作废。问过就清掉。
+    pub fn take_fixed(&mut self) -> bool {
+        std::mem::take(&mut self.fixed)
+    }
+
+    /// 「N 处待生效」那一条上按了「重新成型」：窗口据此去库屏那一处排一趟。问过就清掉。
+    pub fn take_reshape_asked(&mut self) -> bool {
+        std::mem::take(&mut self.reshape_asked)
+    }
+
+    /// 台上那一趟重新成型（排着队也算）读人工纠正那一刻待生效排到哪一条，没有是 `None`：窗口每帧从库屏那一处抄过来。
+    pub fn set_reshaping(&mut self, reshaping: Option<romcat_core::verdict::PendingMark>) {
+        self.reshaping = reshaping;
+    }
+
+    /// 重新成型跑完了：成型纠正那一层那句「……；待生效」说的是跑之前的事，收掉（票 `verdict-store-and-sync/12`）。
+    pub fn forget_fix_said(&mut self) {
+        self.fixer.forget_said();
+    }
+
+    /// 作品详情页手上那几份作废，下一帧照库里现在的样子重读：别处（库屏）刚落过一笔成型纠正，
+    /// 这一面缓着的待生效跟着变。没开着就什么都不做。
+    pub fn forget_page(&mut self) {
+        if let Some(page) = self.page.as_mut() {
+            page.forget();
+        }
     }
 
     /// **按「刮削…」那一下**：把这一批展开成变体的键，摊开刮削面板。

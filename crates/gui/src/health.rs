@@ -36,7 +36,7 @@ use romcat_core::scan::aggregate::Limits;
 use romcat_core::site::Site;
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 use romcat_core::triage::same_work::{self, Suspicion};
-use romcat_core::verdict::{NotSameWork, PlatformDecision};
+use romcat_core::verdict::{NotSameWork, PendingFixes, PendingMark, PlatformDecision};
 
 use crate::clock::Clock;
 use crate::dialog::{Button, Dialog, Footer, Width};
@@ -164,11 +164,21 @@ pub struct Section {
     /// **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：成型存疑那一格的明细里
     /// 一行一颗「处理…」开的就是它。
     fixer: shaping::Fixer,
-    /// 台上那一趟**重新成型**的任务号。它交回的产物与体检那一趟同形（一份新报告），
-    /// 所以照旧由 [`Section::settle`] 认领。
-    reshaping: Option<u64>,
+    /// 台上那一趟**重新成型**（排着队也算）：任务号，连同排它那一刻读到的待生效记录排到哪一条
+    /// （[`shaping::reshape`]）。它交回的产物与体检那一趟同形（一份新报告），所以照旧由 [`Section::settle`]
+    /// 认领；跑完拿后者去清待生效。**与体检那一趟分开记**：体检跑着时按「重新成型」照样排得上，两趟排队跑。
+    reshaping: Option<(u64, PendingMark)>,
     /// 刚重新成型过：窗口据此让浏览屏那几页作废、屏头那些数重算（[`Section::take_reshaped`]）。
     reshaped: bool,
+    /// 这份主库眼下**待生效**的那几处人工纠正（票 `verdict-store-and-sync/12`）：「N 处待生效」那一条与
+    /// 成型存疑明细里那几枚「待生效」照它画；还没读过是 `None`。**缓着而不是每帧现读**，理由同
+    /// [`Self::corrections`]：落过一笔、重新成型或扫描跑完、作品详情那一面纠正过，就扔掉重读
+    /// （[`Section::forget_pending`]）。
+    pending: Option<PendingFixes>,
+    /// 「N 处待生效」那一条上的「重新成型」这一帧按了：画完那一帧由 [`Section::fixer_ui`] 排上台。
+    reshape_asked: bool,
+    /// 这一屏上刚落过一笔成型纠正：窗口据此让作品详情那一面重读待生效（[`Section::take_fixed`]）。
+    fixed: bool,
 }
 
 /// 明细弹层里「在文件系统中打开」那颗按钮上的字（设计稿原话）。
@@ -299,16 +309,57 @@ impl Section {
         self.platfix
     }
 
-    /// 台上有没有一趟体检（排着队也算）。
+    /// 台上有没有一趟体检（排着队也算）。**重新成型那一趟也算**：它跑完顺手重出一份体检报告。
     #[must_use]
     pub fn running(&self) -> bool {
-        self.running.is_some()
+        self.running.is_some() || self.reshaping.is_some()
+    }
+
+    /// 台上那一趟**重新成型**（排着队也算）读人工纠正那一刻，待生效排到了哪一条；台上没有是 `None`。
+    /// 「N 处待生效」那一条据此说清有几处赶不上这一趟（`shaping::pending_line`）。
+    #[must_use]
+    pub fn reshaping(&self) -> Option<PendingMark> {
+        self.reshaping.map(|(_, mark)| mark)
+    }
+
+    /// 「N 处待生效」那一条交给 `shaping::pending_ui` 的那一格：台上没有重新成型是 `None`，有就是几处赶不上。
+    fn late(&self) -> Option<usize> {
+        let pending = self.pending.as_ref()?;
+        self.reshaping().map(|mark| pending.later_than(mark))
+    }
+
+    /// 读一份**待生效**的那几处（沉淀库 `Store::pending_fixes`），已经缓着就不读。读不动时当一处都没有、
+    /// 把话说在这一块上——那一条不画，比画一个说不准的数好。
+    pub(crate) fn ensure_pending(&mut self, site: &Site) {
+        if self.pending.is_some() {
+            return;
+        }
+        self.pending = Some(shaping::read_pending(site).unwrap_or_else(|why| {
+            self.error = Some(why);
+            PendingFixes::default()
+        }));
+    }
+
+    /// 把缓着的那份待生效扔掉，下一帧重读：落过一笔、重新成型或扫描跑完、作品详情那一面纠正过。
+    pub fn forget_pending(&mut self) {
+        self.pending = None;
+    }
+
+    /// 眼下缓着的那份待生效（测试拿它核对）；还没读过是 `None`。
+    #[must_use]
+    pub fn pending(&self) -> Option<&PendingFixes> {
+        self.pending.as_ref()
+    }
+
+    /// 这一屏上**刚落过一笔成型纠正**：窗口据此让作品详情那一面重读待生效。问过就清掉。
+    pub fn take_fixed(&mut self) -> bool {
+        std::mem::take(&mut self.fixed)
     }
 
     /// 标题栏里那句说明：台上有体检时说正在体检；体检过就带上上次体检的时刻（本地短格式，[`Clock::short`]）。
     #[must_use]
     pub fn subtitle(&self, clock: Clock) -> String {
-        if self.running.is_some() {
+        if self.running() {
             return CHECKING.to_string();
         }
         match &self.checked {
@@ -321,7 +372,7 @@ impl Section {
     ///
     /// 后台那条线程读的是同一个库文件的第二份只读连接（[`Catalog::read_only`]）；只活在内存里的库分不出第二份，就地跑完。
     pub fn check(&mut self, site: &Site, tasks: &mut Tasks) {
-        if self.running.is_some() {
+        if self.running() {
             return;
         }
         // **沉淀库那一半在排活这一下就读好**：后台那条线程手里只有中立库的第二份只读连接，
@@ -368,15 +419,40 @@ impl Section {
 
     /// 任务台交回来的是不是体检那一趟：是就认领、交回 `None`，不是就原样交回去。`now` 是认领那一刻——「上次体检」
     /// 画的就是它。**整条只读**，认领了不等于库变了（窗口因此先问这一句，`App::poll_tasks`）。
-    pub fn settle(&mut self, done: Finished<Product>, now: i64) -> Option<Finished<Product>> {
-        if self.running != Some(done.id) {
+    ///
+    /// **重新成型那一趟跑完**（[`Ending::Done`]），排它那一刻之前记下的待生效清掉
+    /// （`Store::settle_pending_fixes`）：那几处这一趟照着跑过了。跑着的时候才记下的那几处没赶上，照旧待生效。
+    /// 没跑完（失败、撤掉）的一处都不清——再按一次「重新成型」就是。
+    pub fn settle(
+        &mut self,
+        site: &mut Site,
+        done: Finished<Product>,
+        now: i64,
+    ) -> Option<Finished<Product>> {
+        let reshaped = self.reshaping.filter(|(id, _)| *id == done.id);
+        if self.running != Some(done.id) && reshaped.is_none() {
             return Some(done);
         }
-        self.running = None;
         // 重新成型那一趟与体检那一趟交回的是同一样东西（一份新报告），认领的路子因此也是同一条；
         // 差别只在**变体整批换过了**，浏览屏那几页与屏头那些数得跟着作废（`App::poll_tasks`）。
-        if self.reshaping.take() == Some(done.id) {
+        let mut 没清掉 = None;
+        if let Some((_, mark)) = reshaped {
+            self.reshaping = None;
             self.reshaped = true;
+            // 纠正那一层那句回话说的是跑之前按下的那一下，跑完收掉。
+            self.fixer.forget_said();
+            if matches!(done.ended, Ending::Done(_))
+                && let Err(why) = site
+                    .store
+                    .settle_pending_fixes(&site.library_identity, mark)
+            {
+                没清掉 = Some(format!(
+                    "重新成型跑完了，待生效的记录没清掉（{why}）；再按一次「重新成型」就是"
+                ));
+            }
+            self.forget_pending();
+        } else {
+            self.running = None;
         }
         match done.ended {
             Ending::Done(Product::Checked {
@@ -399,6 +475,9 @@ impl Section {
             }
             _ => {}
         }
+        if 没清掉.is_some() {
+            self.error = 没清掉;
+        }
         None
     }
 
@@ -418,10 +497,25 @@ impl Section {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 });
         }
+        // **「N 处待生效」那一条**（票 `verdict-store-and-sync/12`）：成型纠正攒着，人按一下才跑一趟全库。
+        // 画在八格上头：那几格的数眼下还是旧的成型结构折出来的，人得先读到这一句再读数。
+        let 几处 = self.pending.as_ref().map_or(0, PendingFixes::len);
+        if 几处 > 0 {
+            let [上下, 左右] = Tokens::builtin().space.health_grid_padding;
+            let 赶不上 = self.late();
+            let 按了 = egui::Frame::new()
+                .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    shaping::pending_ui(ui, 几处, 赶不上)
+                })
+                .inner;
+            self.reshape_asked |= 按了;
+        }
         let Some(checked) = &self.checked else {
             centered_weak(
                 ui,
-                if self.running.is_some() {
+                if self.running() {
                     "正在体检，完成后在这里列出报告。"
                 } else {
                     "还没体检。按「重新体检」出一份报告。"
@@ -626,6 +720,22 @@ impl Section {
         let said = self.said.clone();
         // 成型纠正那一层落过一笔之后那句回话，画在这一层里（同平台纠正那一处的做法）。
         let 纠正说的 = self.fixer.said().cloned();
+        // **成型存疑那一格的明细里，纠正过、还没重新成型的那几行标「待生效」**（票 `verdict-store-and-sync/12`）：
+        // 认得出是哪几行的判据在核心库（`PendingFixes::covers`），这里只按行问一遍。
+        let 待生效 = self.pending.clone().unwrap_or_default();
+        let 待生效的行: Vec<bool> = if detail.finding == Finding::ShapingDoubts {
+            checked
+                .report
+                .shaping_doubts
+                .examples
+                .iter()
+                .map(|doubt| 待生效.covers(&doubt.item_keys))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let 赶不上 = self.late();
+        let mut 按了重新成型 = false;
         // 照稿：「导出清单…」幽灵按钮在左、「关闭」主按钮在右（拿主意的人 2026-09-15 答，挂单 `Q958`）。Esc 照旧等于「关闭」。
         let footer = Footer::new(Button::new("关闭", Pressed::Close))
             .dismiss_on_right()
@@ -660,13 +770,25 @@ impl Section {
                 }
                 None => {}
             }
+            // 「N 处待生效」那一条也画在这一层里：人在这儿连着纠正几处，按完就在这儿按「重新成型」。
+            if detail.finding == Finding::ShapingDoubts {
+                按了重新成型 = shaping::pending_ui(ui, 待生效.len(), 赶不上);
+            }
             match detail.finding {
                 Finding::Duplicates => {
                     duplicates_ui(ui, &checked.duplicates, &mut 展开, &mut 要打开);
                 }
-                other => findings_ui(ui, &checked.report, other, &mut 要打开, &mut 要处理),
+                other => findings_ui(
+                    ui,
+                    &checked.report,
+                    other,
+                    &待生效的行,
+                    &mut 要打开,
+                    &mut 要处理,
+                ),
             }
         });
+        self.reshape_asked |= 按了重新成型;
         match shown.pressed {
             Some(Pressed::Close) => {
                 self.detail = None;
@@ -728,24 +850,33 @@ impl Section {
 
     /// 画开着的那一层**成型纠正**（`crate::shaping`）：每一帧都画，库体检那一块收着时也画。
     ///
-    /// 落过一笔就排一趟**重新成型**上任务台——纠正只写沉淀库，中立库里的变体要重算一遍才跟着变
-    /// （票 29 验收第 2、3 条「变体数跟着变」「拆开后各自参与下一趟识别」）。
+    /// **落过一笔不当场重新成型**（票 `verdict-store-and-sync/12`）：纠正连同一条待生效记录落进沉淀库，
+    /// 这里只把缓着的那份待生效扔掉重读，屏上累计「N 处待生效」；人按那一条上的「重新成型」才排一趟上台。
     pub(crate) fn fixer_ui(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
         self.fixer.ui(ctx, site);
         if self.fixer.take_applied() {
+            self.forget_pending();
+            self.fixed = true;
+        }
+        if std::mem::take(&mut self.reshape_asked) {
             self.reshape(site, tasks);
         }
     }
 
     /// **排一趟重新成型上任务台**：照沉淀库里的人工纠正把变体整批重算，顺手重出一份体检报告。
+    /// 「N 处待生效」那一条上的「重新成型」按的就是它（库屏这里与作品详情那一面都走这一处）。
     ///
-    /// 交回的产物与体检那一趟同形，所以照旧由 [`Section::settle`] 按任务号认领。
+    /// 交回的产物与体检那一趟同形，所以照旧由 [`Section::settle`] 按任务号认领。**台上已经有一趟重新成型
+    /// 就什么都不做**——一次只跑一趟，那一趟读的就是眼下这一份人工纠正之前的；跑着时才记下的那几处
+    /// 照旧待生效，跑完再按一次。
     pub fn reshape(&mut self, site: &mut Site, tasks: &mut Tasks) {
+        if self.reshaping.is_some() {
+            return;
+        }
         match shaping::reshape(site, tasks) {
-            Ok(id) => {
+            Ok(排上) => {
                 self.error = None;
-                self.reshaping = Some(id);
-                self.running = Some(id);
+                self.reshaping = Some(排上);
             }
             Err(why) => self.error = Some(why),
         }
@@ -910,6 +1041,7 @@ fn findings_ui(
     ui: &mut egui::Ui,
     report: &HealthReport,
     finding: Finding,
+    待生效的行: &[bool],
     要打开: &mut Option<PathBuf>,
     要处理: &mut Option<usize>,
 ) {
@@ -1006,6 +1138,12 @@ fn findings_ui(
                                         ui.set_width(剩);
                                         look::help(ui, reason);
                                     });
+                                    // 纠正过、还没重新成型的那一处：不再给「处理…」，标「待生效」
+                                    // （票 `verdict-store-and-sync/12`）。
+                                    if 待生效的行.get(第几行).copied().unwrap_or(false) {
+                                        shaping::pending_tag(ui);
+                                        return;
+                                    }
                                     let 按了 = look::small_buttons(ui, |ui| {
                                         ui.scope(|ui| {
                                             look::primary_button(ui.visuals_mut());

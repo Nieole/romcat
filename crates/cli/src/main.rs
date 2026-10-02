@@ -1448,15 +1448,22 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
     // **人工纠正住沉淀库**（票 `one-criterion-per-thing/07`）：收尾成型要照着它，
     // 删掉中立库重扫它也还在。
     let library_identity = slug.text();
-    let shaping_overrides = match open_store_beside(&workspace, &mut catalog, &library_identity)
+    // 连同这一刻**待生效**记录排到哪一条一起读（票 `verdict-store-and-sync/12`）：扫完会照这一份重新成型，
+    // 界面上攒着的那几处跟着生效，收尾时清掉。沉淀库因此开着到扫完。
+    let (mut store, input) = match open_store_beside(&workspace, &mut catalog, &library_identity)
         .and_then(|store| {
             store
-                .shaping_overrides(&library_identity)
+                .shaping_input(&library_identity)
+                .map(|input| (store, input))
                 .map_err(|error| format!("沉淀库读不出来：{error}"))
         }) {
-        Ok(overrides) => overrides,
+        Ok(opened) => opened,
         Err(message) => return fail(message),
     };
+    let romcat_core::verdict::ShapingInput {
+        overrides: shaping_overrides,
+        pending,
+    } = input;
 
     let mut options = ScanOptions::new(&args.root);
     options.root_name = args.root_name.clone();
@@ -1533,6 +1540,9 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
             "成型完毕：{} 个变体。",
             thousands(outcome.report.shaping.variants)
         );
+        if let Err(error) = store.settle_pending_fixes(&library_identity, pending) {
+            eprintln!("界面上攒着的待生效记录没清掉（沉淀库写不进：{error}）。");
+        }
     } else if outcome.interrupted {
         eprintln!("这一趟被中断，没有重新成型——半个库上成出来的变体是错的。");
     }
@@ -1717,20 +1727,26 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let overrides = match store.shaping_overrides(&library_identity) {
-        Ok(overrides) => overrides,
+    // 连同这一刻**待生效**记录排到哪一条一起读（票 `verdict-store-and-sync/12`）：界面上攒着的成型纠正，
+    // 这一趟照着成完型就生效了，清掉——不然界面还说「眼下看到的还是旧结构」。
+    let input = match store.shaping_input(&library_identity) {
+        Ok(input) => input,
         Err(error) => {
             eprintln!("沉淀库读不出来：{error}");
             return ExitCode::FAILURE;
         }
     };
-    let plan = match shape::reshape(&mut catalog, &manifest, &overrides, scan) {
+    let plan = match shape::reshape(&mut catalog, &manifest, &input.overrides, scan) {
         Ok(plan) => plan,
         Err(error) => {
             eprintln!("成型失败：{error}");
             return ExitCode::FAILURE;
         }
     };
+    if let Err(error) = store.settle_pending_fixes(&library_identity, input.pending) {
+        // 成型本身成了：只说一句，不当失败——界面上那几处会多说一阵「待生效」，按一次「重新成型」就清。
+        eprintln!("成型完了，界面上攒着的待生效记录没清掉（沉淀库写不进：{error}）。");
+    }
     eprintln!(
         "成型完毕：{} 个变体（另有 {} 个范围之内的文件不是可玩的东西，没进变体）。",
         thousands(u64::try_from(plan.variants.len()).unwrap_or(u64::MAX)),

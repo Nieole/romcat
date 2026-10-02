@@ -2984,6 +2984,32 @@ fn 拍拆开目录(名字: &str, 主题: Theme) {
     拍下(harness, 名字);
 }
 
+/// **成型存疑那一格的明细，纠正过一处之后**（票 `verdict-store-and-sync/12`）：头一处合成之后不当场重新成型，
+/// 这一层上头一条「1 处待生效」——说清眼下看到的还是旧的成型结构，右头一颗「重新成型」；纠正过的那一行
+/// 右头不再是「处理…」，是一枚「待生效」（设计稿 `DLG.shapes` 那一行右头的 `.tag`）。
+fn 拍待生效(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let mut 现场 = 库屏::有成型存疑();
+    let mut harness = 开一个(主题, move |ui| 现场.app.ui(ui));
+    滚到库屏底下(&mut harness);
+    按(&mut harness, "成型存疑");
+    按头一处(&mut harness, "处理…");
+    按(&mut harness, "合成一个变体");
+    拍下(harness, 名字);
+}
+
+#[test]
+fn 库屏_成型存疑明细_纠正过一处待生效_浅色() {
+    拍待生效("library/shaping-pending-light", Theme::Light);
+}
+
+#[test]
+fn 库屏_成型存疑明细_纠正过一处待生效_暗色() {
+    拍待生效("library/shaping-pending-dark", Theme::Dark);
+}
+
 #[test]
 fn 库屏_成型存疑明细_浅色() {
     拍成型存疑("library/shaping-doubts-light", Theme::Light);

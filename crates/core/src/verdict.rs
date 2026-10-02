@@ -28,7 +28,7 @@
 //! 打开时把没跑过的接着跑完。**往前迁得动，往后（库比程序新）如实拒绝并说清**——
 //! 那时该换新程序，而不是删库。
 //!
-//! 眼下十四条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
+//! 眼下十五条：第 1 条建 `verdict` 表，第 2 条建 `match_verdict` 表（票 05 的**匹配裁决**），
 //! 第 3 条建 `verdict_batch` 与 `verdict_batch_row` 两张表（**批**，见下一节），
 //! 第 4 条建 `collection_member` 表（**合集**与**收藏**，见再下一节），
 //! 第 5 条建 `title_suppression` 表（**压掉的叫法**），
@@ -40,7 +40,8 @@
 //! 第 11 条建 `verdict_value` 表（**详情页上改过的字段**，同一节），
 //! 第 12 条给 `verdict_batch` 加作用范围那几格（**就地落下的一部分**，见「批」那一节），
 //! 第 13 条给 `verdict` 加**修订**那一格（DAT 条目名里的 `(Rev 1)`，[`Facts::revision`]），
-//! 第 14 条建 `manifest_take_back` 与 `manifest_take_back_file` 两张表（**收回清单**的审计，见最后一节）。
+//! 第 14 条建 `manifest_take_back` 与 `manifest_take_back_file` 两张表（**收回清单**的审计，见倒数第二节），
+//! 第 15 条建 `shaping_pending` 与 `shaping_pending_item` 两张表（成型纠正的**待生效**记录，见最后一节）。
 //! 加这几条时库还是空的，但那不改变纪律——**永远不要求删库**，中立库那条「版本一变就
 //! 重建」的便宜路子在这份库上不许走。
 //!
@@ -249,6 +250,26 @@
 //! 没有它的事：它是新的一样，旧中立库里没有可搬的；清单也**不是**它的投影——清单住中立库、由同步与收回
 //! 两处写，这一笔只记「那一次收回了什么」。落库只有一处入口
 //! （[`Site::take_back_into_manifest`](crate::site::Site::take_back_into_manifest)）：先记这一笔，再改清单。
+//!
+//! ## 成型纠正的**待生效**记录：纠正先落下，人按一下才重新成型
+//!
+//! 成型是整份条目表的纯函数、变体表整批换（ADR-0022），没有「只重算这一处」——界面上连着纠正几处，
+//! 原先每按一下就排一趟「重新成型 · 全库」——成型之外还要整趟重新体检，人纠正一处就得等一趟（真库上成型本身几秒，
+//! 见台账 `docs/library-facts.md`；连体检一趟要多久台账没量过，挂单 `Q1660`）。拿主意的人 2026-09-23 裁：**攒着**（挂单 `Q1045`，
+//! 票 `verdict-store-and-sync/12`）。所以界面上一处纠正落下来的是两样，**一个事务**
+//! （[`Store::record_shaping_fix`]）：人工纠正那几行（照旧是 `shaping_override`），加一条**待生效**记录
+//! （[`PendingFix`]：哪一种、哪一处、牵涉哪几条）。屏上「N 处待生效」数的是后者，人按「重新成型」才跑一趟全库。
+//!
+//! **清的口径只有一条**：重新成型的每一条路先从 [`Store::shaping_input`] 读——人工纠正连同那一刻待生效排到哪一条
+//! （[`PendingMark`]）——照它成完型，再拿那个记号清（[`Store::settle_pending_fixes`]）。跑着的时候人又纠正的那一处
+//! 号更大，没赶上这一趟，照旧待生效；号因此只增不复用（`AUTOINCREMENT`）。走这条的有四处：界面那颗「重新成型」、
+//! 界面上扫完一遍（扫完照沉淀库成型，ADR-0022）、命令行 `romcat shape` 与 `romcat scan`——成过型还说
+//! 「眼下看到的还是旧结构」就是假话。
+//!
+//! 它住这里，是因为**窗口关了那几处不能丢**：纠正本身早就住这里，「还差一趟」这个记号跟着纠正走。
+//! 照 [`site::reconcile`](crate::site::reconcile) 那一段「做法」的第一步：键前面是主库标识、时刻叫
+//! `decided_at`、**导出不带**；它是新长出来的，没有旧行可救，中立库里也没有它的投影。它**不是审计**：
+//! 生效了就删，与收回清单那一笔「只追加」不同。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -668,6 +689,39 @@ CREATE TABLE IF NOT EXISTS manifest_take_back_file(
     -- 正是这一层权，查账的人要看得出来。
     still_wanted INTEGER NOT NULL,
     PRIMARY KEY (take_back, path)
+) STRICT;
+",
+    // 15：**成型纠正的待生效记录**（票 `verdict-store-and-sync/12`，挂单 `Q1045`）。人在界面上连着纠正几处成型，
+    // 原先每按一下就排一趟全库重新成型加整趟体检（一趟多久台账没量过，挂单 `Q1660`）；改成攒着——纠正先落下、记一条待生效，人按一下
+    // 「重新成型」才跑一趟全库，跑完清掉。窗口关了那几处不能丢，所以它住这里。
+    "\
+-- 一处**待生效**的人工纠正（成型那一族）：人纠正了这一处，`shaping_override` 那几行已经与这一行在同一个事务里
+-- 落下，中立库里的变体还没照它重新成型——屏上「N 处待生效」数的就是这里的行。照某一刻读到的人工纠正
+-- 成完一趟型，那一刻之前记下的几行就删掉（`Store::settle_pending_fixes`）：它是一个「还差一趟」的记号，
+-- 不是审计，生效了就没有留着的理由。
+--
+-- **键前面是主库标识**（`library`）：那一处是中立库的键，换一份主库指的是另一批文件——与路径锚同一个处境，
+-- **导出不带它**（`Store::export` 只折裁决与匹配裁决两张表）。
+-- `id` 用 AUTOINCREMENT：清的时候按「号不大于读那一刻的最大号」清，号要是复用了，跑着的时候新记下的一处
+-- 会被当成已经照着跑过的那一处清掉。
+CREATE TABLE IF NOT EXISTS shaping_pending(
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    library    TEXT    NOT NULL,
+    -- 合成 / 拆开 / 撤销（`ShapingFixKind::label`）。
+    kind       TEXT    NOT NULL,
+    -- 那一处：中立库的键（成型存疑说的那个目录；撤销时是那一处头一个变体）。
+    spot       TEXT    NOT NULL,
+    decided_at INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS shaping_pending_library ON shaping_pending(library);
+
+-- 那一处牵涉的一条：合成的几个变体、拆出来的几份内容、撤掉的那几个变体，中立库的键。
+-- 屏上拿它认「哪一处已经纠正过、只是还没重新成型」，那一处不再给「处理…」。
+CREATE TABLE IF NOT EXISTS shaping_pending_item(
+    pending INTEGER NOT NULL REFERENCES shaping_pending(id),
+    key     TEXT    NOT NULL,
+    PRIMARY KEY (pending, key)
 ) STRICT;
 ",
 ];
@@ -2604,6 +2658,192 @@ impl Store {
         Ok(added)
     }
 
+    // ── 成型纠正的待生效记录：纠正先落下，人按一下才重新成型（票 `verdict-store-and-sync/12`） ──
+
+    /// 落**一处**人工纠正（成型那一族）：清掉 `fix.clear` 那几条键、落下 `fix.set` 那几行，再记一条**待生效**
+    /// ——**一个事务**，三样一起落下，或者一个字都不写。交回那一条待生效记录的号。
+    ///
+    /// **只写沉淀库**：中立库里的变体要等人按「重新成型」跑一趟全库才跟着变；那一趟照
+    /// [`Self::shaping_input`] 读到的成完型之后，把那一刻之前记下的待生效清掉（[`Self::settle_pending_fixes`]）。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn record_shaping_fix(
+        &mut self,
+        library: &str,
+        fix: &ShapingFix,
+    ) -> Result<i64, VerdictError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        let now = now_secs();
+        for key in &fix.clear {
+            tx.execute(
+                "DELETE FROM shaping_override WHERE library = ?1 AND key = ?2",
+                params![library, key],
+            )
+            .map_err(|source| self.err(source))?;
+        }
+        for (key, variant_key) in &fix.set {
+            tx.execute(
+                "INSERT INTO shaping_override(library, key, variant_key, decided_at)
+                 VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(library, key) DO UPDATE SET
+                    variant_key = excluded.variant_key,
+                    decided_at = excluded.decided_at",
+                params![library, key, variant_key, now],
+            )
+            .map_err(|source| self.err(source))?;
+        }
+        tx.execute(
+            "INSERT INTO shaping_pending(library, kind, spot, decided_at) VALUES(?1, ?2, ?3, ?4)",
+            params![library, fix.kind.label(), fix.spot, now],
+        )
+        .map_err(|source| self.err(source))?;
+        let id = tx.last_insert_rowid();
+        for key in fix.items.iter().collect::<BTreeSet<_>>() {
+            tx.execute(
+                "INSERT INTO shaping_pending_item(pending, key) VALUES(?1, ?2)",
+                params![id, key],
+            )
+            .map_err(|source| self.err(source))?;
+        }
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(id)
+    }
+
+    /// 这份主库眼下**待生效**的那几处，按记下的先后排。屏上「N 处待生效」数的就是它。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn pending_fixes(&self, library: &str) -> Result<PendingFixes, VerdictError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT p.id, p.kind, p.spot, p.decided_at, i.key
+                 FROM shaping_pending p
+                 LEFT JOIN shaping_pending_item i ON i.pending = p.id
+                 WHERE p.library = ?1
+                 ORDER BY p.id, i.key",
+            )
+            .map_err(|source| self.err(source))?;
+        let mut rows = statement
+            .query(params![library])
+            .map_err(|source| self.err(source))?;
+        let mut out: Vec<PendingFix> = Vec::new();
+        while let Some(row) = rows.next().map_err(|source| self.err(source))? {
+            let read = || -> rusqlite::Result<(i64, String, String, i64, Option<String>)> {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            };
+            let (id, kind, spot, decided_at, key) = read().map_err(|source| self.err(source))?;
+            if out.last().is_none_or(|last| last.id != id) {
+                // 认不出来只可能是库被人改过（库比程序新的开不进来）。**不悄悄说成别的一种、也不丢掉这一处**
+                // ——丢掉的话屏上的「N 处待生效」少一处（同平台纠正那一处的做法）。
+                let kind = ShapingFixKind::from_label(&kind).ok_or_else(|| {
+                    VerdictError::Format(format!(
+                        "沉淀库里 {spot} 那一处待生效的人工纠正记着「{kind}」，本程序只认「{}」「{}」「{}」",
+                        ShapingFixKind::Merge.label(),
+                        ShapingFixKind::Split.label(),
+                        ShapingFixKind::Undo.label(),
+                    ))
+                })?;
+                out.push(PendingFix {
+                    id,
+                    kind,
+                    spot,
+                    items: Vec::new(),
+                    decided_at,
+                });
+            }
+            if let (Some(key), Some(last)) = (key, out.last_mut()) {
+                last.items.push(key);
+            }
+        }
+        Ok(PendingFixes(out))
+    }
+
+    /// 成型要照着的那一份**人工纠正**，连同读它那一刻**待生效**记录排到了哪一条（[`ShapingInput`]）。
+    ///
+    /// 重新成型的每一条路都从这里读（界面那颗「重新成型」、扫描收尾那一趟、命令行 `romcat shape` 与
+    /// `romcat scan`）：成完型拿 [`ShapingInput::pending`] 去清（[`Self::settle_pending_fixes`]）。
+    /// **一个读事务**：两样是同一刻的——否则读完纠正、读号之前又落下的那一处会被当成已经照着跑过。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn shaping_input(&self, library: &str) -> Result<ShapingInput, VerdictError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Deferred,
+        )
+        .map_err(|source| self.err(source))?;
+        let pending: Option<i64> = tx
+            .query_row(
+                "SELECT MAX(id) FROM shaping_pending WHERE library = ?1",
+                params![library],
+                |row| row.get(0),
+            )
+            .map_err(|source| self.err(source))?;
+        let overrides = {
+            let mut statement = tx
+                .prepare("SELECT key, variant_key FROM shaping_override WHERE library = ?1")
+                .map_err(|source| self.err(source))?;
+            let rows = statement
+                .query_map(params![library], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|source| self.err(source))?;
+            rows.collect::<Result<BTreeMap<String, String>, _>>()
+                .map_err(|source| self.err(source))?
+        };
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(ShapingInput {
+            overrides,
+            pending: PendingMark(pending.unwrap_or(0)),
+        })
+    }
+
+    /// 照 [`Self::shaping_input`] 读到的那一份成完一趟型：`mark` 之前记下的那几条**待生效**记录生效了，删掉。
+    /// 交回删了几处。**人工纠正本身一行不碰**——清的只是「还差一趟」那个记号。读那一刻一处都没有的记号
+    /// 什么都不删，也不开写事务。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn settle_pending_fixes(
+        &mut self,
+        library: &str,
+        mark: PendingMark,
+    ) -> Result<usize, VerdictError> {
+        let through = mark.0;
+        if through <= 0 {
+            return Ok(0);
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|source| self.err(source))?;
+        tx.execute(
+            "DELETE FROM shaping_pending_item WHERE pending IN
+                 (SELECT id FROM shaping_pending WHERE library = ?1 AND id <= ?2)",
+            params![library, through],
+        )
+        .map_err(|source| self.err(source))?;
+        let settled = tx
+            .execute(
+                "DELETE FROM shaping_pending WHERE library = ?1 AND id <= ?2",
+                params![library, through],
+            )
+            .map_err(|source| self.err(source))?;
+        tx.commit().map_err(|source| self.err(source))?;
+        Ok(settled)
+    }
+
     /// 这份主库的全部**首选变体**裁决：`(作品名, 平台)` → 那个变体的键。中立库里那张表
     /// 是它的投影，开现场时照它重建（[`site::reconcile`](crate::site::reconcile)）。
     ///
@@ -3123,6 +3363,131 @@ pub struct TakeBack {
     pub at: i64,
     /// 哪几份，按路径排：每一份连清单原先记着的戳、设备上那一份的戳，以及那一刻选择集还要不要它。
     pub files: Vec<TakenFile>,
+}
+
+/// 一处**成型的人工纠正**是哪一种。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapingFixKind {
+    /// 几个变体合成一个（多碟没合在一起那一处）。
+    Merge,
+    /// 一个目录拆成几个变体（一个目录被当成一个变体那一处）。
+    Split,
+    /// 撤掉先前纠正过的那一处，回到成型规则原本的结果。
+    Undo,
+}
+
+impl ShapingFixKind {
+    /// 存进沉淀库的那个词，也是给人看的名字。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "合成",
+            Self::Split => "拆开",
+            Self::Undo => "撤销",
+        }
+    }
+
+    /// [`Self::label`] 反过来。认不出是 `None`。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        [Self::Merge, Self::Split, Self::Undo]
+            .into_iter()
+            .find(|kind| kind.label() == label)
+    }
+}
+
+/// **一处**成型的人工纠正落进沉淀库的样子（[`Store::record_shaping_fix`]）：要落的几行、要清掉的几条键，
+/// 连同它那条**待生效**记录记什么——哪一种、哪一处、牵涉哪几条。
+///
+/// 几行与几条键由核心库那一处折（`shape::fix` 的 `merge` / `split` / `undo`），这里只管一起落下。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShapingFix {
+    /// 哪一种。
+    pub kind: ShapingFixKind,
+    /// 那一处：中立库的键。合成与拆开是成型存疑说的那一处（`shape::Doubt::at`）；撤销是那一处头一个变体的键。
+    pub spot: String,
+    /// 牵涉的那几条，中立库的键：合成的几个变体、拆出来的几份内容、撤掉的那几个变体。
+    /// 屏上拿它认「这一处已经纠正过、只是还没重新成型」（[`PendingFixes::covers`]）。
+    pub items: Vec<String>,
+    /// 要落的几行：条目的键 → 它该归到的那个变体（同 [`Store::set_shaping_override`]）。
+    pub set: BTreeMap<String, String>,
+    /// 要清掉的几条键（同 [`Store::clear_shaping_override`]）。
+    pub clear: Vec<String>,
+}
+
+/// 沉淀库里一条**待生效**记录：一处纠正落下了，中立库里的变体还没照它重新成型。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFix {
+    /// 号：只增不复用，清的时候按它清（[`Store::settle_pending_fixes`]）。
+    pub id: i64,
+    /// 哪一种。
+    pub kind: ShapingFixKind,
+    /// 那一处（[`ShapingFix::spot`]）。
+    pub spot: String,
+    /// 牵涉的那几条，按键排（[`ShapingFix::items`]）。
+    pub items: Vec<String>,
+    /// 记下的时刻，UNIX 纪元起的秒。
+    pub decided_at: i64,
+}
+
+/// 这份主库眼下**待生效**的那几处，按记下的先后排（[`Store::pending_fixes`]）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingFixes(Vec<PendingFix>);
+
+impl PendingFixes {
+    /// 几处待生效：屏上「N 处待生效」的那个 N。
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// 一处都没有。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// 那几处，按记下的先后排。
+    #[must_use]
+    pub fn fixes(&self) -> &[PendingFix] {
+        &self.0
+    }
+
+    /// 这几条键（一处成型存疑牵涉的变体或内容、一个变体的键）里有没有一条落在某一处待生效的纠正里
+    /// ——有就是**这一处纠正过了、只是还没重新成型**。屏上那一处于是标「待生效」，不再给纠正的门：
+    /// 再纠正一遍只会把同一处记两次，换一种勾法再合一次还会把上一回落下的那几行留在原地。
+    ///
+    /// 判据只在这一处（ADR-0024）：库体检那一格的明细与作品详情的变体那一面问的都是它。
+    #[must_use]
+    pub fn covers(&self, keys: &[String]) -> bool {
+        self.0
+            .iter()
+            .any(|fix| fix.items.iter().any(|item| keys.contains(item)))
+    }
+
+    /// 有几处是 `mark` **之后**才记下的：台上那一趟重新成型读人工纠正时它们还没落下，那一趟跑完它们照旧待生效。
+    #[must_use]
+    pub fn later_than(&self, mark: PendingMark) -> usize {
+        self.0.iter().filter(|fix| fix.id > mark.0).count()
+    }
+}
+
+/// 读人工纠正那一刻，**待生效**记录排到了哪一条（[`Store::shaping_input`]）。照那一刻的人工纠正成完一趟型，
+/// 号不大于它的那几处就生效了，拿它去清（[`Store::settle_pending_fixes`]）；跑着的时候才记下的号更大，不在其中
+/// （[`PendingFixes::later_than`]）。
+///
+/// **一处都没有时也是一个记号**（号 0：待生效的号从 1 起），拿它去清什么都不删——成型的每一条路因此不必先问
+/// 「读那一刻有没有待生效」。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PendingMark(i64);
+
+/// 成型要照着的那一份**人工纠正**，连同读它那一刻**待生效**记录排到了哪一条（[`Store::shaping_input`]）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShapingInput {
+    /// 这份主库的人工纠正：条目的键 → 它该归到哪个变体（同 [`Store::shaping_overrides`]）。
+    pub overrides: BTreeMap<String, String>,
+    /// 读那一刻待生效排到哪一条：照 [`Self::overrides`] 成完型之后拿它去清。
+    pub pending: PendingMark,
 }
 
 /// 审计里「**谁**」那一格：这台机器上眼下登录的账户名——`USER`，Windows 上是 `USERNAME`。
@@ -4837,6 +5202,155 @@ mod tests {
             store.take_backs("别的库").expect("读得到"),
             vec![头一笔],
             "别的主库那一笔被一并删了",
+        );
+    }
+
+    /// 合成一处多碟的那一笔：`变体们` 里头一个当主文件，其余并进来。
+    fn 合成(spot: &str, 变体们: &[&str]) -> ShapingFix {
+        let main = 变体们[0];
+        ShapingFix {
+            kind: ShapingFixKind::Merge,
+            spot: spot.to_string(),
+            items: 变体们.iter().map(ToString::to_string).collect(),
+            set: 变体们
+                .iter()
+                .map(|key| ((*key).to_string(), main.to_string()))
+                .collect(),
+            clear: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn 第十四版的老库升上来_旧纠正一条不丢_待生效记得下_重新成型只清掉照着跑的那几处() {
+        // 钉的是**第 15 条迁移**（票 `verdict-store-and-sync/12`，挂单 `Q1045`）：成型纠正的**待生效**记录。
+        // 老库上它是空的；升上来之后一处纠正连它落的那几行一起记下（一个事务），按主库分开，
+        // 读得回「几处、哪几条」；照某一刻读到的人工纠正重新成型之后，**只清掉那一刻之前记下的**——
+        // 跑着的时候人又纠正了一处，那一处没赶上这一趟，照旧待生效。
+        let conn = Connection::open_in_memory().expect("开得出来");
+        for sql in &MIGRATIONS[..14] {
+            conn.execute_batch(sql).expect("建得出第十四版");
+        }
+        conn.execute_batch("PRAGMA user_version = 14")
+            .expect("盖得上第十四版的版本号");
+        conn.execute(
+            "INSERT INTO shaping_override(library, key, variant_key, decided_at)
+             VALUES('小库', 'FC/旧.zip', 'FC/旧.zip', 1)",
+            [],
+        )
+        .expect("第十四版记得下人工纠正");
+        let mut store = Store {
+            conn,
+            path: "（内存）".to_string(),
+        };
+
+        store.migrate().expect("升得上来");
+        assert!(
+            store.pending_fixes("小库").expect("读得到").is_empty(),
+            "老库上没有一处待生效"
+        );
+        assert_eq!(
+            store.shaping_overrides("小库").expect("读得到"),
+            BTreeMap::from([("FC/旧.zip".to_string(), "FC/旧.zip".to_string())]),
+            "老库里那条人工纠正一个字都没变"
+        );
+
+        let 头一处 = 合成("FDS/甲", &["FDS/甲/1.fds", "FDS/甲/2.fds"]);
+        let 第二处 = ShapingFix {
+            kind: ShapingFixKind::Split,
+            spot: "PS3/合集".to_string(),
+            items: vec!["PS3/合集/甲.iso".to_string(), "PS3/合集/乙.7z".to_string()],
+            set: BTreeMap::from([
+                ("PS3/合集/甲.iso".to_string(), "PS3/合集/甲.iso".to_string()),
+                ("PS3/合集/乙.7z".to_string(), "PS3/合集/乙.7z".to_string()),
+            ]),
+            clear: vec!["FC/旧.zip".to_string()],
+        };
+        store.record_shaping_fix("小库", &头一处).expect("记得下");
+        store.record_shaping_fix("小库", &第二处).expect("记得下");
+        store
+            .record_shaping_fix("别的库", &头一处)
+            .expect("别的主库也记得下");
+
+        let 待生效 = store.pending_fixes("小库").expect("读得到");
+        assert_eq!(待生效.len(), 2, "两处待生效");
+        assert_eq!(
+            待生效
+                .fixes()
+                .iter()
+                .map(|fix| (fix.kind, fix.spot.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ShapingFixKind::Merge, "FDS/甲"),
+                (ShapingFixKind::Split, "PS3/合集")
+            ],
+            "按记下的先后读得回哪一种、哪一处"
+        );
+        assert!(待生效.covers(&["FDS/甲/2.fds".to_string()]));
+        assert!(待生效.covers(&["PS3/合集/乙.7z".to_string()]));
+        assert!(
+            !待生效.covers(&["FDS/乙/1.fds".to_string()]),
+            "没纠正过的那一处不算待生效"
+        );
+
+        // 纠正那几行与待生效记录**一起**落下：成型照着的就是它们。
+        let 照着 = store.shaping_input("小库").expect("读得到");
+        assert_eq!(
+            照着.overrides,
+            BTreeMap::from([
+                ("FDS/甲/1.fds".to_string(), "FDS/甲/1.fds".to_string()),
+                ("FDS/甲/2.fds".to_string(), "FDS/甲/1.fds".to_string()),
+                ("PS3/合集/甲.iso".to_string(), "PS3/合集/甲.iso".to_string()),
+                ("PS3/合集/乙.7z".to_string(), "PS3/合集/乙.7z".to_string()),
+            ]),
+            "撤掉的那条旧纠正清掉了，两处落下的那几行都在"
+        );
+
+        // 照这一份跑着的时候，人又纠正了一处。
+        let 第三处 = 合成("FDS/乙", &["FDS/乙/1.fds", "FDS/乙/2.fds"]);
+        store.record_shaping_fix("小库", &第三处).expect("记得下");
+        assert_eq!(
+            store
+                .pending_fixes("小库")
+                .expect("读得到")
+                .later_than(照着.pending),
+            1,
+            "读那一刻之后才记下的那一处，台上那一趟没赶上"
+        );
+        assert_eq!(
+            store
+                .settle_pending_fixes("小库", 照着.pending)
+                .expect("清得掉"),
+            2
+        );
+        assert_eq!(
+            store
+                .settle_pending_fixes("别的库", PendingMark::default())
+                .expect("清得掉"),
+            0,
+            "读那一刻一处都没有的记号，什么都不删"
+        );
+        let 剩下 = store.pending_fixes("小库").expect("读得到");
+        assert_eq!(
+            剩下
+                .fixes()
+                .iter()
+                .map(|fix| fix.spot.as_str())
+                .collect::<Vec<_>>(),
+            vec!["FDS/乙"],
+            "跑着的时候才记下的那一处没赶上这一趟，照旧待生效"
+        );
+        assert_eq!(
+            store.pending_fixes("别的库").expect("读得到").len(),
+            1,
+            "别的主库那一处一个字不动"
+        );
+        assert_eq!(
+            store
+                .shaping_overrides("小库")
+                .expect("读得到")
+                .get("PS3/合集/乙.7z"),
+            Some(&"PS3/合集/乙.7z".to_string()),
+            "清掉的是待生效记录，人工纠正本身留着"
         );
     }
 
