@@ -103,18 +103,13 @@ impl Plan {
                 continue;
             }
             // 最大的排前面：要砍要等，先看得见大头。
-            steps.sort_by(|a, b| {
-                b.bytes
-                    .max(b.was)
-                    .cmp(&a.bytes.max(a.was))
-                    .then_with(|| a.path.cmp(&b.path))
-            });
+            steps.sort_by(|a, b| b.size().cmp(&a.size()).then_with(|| a.path.cmp(&b.path)));
             heading(&mut out, act.label());
             for step in steps.iter().take(EXAMPLES) {
                 let _ = writeln!(
                     out,
                     "  {}{}{}",
-                    pad(&human_bytes(step.bytes.max(step.was)), 12),
+                    pad(&human_bytes(step.size()), 12),
                     if step.restore { "（补回）" } else { "" },
                     step.path,
                 );
@@ -188,7 +183,8 @@ impl Plan {
                     step.source,
                     step.path,
                 );
-                let _ = writeln!(out, "  {}转成{}", pad("", 12), conversion.recipe.label(),);
+                // 那半句与差量预览框里那一步同一处拼（`Conversion::shown`）。
+                let _ = writeln!(out, "  {}{}", pad("", 12), conversion.shown());
             }
             if rows.len() > EXAMPLES {
                 let _ = writeln!(
@@ -724,7 +720,7 @@ fn kinds(steps: &[Step]) -> BTreeMap<FileKind, Tally> {
     for step in steps {
         let tally = out.entry(step.kind).or_default();
         tally.files += 1;
-        tally.bytes += step.bytes.max(step.was);
+        tally.bytes += step.size();
     }
     out
 }

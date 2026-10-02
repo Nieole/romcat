@@ -2439,6 +2439,225 @@ pub fn segmented_where<T: Copy + PartialEq>(
     按下
 }
 
+/// 一排**下划线标签**有多大：设计稿里两种写法，同一个画法（[`underline_tabs`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabsSize {
+    /// 作品详情页六个面（设计稿 `.tabs`）：一格高 `tab-height`、左右留 `tab-padding`，格与格之间 `tabs-gap`，
+    /// 名字 `size-body`，名与数之间 `tab-count-gap`。
+    Page,
+    /// 弹层与差量预览异常那一块（设计稿 `.dtabs`）：一格高 `dialog-tab-height`、左右留 `dialog-tab-padding`，
+    /// 格与格之间 `dialog-tabs-gap`，名字 `size-small-plus`，名与数之间 `dialog-tab-count-gap`。
+    Dialog,
+}
+
+/// 一档下划线标签的几个尺寸（[`TabsSize::metrics`]），都取自令牌。
+struct TabsMetrics {
+    /// 一格多高。
+    height: f32,
+    /// 一格左右各留多少。
+    padding: f32,
+    /// 格与格之间。
+    gap: f32,
+    /// 名字与后头那个数之间。
+    count_gap: f32,
+    /// 名字的字号。
+    name_size: f32,
+}
+
+impl TabsSize {
+    /// 这一档的几个尺寸。
+    fn metrics(self) -> TabsMetrics {
+        let tokens = Tokens::builtin();
+        match self {
+            Self::Page => TabsMetrics {
+                height: tokens.layout.tab_height,
+                padding: tokens.space.tab_padding,
+                gap: tokens.space.tabs_gap,
+                count_gap: tokens.space.tab_count_gap,
+                name_size: tokens.font.size_body,
+            },
+            Self::Dialog => TabsMetrics {
+                height: tokens.layout.dialog_tab_height,
+                padding: tokens.space.dialog_tab_padding,
+                gap: tokens.space.dialog_tabs_gap,
+                count_gap: tokens.space.dialog_tab_count_gap,
+                name_size: tokens.font.size_small_plus,
+            },
+        }
+    }
+}
+
+/// 一排**下划线标签**（设计稿 `.tabs` / `.dtabs`）：一格一项，`options` 里每一项是（值, 名字, 后头跟的数）。
+/// 选中那一格名字取最深那一档字色（`ink`，稿上 `color:var(--ink)`）、粗那一族，底下一道强调色的线（粗 `tab-underline`）；
+/// 没选中的取次要字色（`ink-2`），悬停时换成最深那一档。带数的格在名字后头跟一个等宽小号（`size-caption`）的弱色数（`ink-3`）。
+/// 交回这一帧按下的那一项的值。
+///
+/// **只画那几格**：这一排底下那道横贯的分隔线、底色、左右留白由调用方画——作品详情页那一排的线横贯整块正文，
+/// 弹层那一排贴着标头底下那道分隔线，差量预览异常那一块的头一排铺 `panel-2` 底（各照各的稿）。
+///
+/// **摆不下时收窄每一格的左右留白**，不折行、不出框：差量预览异常那一块比稿多一栏（「元数据读不到」，挂单 `Q1021`），
+/// 五格照稿的留白在子库卡那一栏的宽里摆不下，那一排会把外框撑出卡片。几格一齐收、收到零为止；字一个都不截。
+///
+/// 作品详情页六个面、手动例外弹层那一排「包含｜排除」、差量预览异常那一块那一排用的都是它
+/// （票 `gui-draws-the-rest-of-the-design/14` 从作品详情页抽出来的）。**别另起一套**。
+pub fn underline_tabs<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    size: TabsSize,
+    options: &[(T, &str, Option<u64>)],
+    selected: T,
+) -> Option<T> {
+    let tokens = Tokens::builtin();
+    let TabsMetrics {
+        height: 高,
+        padding: 留白,
+        gap: 缝,
+        count_gap: 数前,
+        name_size: 名字号,
+    } = size.metrics();
+    let 名字号 = font_size(ui.ctx(), 名字号);
+    let 数字号 = font_size(ui.ctx(), tokens.font.size_caption);
+    let (字色, 强字色, 弱字色, 强调) = {
+        let visuals = ui.visuals();
+        (
+            visuals.text_color(),
+            visuals.strong_text_color(),
+            visuals.weak_text_color(),
+            visuals.selection.stroke.color,
+        )
+    };
+    // 先把每一格的字排出来，量得出这一排照稿摆要多宽。
+    let 排好: Vec<_> = options
+        .iter()
+        .map(|(value, label, count)| {
+            let on = *value == selected;
+            let 名字体 = if on {
+                egui::FontId::new(名字号, crate::font::strong_family())
+            } else {
+                egui::FontId::proportional(名字号)
+            };
+            let 名 = ui
+                .painter()
+                .layout_no_wrap((*label).to_owned(), 名字体, Color32::PLACEHOLDER);
+            let 数字 = count.map(|n| {
+                ui.painter().layout_no_wrap(
+                    romcat_core::report::thousands(n),
+                    egui::FontId::monospace(数字号),
+                    弱字色,
+                )
+            });
+            let 字宽 = 名.size().x + 数字.as_ref().map_or(0.0, |galley| 数前 + galley.size().x);
+            (*value, *label, on, 名, 数字, 字宽)
+        })
+        .collect();
+    let 字宽合计: f32 = 排好.iter().map(|one| one.5).sum();
+    let 几格 = 排好.len() as f32;
+    let 缝合计 = 缝 * (几格 - 1.0).max(0.0);
+    let 照稿要 = 字宽合计 + 缝合计 + 2.0 * 留白 * 几格;
+    let 留白 = if 照稿要 > ui.available_width() && 几格 > 0.0 {
+        ((ui.available_width() - 字宽合计 - 缝合计) / (2.0 * 几格)).clamp(0.0, 留白)
+    } else {
+        留白
+    };
+    let mut 按下 = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 缝;
+        for (value, label, on, 名, 数字, 字宽) in 排好 {
+            let 宽 = 字宽 + 2.0 * 留白;
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(宽, 高), egui::Sense::click());
+            let 色 = if on || response.hovered() {
+                强字色
+            } else {
+                字色
+            };
+            let 名在 = egui::pos2(rect.left() + 留白, rect.center().y - 名.size().y / 2.0);
+            let 名宽 = 名.size().x;
+            ui.painter().galley(名在, 名, 色);
+            if let Some(数字) = 数字 {
+                let 在 = egui::pos2(名在.x + 名宽 + 数前, rect.center().y - 数字.size().y / 2.0);
+                ui.painter().galley(在, 数字, 弱字色);
+            }
+            if on {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(rect.left(), rect.bottom() - tokens.layout.tab_underline),
+                        rect.max,
+                    ),
+                    0.0,
+                    强调,
+                );
+            }
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, label)
+            });
+            focus_ring(ui.ctx(), ui.clip_rect(), &response);
+            if response.clicked() {
+                按下 = Some(value);
+            }
+        }
+    });
+    按下
+}
+
+/// 一个**列表框**（设计稿 `.lst`）：描一圈分隔线色（`line`）、大圆角，一行一条，行与行之间一道分隔线，
+/// 每一行四周留 `list-padding`。行由 `add` 一行一行摆（[`ListBox::row`]）。
+///
+/// 差量预览异常那一块里每一栏的条目、落点撞车的一处一框用它。行数多到要滚、要虚拟化的（库体检明细）不走这里。
+pub fn list_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut ListBox<'_>) -> R) -> R {
+    let 线 = ui.visuals().widgets.noninteractive.bg_stroke;
+    egui::Frame::new()
+        .stroke(线)
+        .corner_radius(Tokens::builtin().radius.large)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(&mut ListBox { ui, rows: 0 })
+        })
+        .inner
+}
+
+/// [`list_box`] 里头：一行一行往下摆。
+pub struct ListBox<'a> {
+    ui: &'a mut egui::Ui,
+    rows: usize,
+}
+
+impl ListBox<'_> {
+    /// 摆一行（设计稿 `.lst>div`）：四周留 `list-padding`，里头是一个横排、竖直居中；不是头一行时上头先画一道分隔线。
+    ///
+    /// 左边占满、右边靠右（稿上 `grid-template-columns:minmax(0,1fr) auto`）的摆法交给 `add` 自己：
+    /// 先在 `right_to_left` 里摆右边那一样，再在剩下的宽里摆左边那一段。
+    pub fn row<R>(&mut self, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        if self.rows > 0 {
+            divider(self.ui);
+        }
+        self.rows += 1;
+        let [上下, 左右] = Tokens::builtin().space.list_padding;
+        egui::Frame::new()
+            .inner_margin(egui::Margin::from(egui::vec2(左右, 上下)))
+            .show(self.ui, |ui| {
+                ui.set_width(ui.available_width());
+                // **一行多高由里头的东西说了算**（稿上 `.lst>div` 是内边距加内容）：横排起手的行高默认是可点控件那么高，
+                // 光一行字的那几行会被撑高一截。按钮自己有它那一档的高（`small_buttons`），不靠这个。
+                ui.spacing_mut().interact_size.y = 0.0;
+                ui.horizontal(add).inner
+            })
+            .inner
+    }
+
+    /// **列不下的说出还有几条**：框里末一行一句帮助字「另有 N 个」（设计稿 `.lst` 末一行的 `.help`）。`几个` 是零就不摆。
+    pub fn rest(&mut self, 几个: usize) {
+        if 几个 == 0 {
+            return;
+        }
+        self.row(|ui| {
+            help(
+                ui,
+                &format!("另有 {} 个", romcat_core::report::thousands(几个 as u64)),
+            );
+        });
+    }
+}
+
 /// 给一个**自己画底色的可点件**补上焦点那一圈：表格的行、缩略图那几格，这一层自己画的开关。
 ///
 /// [`install`] 换的那圈强调色只到得了走 egui 按钮那条路的控件（按钮、可选标签、

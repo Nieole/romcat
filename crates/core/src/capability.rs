@@ -477,6 +477,16 @@ pub struct Conversion {
     pub inner_name: Option<String>,
 }
 
+impl Conversion {
+    /// 这一趟转换**说出口是哪半句**：「转为 zip」「转为 裸文件」（设计稿差量预览那一行的「→ 转为 zip」）。
+    ///
+    /// 差量预览框里那一步与命令行报告「格式转换」那一段印的是同一句——只在这一处拼。
+    #[must_use]
+    pub fn shown(&self) -> String {
+        format!("转为 {}", self.recipe.label())
+    }
+}
+
 /// 一个**主文件**在某份能力档案下的处置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Decision {
@@ -1426,7 +1436,7 @@ mod tests {
 
     #[test]
     fn es_de_看不见_nsz_与_xcz() {
-        // ⭐ 库里 55 个这样的文件、74.67 GiB，占 Switch 容量的 33.4%，
+        // ⭐ 库里几十个这样的文件、占 Switch 容量的三成多（数见台账 `docs/library-facts.md`），
         // 在 ES-DE 里默认完全看不见（switch-identification.md §6.2）。
         let profile = 档案("es-de-exfat");
         let Decision::Unsupported { want, .. } = decide(
