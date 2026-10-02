@@ -28,7 +28,9 @@ use romcat_core::platform::Manifest;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::{AnchorKind, Field};
 use romcat_core::task::Handle;
-use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
+use romcat_core::testing::container::{
+    RarEntrySpec, ZipEntrySpec, crc32, rar5_archive, zip_container,
+};
 use romcat_core::testing::{TempDir, temp_dir};
 use romcat_core::verdict::{self, Anchor, Decision, Facts, Membership, Store, Verdict};
 
@@ -1044,12 +1046,22 @@ fn 作品与发行版表里不留指不着任何变体的行() {
 
 /// 把一条**裁决**落进沉淀库，钉在这份字节的**内容锚**上。
 fn 裁(现场: &mut 现场, bytes: &[u8], work: &str) {
+    钉在(
+        现场,
+        crc32(bytes),
+        u64::try_from(bytes.len()).expect("装得下"),
+        work,
+    );
+}
+
+/// 把一条「这是《`work`》」的**裁决**落进沉淀库，钉在 CRC-32 加大小那个**内容锚**上。
+fn 钉在(现场: &mut 现场, crc32: u32, size: u64, work: &str) {
     现场
         .store
         .put(&Verdict::now(
             Anchor::Content {
-                crc32: crc32(bytes),
-                size: u64::try_from(bytes.len()).expect("装得下"),
+                crc32,
+                size,
                 sha1: None,
             },
             Decision::Release(Facts {
@@ -1892,6 +1904,197 @@ fn 真叫_bios_的根底下的游戏照旧认得出作品() {
         作品名(&现场, key).as_deref(),
         Some("Contra"),
         "根叫 BIOS 不让它底下的游戏变成非游戏资产"
+    );
+}
+
+/// 另一部 FC 游戏，比捎带的 BIOS 小，DAT 里没有它。
+fn 别的游戏() -> Vec<u8> {
+    vec![0x77; 2_048]
+}
+
+/// 这个变体拿哪一份内容代表自己——队列往沉淀库里钉裁决、收藏与合集钉成员，问的都是
+/// `identify::content_print` 这一条（`triage::fill_prints`）。拿不到判据是 `None`。
+fn 代表(现场: &现场, key: &str) -> Option<identify::ContentPrint> {
+    let variant = 现场
+        .catalog
+        .variant(key)
+        .expect("读得出")
+        .unwrap_or_else(|| panic!("{key} 该在库里"));
+    identify::content_print(&现场.catalog, &variant).expect("算得出")
+}
+
+/// 照队列那条路把一条「这是《`work`》」的**裁决**钉在这个变体的代表那一份上。
+fn 照队列钉一条裁决(现场: &mut 现场, key: &str, work: &str) {
+    let print = 代表(现场, key).unwrap_or_else(|| panic!("{key} 拿得到内容判据"));
+    钉在(现场, print.crc32, print.size, work);
+}
+
+#[test]
+fn 容器里捎带一份_bios_时裁决钉在游戏那一份上_不管到别的带同一份_bios_的变体() {
+    // 挂单 `Q682`：「谁代表这个变体」（裁决的**内容锚**）从前是主文件优先、同为主文件取大的。
+    // 透明容器里每一份内容的成员都是容器自己，于是比大小——捎带的 BIOS 比游戏大，代表这个
+    // 变体的就是 BIOS，钉在它上面的裁决按 CRC-32 加大小管到每一个带同一份 BIOS 的变体。
+    let 带_bios = "库/FC/魂斗罗 带 BIOS.zip";
+    let 别的带_bios = "库/FC/别的游戏 带 BIOS.zip";
+    let 单放的_bios = "库/FC/bios/disksys.rom";
+    let 只有游戏 = "库/FC/魂斗罗.zip";
+    let mut 现场 = 按根名建现场(
+        "库",
+        &[
+            (
+                "FC/魂斗罗 带 BIOS.zip",
+                zip_container(&[
+                    ZipEntrySpec::stored("Contra (Japan).nes", 魂斗罗()),
+                    ZipEntrySpec::stored("bios/disksys.rom", 磁碟机_bios()),
+                ]),
+            ),
+            (
+                "FC/别的游戏 带 BIOS.zip",
+                zip_container(&[
+                    ZipEntrySpec::stored("Other (Japan).nes", 别的游戏()),
+                    ZipEntrySpec::stored("bios/disksys.rom", 磁碟机_bios()),
+                ]),
+            ),
+            ("FC/bios/disksys.rom", 磁碟机_bios()),
+            (
+                "FC/魂斗罗.zip",
+                zip_container(&[ZipEntrySpec::stored("Contra (Japan).nes", 魂斗罗())]),
+            ),
+        ],
+    );
+    assert!(
+        魂斗罗().len() < 磁碟机_bios().len() && 别的游戏().len() < 磁碟机_bios().len(),
+        "前提：两个包里的游戏都比捎带的 BIOS 小"
+    );
+    跑(&mut 现场);
+
+    照队列钉一条裁决(&mut 现场, 带_bios, "魂斗罗");
+    跑(&mut 现场);
+
+    assert_eq!(
+        作品名(&现场, 带_bios).as_deref(),
+        Some("魂斗罗"),
+        "裁过的那一个照裁决"
+    );
+    assert_ne!(
+        作品名(&现场, 别的带_bios).as_deref(),
+        Some("魂斗罗"),
+        "另一个只是带着同一份 BIOS 的变体，不归这条裁决管"
+    );
+    assert_ne!(
+        作品名(&现场, 单放的_bios).as_deref(),
+        Some("魂斗罗"),
+        "单放的那份 BIOS 也不归这条裁决管"
+    );
+    assert_eq!(
+        作品名(&现场, 只有游戏).as_deref(),
+        Some("魂斗罗"),
+        "裁决钉在游戏本身那串字节上：同一份游戏换个包装，照样是这条裁决管着"
+    );
+}
+
+#[test]
+fn 一整个变体只有_bios_时代表它的照旧是那份_bios() {
+    // 跳过非游戏资产是「有游戏就不拿 BIOS 代表」，不是「BIOS 代表不了任何变体」：一个变体
+    // 从头到尾就是那份 BIOS 时，那份字节正是它自己。退成「没有代表」的话，它上面的收藏与
+    // 裁决就只剩路径锚——改个名字就丢，而它本来钉得住内容锚（挂单 `Q1587`）。
+    let 单放的 = "库/FC/bios/disksys.rom";
+    let 只装着_bios_的包 = "库/FC/磁碟机 BIOS.zip";
+    let mut 现场 = 按根名建现场(
+        "库",
+        &[
+            ("FC/bios/disksys.rom", 磁碟机_bios()),
+            (
+                "FC/磁碟机 BIOS.zip",
+                zip_container(&[ZipEntrySpec::stored("bios/disksys.rom", 磁碟机_bios())]),
+            ),
+        ],
+    );
+    跑(&mut 现场);
+
+    let bios = 磁碟机_bios();
+    for key in [单放的, 只装着_bios_的包] {
+        assert_eq!(
+            代表(&现场, key).map(|print| (print.crc32, print.size)),
+            Some((crc32(&bios), u64::try_from(bios.len()).expect("装得下"))),
+            "{key} 整个就是那份 BIOS，代表它的就是那份 BIOS"
+        );
+    }
+}
+
+#[test]
+fn 游戏那一份拿不到判据时_代表不退到捎带的_bios_上() {
+    // 跳过非游戏资产是「有游戏就不拿 BIOS 代表」——游戏那一份眼下拿不到判据（这个 RAR5
+    // 只记了 BLAKE2sp、没记 CRC-32），它也还是游戏。退到 BIOS 上，这个变体的裁决就又钉回
+    // 那份人人都带的字节上了；宁可没有代表，退成只在本机成立的路径锚。
+    let key = "库/FC/魂斗罗 带 BIOS.rar";
+    let mut 现场 = 按根名建现场(
+        "库",
+        &[(
+            "FC/魂斗罗 带 BIOS.rar",
+            rar5_archive(&[
+                RarEntrySpec::stored("Contra (Japan).nes", 魂斗罗()).blake2_only(),
+                RarEntrySpec::stored("bios/disksys.rom", 磁碟机_bios()),
+            ]),
+        )],
+    );
+    跑(&mut 现场);
+
+    assert_eq!(
+        代表(&现场, key),
+        None,
+        "游戏那一份拿不到判据，代表那一份宁缺，不拿捎带的 BIOS 顶"
+    );
+}
+
+#[test]
+fn 没有非游戏资产的变体_代表那一份照旧是主文件优先_同为主文件取大的() {
+    // 跳过非游戏资产只动带着它的那些变体。别的变体的代表一份都不许换——换了，已经钉在
+    // 那串字节上的裁决、收藏与合集就按内容锚认不出了，而这一批**不迁**（挂单 `Q682`）。
+    let 一包两份 = "库/FC/一包两份.zip";
+    let cue = "库/ps/某游戏/某游戏.cue";
+    let dir = temp_dir("identify-representative");
+    写(
+        &dir.path().join("FC/一包两份.zip"),
+        &zip_container(&[
+            ZipEntrySpec::stored("small.nes", vec![0x11; 1_024]),
+            ZipEntrySpec::stored("big.nes", vec![0x22; 2_048]),
+        ]),
+    );
+    // `cue` 是主文件、`bin` 是附属文件；`bin` 大得多也轮不到它。
+    写(
+        &dir.path().join("ps/某游戏/某游戏.cue"),
+        "FILE \"某游戏.bin\" BINARY".as_bytes(),
+    );
+    写(&dir.path().join("ps/某游戏/某游戏.bin"), &[0x42; 16_384]);
+    // PS1 在 DAT 库里得有记录，裸文件才回盘算判据（一条记录都没有的平台一个字节都不读）。
+    let mut repo = 认得出游戏与_bios_的_dat();
+    装(
+        &mut repo,
+        "Redump",
+        "Sony - PlayStation",
+        "PS1",
+        Convention::AsIs,
+        &[条目(
+            "Some PS1 Game (Japan)",
+            "Some PS1 Game.bin",
+            2_352,
+            0x1234_5678,
+        )],
+    );
+    let mut 现场 = 扫成现场(dir, "库", repo);
+    跑(&mut 现场);
+
+    let 代表的是 = |key: &str| 代表(&现场, key).map(|print| (print.member, print.inner));
+    assert_eq!(
+        代表的是(一包两份),
+        Some((一包两份.to_string(), "big.nes".to_string())),
+        "同为主文件（都在这个包里），取大的"
+    );
+    assert_eq!(
+        代表的是(cue),
+        Some((cue.to_string(), String::new())),
+        "主文件优先，哪怕附属文件更大"
     );
 }
 

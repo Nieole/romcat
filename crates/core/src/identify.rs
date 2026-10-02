@@ -456,6 +456,11 @@ impl ContentUnit {
     fn is_nkit(&self) -> bool {
         self.nkit() == Some(true)
     }
+
+    /// 这份内容是**非游戏资产**吗（键怎么凑见 [`non_game_asset_at`]）。
+    fn non_game_asset(&self) -> bool {
+        non_game_asset_at(&self.member, &self.inner)
+    }
 }
 
 /// 跑一趟识别。
@@ -2196,6 +2201,16 @@ impl Bulk {
 /// `bin`、一个包里装着 ROM 和说明书），拿说明书的哈希去当这个变体的锚，换台机器就再也
 /// 对不上了。顺序还要**定死**：同一份库跑两次，锚必须是同一份。
 ///
+/// **排之前先跳过非游戏资产**（挂单 `Q682`，票 `verdict-store-and-sync/05`）：整理包常把
+/// 模拟器要的 BIOS 一起塞进游戏的透明容器，容器里每一份的成员都是容器自己、同为主文件，
+/// BIOS 比游戏大就轮到它，钉在它上面的裁决按 CRC-32 加大小管到每一个带同一份 BIOS 的变体。
+/// 与挑作品时不跟着非游戏资产定（[`hit_non_game_asset`]）是同一个形状、同一处判断。
+/// 跳不跳看的是**这个变体里有没有别的内容**，不看别的内容拿没拿到判据：
+/// **整个变体只有非游戏资产时**照旧在它们里头挑——那份 BIOS 就是它自己，跳了就没有内容锚
+/// 可钉；**游戏那一份拿不到判据时**照跳，不退到 BIOS 上，宁可没有代表、退路径锚
+/// （这条线怎么划记在挂单 `Q1587`）。已经钉在 BIOS 上的裁决**不迁**
+/// （`.scratch/verdict-store-and-sync/grill.md` 的 `Q682`）。
+///
 /// **三处共用这一个说法**：队列往沉淀库里钉裁决走 [`content_print`]，识别回头查沉淀库
 /// 走 [`find_verdict`]，两处都只认它返回的那一份。**锚点说的是「一条结论管多大范围」**
 /// （`CONTEXT.md`），两边说岔了，一条钉在附属成员上的裁决就会管到整个变体，
@@ -2204,10 +2219,15 @@ fn representative<'a>(variant: &VariantRow, units: &'a [ContentUnit]) -> Option<
     ordered(variant, units).first().map(|index| &units[*index])
 }
 
-/// 按「谁最能代表这个变体」把 units 排个序，返回下标。带不动判据的一律不进。
+/// 按「谁最能代表这个变体」把 units 排个序，返回下标。带不动判据的一律不进；
+/// 变体里还有别的内容时，**非游戏资产**也不进（见 [`representative`]）。
 fn ordered(variant: &VariantRow, units: &[ContentUnit]) -> Vec<usize> {
+    let only_assets = units.iter().all(ContentUnit::non_game_asset);
     let mut order: Vec<usize> = (0..units.len())
-        .filter(|index| units[*index].print.is_some())
+        .filter(|index| {
+            let unit = &units[*index];
+            unit.print.is_some() && (only_assets || !unit.non_game_asset())
+        })
         .collect();
     order.sort_by(|a, b| {
         let (left, right) = (&units[*a], &units[*b]);
@@ -3518,16 +3538,23 @@ fn names_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Vec<fuz
     names
 }
 
-/// 这条候选撞上的那份内容是**非游戏资产**吗。
+/// 这条候选撞上的那份内容是**非游戏资产**吗（键怎么凑见 [`non_game_asset_at`]）。
+fn hit_non_game_asset(candidate: &Candidate) -> bool {
+    non_game_asset_at(&candidate.member_key, &candidate.inner)
+}
+
+/// 变体的成员 `member` 里、容器内部路径 `inner` 处的那份内容是**非游戏资产**吗；裸文件的
+/// `inner` 是空串。
 ///
 /// 判断只有一处（[`classify::non_game_asset`]，ADR-0024），这里只补齐它要的输入：
 /// **这份内容在库里的键**。**透明容器**只是包装，容器里的一份内容住在「容器的键接上
 /// 容器内部路径」那儿——`bios/` 这一段在容器外面还是里面，说的是同一件事。
-fn hit_non_game_asset(candidate: &Candidate) -> bool {
-    if candidate.inner.is_empty() {
-        classify::non_game_asset(&candidate.member_key)
+/// 挑作品（[`hit_non_game_asset`]）与挑代表（[`ordered`]）都从这儿问。
+fn non_game_asset_at(member: &str, inner: &str) -> bool {
+    if inner.is_empty() {
+        classify::non_game_asset(member)
     } else {
-        classify::non_game_asset(&format!("{}/{}", candidate.member_key, candidate.inner))
+        classify::non_game_asset(&format!("{member}/{inner}"))
     }
 }
 
