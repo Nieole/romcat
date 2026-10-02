@@ -107,6 +107,7 @@
 核查（2026-09-23）：crates/cli/src/main.rs:4397 起 sublibrary set 那一支没调 target::vet / vet_name（全文件零处 vet( ），只在同步时走 refuse_target_in_library(:5039)；判断在 crates/core/src/sublibrary/target.rs:140、:186
 依赖／可并：Q797（同是命令行/界面在 sublibrary set 一处对齐）
 （大小 S，来自票 `gui-looks-like-the-design/21`）
+**收于票 `core-answers-once/08`（2026-10-03）：settled。** 命令行 `sublibrary set` 存下之前调 `target::vet_name` 与 `target::vet`（判的是这一趟要存下的那条路径，没给 `--target` 就判原来那条，挂单 `Q1367`）；拦下时那句话收进核心库（`TargetRefusal` / `NameRefusal` 的 `Display`，设计稿 `probePath` 那几句），界面与命令行都印它。
 
 ### `Q574` — 命令行只把长命令收场那一句接到 `Ending::render`，报告里的「已中断」「这一趟被中断了」没改
 
@@ -114,6 +115,7 @@
 核查（2026-09-23）：crates/core/src/report/render.rs:259、:349、:800，report/duplicates.rs:90，sync/report.rs:667「这一趟被中断了」，crates/cli/src/main.rs:1537 仍用「中断」
 依赖／可并：Q626、Q655、Q454
 （大小 M，来自票 `gui-looks-like-the-design/03`）
+**收于票 `core-answers-once/08`（2026-10-03）：settled。** 体检报告三处、重复明细、同步回执、扫描「没有重新成型」那句改说**部分完成**；中文索引重建那两句一个字没写，改说「已取消」（词从 `Ending` 取）；Ctrl-C 那两句改说「Ctrl-C」。
 
 ### `Q626` — 一批裁决的时刻，命令行与界面各有一份折法
 
@@ -121,6 +123,7 @@
 核查（2026-09-23）：crates/cli/src/main.rs:4001 fn when 自折公历（注释「整个仓库一个时刻都不往外印」已失实）；crates/core/src/report/render.rs:144 human_time 注释「公式只有一处」
 依赖／可并：Q655、Q574、Q454（都是命令行输出一票）
 （大小 S，来自票 `gui-answers-all-six/06`）
+**收于票 `core-answers-once/08`（2026-10-03）：settled。** 命令行的 `when` / `leap` 删掉，`triage batches` / `undo` 改调 `report::human_time`，输出一字不变；闰日与月长那几个钉子搬到核心库 `human_time` 的单元测试。照旧 UTC（`Q901`）。
 
 ### `Q655` — 铺媒体那句回执界面与命令行各写一份，已经差着一截
 
@@ -128,6 +131,7 @@
 核查（2026-09-23）：crates/gui/src/stages.rs:131 media_laid 与 crates/cli/src/main.rs:2911 「媒体铺出去 … 份」各写一份；MediaReport（crates/core/src/adapter/report.rs）上没有一句话的渲染
 依赖／可并：Q574 / Q626（同为命令行输出改走核心库那一份，可一票）
 （大小 S，来自票 `one-criterion-per-thing/09`）
+**收于票 `core-answers-once/08`（2026-10-03）：settled。** 核心库立 `MediaReport::receipt`（字照界面那一份），界面工序段导出收场与命令行 `export --media` 都印它；命令行另补一句去处「详见报告「媒体」那一节」。
 
 ### `Q454` — 命令行有两句把主库标识（带哈希）当成给人看的名字印出来
 
@@ -135,6 +139,7 @@
 核查（2026-09-23）：crates/cli/src/main.rs:3894 与 :4101「主库「{}」上还没有落过一批裁决」填的仍是 site.library_identity；crates/core/src/site.rs:179 已有 display_name()
 依赖／可并：Q626、Q574、Q655
 （大小 S，来自票 `no-mute-spots-opening-a-catalog/01`）
+**收于票 `core-answers-once/08`（2026-10-03）：settled。** 那两句改印 `site.display_name()`；同一个毛病的第三句「主库「…」上没有疑似同一作品的建议。」一并改了。
 
 ### `Q1067` — 「关于」那一节的许可没有结构化字段，只说得出「以各家自己的说明为准」
 

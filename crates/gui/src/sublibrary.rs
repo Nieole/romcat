@@ -3920,7 +3920,9 @@ impl Screen {
                 });
                 match name_verdict.as_ref() {
                     Some(Ok(Err(NameRefusal::Empty))) => under(ui, "用来区分不同设备。", false),
-                    Some(Ok(Err(NameRefusal::Taken))) => under(ui, "已经有同名的子库。", true),
+                    Some(Ok(Err(refusal @ NameRefusal::Taken))) => {
+                        under(ui, &refusal.to_string(), true);
+                    }
                     Some(Err(why)) => under(ui, why, true),
                     Some(Ok(Ok(()))) | None => {}
                 }
@@ -3953,7 +3955,8 @@ impl Screen {
                         "通常是 SD 卡或掌机存储的根目录。无法弹出选择窗口时，也可以直接粘贴路径。",
                         false,
                     ),
-                    Some(Ok(Err(refusal))) => under(ui, &refusal_line(refusal), true),
+                    // 拦下时那句话是核心库那一份（`TargetRefusal` 的 `Display`，设计稿 `probePath`），命令行印的也是它。
+                    Some(Ok(Err(refusal))) => under(ui, &refusal.to_string(), true),
                     Some(Err(why)) => under(ui, why, true),
                     Some(Ok(Ok(_))) | None => {}
                 }
@@ -4142,13 +4145,12 @@ impl Screen {
         self.vet_form(site);
         if !self.form_ready() {
             let target_line = match self.vetted.as_ref().map(|vetted| &vetted.verdict) {
-                Some(Ok(Err(refusal))) => Some(refusal_line(refusal)),
+                Some(Ok(Err(refusal))) => Some(refusal.to_string()),
                 Some(Err(why)) => Some(why.clone()),
                 _ => None,
             };
             let name_line = match self.name_vetted.as_ref().map(|vetted| &vetted.verdict) {
-                Some(Ok(Err(NameRefusal::Empty))) => Some("名称没填。".to_string()),
-                Some(Ok(Err(NameRefusal::Taken))) => Some("已经有同名的子库。".to_string()),
+                Some(Ok(Err(refusal))) => Some(refusal.to_string()),
                 Some(Err(why)) => Some(why.clone()),
                 _ => None,
             };
@@ -4195,8 +4197,8 @@ impl Screen {
                     self.error = Some(format!("改不了名：已经没有叫「{old}」的子库了。"));
                     return false;
                 }
-                Ok(Renamed::Refused(_)) => {
-                    self.error = Some("已经有同名的子库。".to_string());
+                Ok(Renamed::Refused(refusal)) => {
+                    self.error = Some(refusal.to_string());
                     return false;
                 }
                 Err(error) => {
@@ -6149,24 +6151,6 @@ fn convert_text(entry: Option<&Entry>) -> &'static str {
         Some(Recipe::Rezip) => "zip",
         Some(Recipe::Unpack) => "取出为裸文件",
         None => "—",
-    }
-}
-
-/// 目标路径被核心拦下时，弹层里路径底下那一句（设计稿 `probePath`，稿上画了的三句逐字照稿）。
-///
-/// **判断不在这儿**（[`target::vet`]）：这里只把核心交回来的理由说成屏上那句话。
-fn refusal_line(refusal: &TargetRefusal) -> String {
-    match refusal {
-        TargetRefusal::Empty => "通常是 SD 卡或掌机存储的根目录。".to_string(),
-        TargetRefusal::InLibrary { around: false, .. } => {
-            "这个目录在主库的根之内。子库需要写入文件，不能放在只读的主库里。".to_string()
-        }
-        TargetRefusal::InLibrary { around: true, .. } => {
-            "这个目录包含主库的根。子库需要写入文件，不能放在只读的主库里。".to_string()
-        }
-        TargetRefusal::InWorkspace { .. } => "这个目录属于工作目录，请选择其他目录。".to_string(),
-        TargetRefusal::Taken { by } => format!("已被子库「{by}」使用。"),
-        TargetRefusal::NotADirectory => "这条路径是一份文件，不是目录。".to_string(),
     }
 }
 

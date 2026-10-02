@@ -30,7 +30,9 @@ use romcat_core::path;
 // **主库只读**那一道（ADR-0004）住在核心库：界面上「导出清单…」问的也是它。
 use romcat_core::path::refuse_writing_into_library;
 use romcat_core::platform::Manifest;
-use romcat_core::report::{DuplicateDetails, HealthReport, human_bytes, pad, thousands};
+use romcat_core::report::{
+    DuplicateDetails, HealthReport, human_bytes, human_time, pad, thousands,
+};
 use romcat_core::scan::aggregate::{Aggregate, Limits};
 use romcat_core::scan::{self, CancelToken, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities};
@@ -1025,9 +1027,9 @@ struct ScanArgs {
     /// 也读 zst 与 tar.zst 的内部构成。**这一趟会慢几个小时**
     ///
     /// zip 与 7z 的内部清单零解压就在容器头里写着；zstd 没有这个东西，列全清单只能把
-    /// 整条流解一遍。主库里这是两千多个文件、两个半 TiB（见台账 `docs/library-facts.md`），真机实测约 125 MB/s，一趟约 5.8 小时
-    /// （瓶颈全在磁盘）。打开一次即可：结论按 (路径, 大小, 修改时间) 落进中立库，
-    /// 往后的扫描原样沿用，实测二次扫描 1.0 秒
+    /// 整条流解一遍。主库里这是两千多个文件、两个半 TiB（见台账 `docs/library-facts.md`），真机实测一趟要好几个小时
+    /// （瓶颈全在磁盘；实测数台账没收，出处是 ADR-0014）。打开一次即可：结论按 (路径, 大小, 修改时间) 落进中立库，
+    /// 往后的扫描原样沿用，二次扫描是秒级
     #[arg(long)]
     zst: bool,
 
@@ -1066,10 +1068,10 @@ fn main() -> ExitCode {
     let cancel = CancelToken::new();
     let handler_token = cancel.clone();
     if let Err(error) = ctrlc::set_handler(move || {
-        eprintln!("\n收到中断，正在收尾并保存断点……");
+        eprintln!("\n收到 Ctrl-C，正在收尾并保存断点……");
         handler_token.cancel();
     }) {
-        eprintln!("装不上中断处理：{error}。扫描照常开始，但 Ctrl-C 不会保存断点。");
+        eprintln!("装不上 Ctrl-C 的处理：{error}。扫描照常开始，但 Ctrl-C 不会保存断点。");
     }
 
     let cli = Cli::parse();
@@ -1279,10 +1281,12 @@ fn heal_zh_store(
             zh::store::SCHEMA_VERSION,
             thousands(games),
         ),
+        // 停在两条记录之间、一个字都没写：收场那一档是「已取消」，词从 `Ending` 取（挂单 `Q574`）。
         Ok(zh::sync::Rebuilt::Halted { was, dump }) => eprintln!(
-            "重建中文索引被中断了（结构版本 {was}，本程序认得的是 {}，原件 {dump}）。\
+            "重建中文索引{}（结构版本 {was}，本程序认得的是 {}，原件 {dump}）。\
              停在两条记录之间，一个字都没写进库——那份索引原样等着，下次接着重建。\
              这一趟先少这一层。",
+            Ending::<()>::Stopped.render(),
             zh::store::SCHEMA_VERSION,
         ),
         Ok(zh::sync::Rebuilt::NoOriginal { was, dump }) => eprintln!(
@@ -1544,7 +1548,8 @@ fn run_scan(args: &ScanArgs, cancel: &CancelToken) -> ExitCode {
             eprintln!("界面上攒着的待生效记录没清掉（沉淀库写不进：{error}）。");
         }
     } else if outcome.interrupted {
-        eprintln!("这一趟被中断，没有重新成型——半个库上成出来的变体是错的。");
+        // 停下来的这一趟是**部分完成**（词表；收场那句在下面由 `Ending::render` 落，挂单 `Q574`）。
+        eprintln!("这一趟部分完成，没有重新成型——半个库上成出来的变体是错的。");
     }
     if let Some(probe) = &outcome.probe {
         // 并发是量出来的不是猜出来的，那就把量到的数说出来——用户看得见依据才敢信它，
@@ -1885,7 +1890,11 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     } else if cancel.is_cancelled() {
         // **重建被自己按停了，不是「还没取过」。** 数取过，只是这一趟没读完；
         // 照那句报的话就是把用户推向重下那 435 MB。
-        eprintln!("中文索引这一趟被中断了（它还等着重建），文件名那一层不跑。");
+        // 停在两条记录之间、一个字都没写：词表**收场**那一档是「已取消」，不是部分完成（挂单 `Q574`）。
+        eprintln!(
+            "重建中文索引{}（它还等着重建），文件名那一层不跑。",
+            Ending::<()>::Stopped.render()
+        );
     } else {
         eprintln!("还没取过中文离线数据源，文件名那一层不跑。要它就先跑一次 `romcat zh sync`。");
     }
@@ -2925,19 +2934,12 @@ fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
         thousands(report.files.len() as u64),
         report.tier,
     );
+    // **铺媒体那句回执是核心库那一句**（`MediaReport::receipt`）：界面工序段导出收场印的也是它，
+    // 两个壳不各写一份（挂单 `Q655`）。被占着的、没铺成的几份数在这一句里；去哪儿看是哪几份，是命令行自己补的去处。
     if let Some(media) = report.media.as_ref().filter(|_| !args.dry_run) {
-        eprintln!(
-            "媒体铺出去 {} 份（硬链接 {}、复制 {}），落点上本来就有的 {} 份没重铺。",
-            thousands(media.placed()),
-            thousands(media.linked),
-            thousands(media.copied),
-            thousands(media.already),
-        );
-        if !media.occupied.is_empty() {
-            eprintln!(
-                "有 {} 份媒体的落点上已经有别的东西——**没有覆盖**，详见报告。",
-                thousands(media.occupied.len() as u64)
-            );
+        eprintln!("{}", media.receipt());
+        if !media.occupied.is_empty() || !media.failures.is_empty() {
+            eprintln!("没铺出去的是哪几份、为什么，详见报告「媒体」那一节。");
         }
     }
     // **没走完却留下了东西**（人按了停下，或者铺媒体连着失败主动停了）：留下了什么由核心库
@@ -2963,15 +2965,12 @@ fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
-    if let Some(media) = report
+    // 没铺成的几份上面那句回执已经说了，这里只定退出码。
+    if report
         .media
         .as_ref()
-        .filter(|media| media.gave_up || !media.failures.is_empty())
+        .is_some_and(|media| media.gave_up || !media.failures.is_empty())
     {
-        eprintln!(
-            "有 {} 份媒体没铺成，详见报告。",
-            thousands(media.failures.len() as u64)
-        );
         if !write_json(args.json.as_deref(), &report) {
             return ExitCode::FAILURE;
         }
@@ -3912,16 +3911,18 @@ fn run_triage_batches(args: &TriageBatchesArgs) -> ExitCode {
         Err(error) => return fail(format!("沉淀库读不动：{error}")),
     };
     if batches.is_empty() {
-        println!("主库「{}」上还没有落过一批裁决。", site.library_identity);
+        // 印给人看的是**主库原名**，不是主库标识（那一串带哈希，是中立库的主文件名，挂单 `Q454`）。
+        println!("主库「{}」上还没有落过一批裁决。", site.display_name());
         return ExitCode::SUCCESS;
     }
     println!("落过的那些批（新的在前）");
     println!("{}", "═".repeat(24));
     for batch in &batches {
+        // 时刻走核心库那一处公历换算（`report::human_time`，界面裁决记录也在它上面折），照旧 UTC（挂单 `Q901`）。
         println!(
             "#{}  {}  {} 条  {}",
             batch.id,
-            when(batch.decided_at),
+            human_time(batch.decided_at),
             thousands(batch.rows),
             if batch.undone() { "已撤" } else { "在册" },
         );
@@ -3996,10 +3997,7 @@ fn run_triage_same_work(args: &TriageSameWorkArgs) -> ExitCode {
         Err(error) => return fail(format!("扫不动：{error}")),
     };
     if found.is_empty() {
-        println!(
-            "主库「{}」上没有疑似同一作品的建议。",
-            site.library_identity
-        );
+        println!("主库「{}」上没有疑似同一作品的建议。", site.display_name());
         return ExitCode::SUCCESS;
     }
     println!("疑似同一作品 {} 组", thousands(found.len() as u64));
@@ -4017,59 +4015,6 @@ fn run_triage_same_work(args: &TriageSameWorkArgs) -> ExitCode {
         args.common.选择器(),
     );
     ExitCode::SUCCESS
-}
-
-/// 一个时刻（UNIX 纪元起的秒）写成给人看的一行，**UTC**。
-///
-/// 自己折而不是拉一个日期库进来：整个仓库到这一票为止一个时刻都不往外印，为一行
-/// 「落于 ……」加一个依赖不划算。**不认本地时区**——那要读时区库，而这一行的用处只是
-/// 让人把几批分得开、认得出哪批是刚才那一批。`列得出这一批是什么时候落的` 钉住它。
-fn when(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rest = secs.rem_euclid(86_400);
-    // 1970-01-01 起的天数折成年月日：闰年四百年一循环，不必拉一个日期库进来。
-    let mut year = 1970;
-    let mut left = days;
-    loop {
-        let len = if leap(year) { 366 } else { 365 };
-        if left < len {
-            break;
-        }
-        left -= len;
-        year += 1;
-    }
-    let lengths = [
-        31,
-        if leap(year) { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1;
-    for len in lengths {
-        if left < len {
-            break;
-        }
-        left -= len;
-        month += 1;
-    }
-    format!(
-        "{year:04}-{month:02}-{:02} {:02}:{:02}",
-        left + 1,
-        rest / 3_600,
-        (rest % 3_600) / 60,
-    )
-}
-
-fn leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 /// 把撤掉的那一批放回去。
@@ -4124,7 +4069,7 @@ fn pick_batch(site: &Site, batch: Option<i64>, last: bool, undone: bool) -> Resu
             if undone {
                 "一批撤掉的都没有，没什么可放回去的。".to_string()
             } else {
-                format!("主库「{}」上还没有落过一批裁决。", site.library_identity)
+                format!("主库「{}」上还没有落过一批裁决。", site.display_name())
             }
         })
 }
@@ -4148,7 +4093,7 @@ fn run_triage_undo_batch(args: &TriageUndoArgs) -> ExitCode {
         "第 {batch} 批：{}，{} 条，落于 {}。",
         found.summary,
         thousands(found.rows),
-        when(found.decided_at),
+        human_time(found.decided_at),
     );
     if args.dry_run {
         eprintln!("这是 --dry-run，一个字都没写。");
@@ -4329,27 +4274,46 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
         Ok(catalog) => catalog,
         Err(message) => return fail(message),
     };
-    let existing = match catalog.sublibrary(&args.name) {
+    // 名字两头的空白不算数，存的也是去掉之后那一份——与名字判断（`target::vet_name`）、界面「目标设置」同一个口径。
+    let name = args.name.trim();
+    let existing = match catalog.sublibrary(name) {
         Ok(existing) => existing,
         Err(error) => return fail(format!("中立库读不动：{error}")),
     };
+    let workspace = workspace_dir(args.common.workspace.as_deref());
+    // **名字与目标路径当场判**，判据在核心库一处（`sublibrary::target`，ADR-0024）：与界面「目标设置」那个弹层
+    // 同一道、同一句话。拦在存下来这一步而不是等到同步：一个指着工作目录、或者与别的子库套在一起的子库
+    // 放在库里，下一次同步之前谁都不知道它错了。**判的是这一趟要存下的那条路径**——没给 `--target`
+    // 就是原来那条，与弹层打开时带着原路径照判一遍同一个口径；它自己原来那条不算被占。
+    // `set` 是按名字改或建：名字已经有了就是改那一台（`editing`），所以名字判断在这儿拦得下的只有空着的那一种。
+    let editing = existing.as_ref().map(|sub| sub.name.as_str());
+    match sublibrary::target::vet_name(&catalog, editing, name) {
+        Ok(Ok(())) => {}
+        Ok(Err(refusal)) => return fail(format!("子库名不能用：{refusal}")),
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    }
     // **两种形式一次填齐**（ADR-0020、挂账 D82）：NFC 那一份当键、进报告，
     // 系统给的原始那一份留着读盘。只存 NFC 的话，目标目录名是分解形式、又挂在
     // 分解敏感的文件系统上时，同步会打不开它然后报「目标不在位」——最不该说的谎。
-    let (target, target_raw) = match (&args.target, &existing) {
+    // 判目标路径读盘走系统给的那一份（`place`，同 `Sublibrary::read_path`）。
+    let (place, target, target_raw) = match (&args.target, &existing) {
         (Some(target), _) => {
             // **两种形式怎么折，由 `Sublibrary::at` 一处说了算。** 在这儿再抄一遍
             // `nfc` 与 `to_str`，两处迟早漂开——而漂开的后果正是 D82 那个 bug。
             // 格式与容量下面单算，这里只借它折路径。
             let folded = Sublibrary::at(
-                &args.name,
+                name,
                 &path::normalize_existing(target),
                 DEFAULT_FORMAT,
                 None,
             );
-            (folded.target, folded.target_raw)
+            (target.clone(), folded.target, folded.target_raw)
         }
-        (None, Some(existing)) => (existing.target.clone(), existing.target_raw.clone()),
+        (None, Some(existing)) => (
+            existing.read_path(),
+            existing.target.clone(),
+            existing.target_raw.clone(),
+        ),
         (None, None) => {
             return fail(
                 "新建子库要给 `--target <目标设备上的目录>`——子库总得知道往哪儿导。\n\
@@ -4357,6 +4321,13 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
             );
         }
     };
+    match sublibrary::target::vet(&catalog, &workspace, editing, &place) {
+        Ok(Ok(_)) => {}
+        Ok(Err(refusal)) => {
+            return fail(format!("目标 {} 不能用：{refusal}", path::display(&place)));
+        }
+        Err(error) => return fail(format!("中立库读不动：{error}")),
+    }
     if target_raw.is_none() {
         eprintln!(
             "⚠️ 这条目标路径不是有效的 UTF-8，存不下系统给的原始形式。\n\
@@ -4381,7 +4352,6 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
     };
     // **挑不存在的档案当场拦下来。** 存一个名册里没有的名字，同步时会悄悄退回
     // 「不作声称」——于是用户以为配了 FAT32 的检查，其实一条都没查。
-    let workspace = workspace_dir(args.common.workspace.as_deref());
     let capability = match &args.capability {
         Some(name) => {
             let roster = match romcat_core::capability::Roster::in_workspace(&workspace) {
@@ -4421,7 +4391,7 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
         && !args.no_capacity
         && existing.as_ref().is_some_and(|sub| sub.capacity_by_device);
     let sublibrary = Sublibrary {
-        name: args.name.clone(),
+        name: name.to_string(),
         target,
         target_raw,
         format,
@@ -6256,18 +6226,6 @@ fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn 列得出这一批是什么时候落的() {
-        // 自己折的日期算术，闰年与月长两处最容易写错，各钉一个。
-        assert_eq!(when(0), "1970-01-01 00:00");
-        assert_eq!(when(86_399), "1970-01-01 23:59");
-        // 2024-02-29 是闰日：不认闰年的话这里会印成 3 月 1 日。
-        assert_eq!(when(1_709_164_800), "2024-02-29 00:00");
-        assert_eq!(when(1_709_251_199), "2024-02-29 23:59");
-        // 2025 不是闰年，同一个 3 月 1 日在它那儿早一天到。
-        assert_eq!(when(1_740_787_200), "2025-03-01 00:00");
-    }
 
     /// 断点文件名与 `scan` 内部认根，必须从**同一个化开之后**的根算出根名。
     ///

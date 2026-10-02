@@ -681,8 +681,8 @@ impl Outcome {
         if self.interrupted {
             let _ = writeln!(
                 out,
-                "\n⚠️ **这一趟被中断了。** 写到一半的那份已经清掉，落点上是完整的旧文件；\n\
-                 清单记的是到中断为止目标上的真实状态。**再跑一次就从剩下的接着来。**",
+                "\n⚠️ **这一趟部分完成。** 写到一半的那份已经清掉，落点上是完整的旧文件；\n\
+                 清单记的是到停下为止目标上的真实状态。**再跑一次就从剩下的接着来。**",
             );
         }
         out
@@ -847,5 +847,36 @@ mod tests {
         assert!(text.contains("只差大小写"), "{text}");
         // 它照样算清单之外——报告不能说出「目标上没有清单之外的文件」。
         assert!(!text.contains("目标上没有清单之外的文件"), "{text}");
+    }
+
+    #[test]
+    fn 停下来的那一趟回执里叫部分完成_不叫中断() {
+        // 票 `core-answers-once/08`（挂单 `Q574`）：词表**部分完成**——没走完就收了场、交出了产物（这一趟是清单），
+        // `_Avoid_` 里有「中断」。这一份是命令行 `sublibrary sync` 收场印的回执。
+        let text = Outcome {
+            sublibrary: "掌机".to_string(),
+            target: "/Volumes/SDCARD/Games".to_string(),
+            added: Done {
+                files: 1,
+                bytes: 1024,
+            },
+            updated: Done::default(),
+            deleted: Done::default(),
+            placement: None,
+            linked: 0,
+            copied: 0,
+            failures: Vec::new(),
+            interrupted: true,
+            gave_up: false,
+            manifest: Manifest::empty(),
+            dropped: 0,
+            withheld: 0,
+            converted: Done::default(),
+            convert_cached: 0,
+            convert_ms: 0,
+        }
+        .render_text();
+        assert!(text.contains("**这一趟部分完成。**"), "{text}");
+        assert!(!text.contains("中断"), "{text}");
     }
 }

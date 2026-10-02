@@ -256,7 +256,7 @@ pub(super) fn render(report: &HealthReport) -> String {
         );
     }
     let status = if report.interrupted {
-        "已中断（断点已保存，可续跑）"
+        "部分完成（断点已保存，可续跑）"
     } else {
         "已完成"
     };
@@ -346,13 +346,13 @@ pub(super) fn render(report: &HealthReport) -> String {
         if report.interrupted {
             let _ = writeln!(
                 out,
-                "⚠ 这次扫描被中断，没有走完整个库，因此「已删除」一栏没有判——中立库里的记录一条都没删。"
+                "⚠ 这次扫描部分完成，没有走完整个库，因此「已删除」一栏没有判——中立库里的记录一条都没删。"
             );
         }
         if report.resumed {
             let _ = writeln!(
                 out,
-                "注：这是续跑，以上只涵盖这一趟；中断之前扫到的那部分已经在中立库里了。"
+                "注：这是续跑，以上只涵盖这一趟；上一趟停下之前扫到的那部分已经在中立库里了。"
             );
         }
     }
@@ -797,7 +797,7 @@ pub(super) fn render(report: &HealthReport) -> String {
     if report.interrupted {
         let _ = writeln!(
             out,
-            "\n⚠ 这次扫描被中断，以上是到中断为止的结论。用同一个断点续跑可以接着扫。"
+            "\n⚠ 这次扫描部分完成，以上是到停下为止的结论。用同一个断点续跑可以接着扫。"
         );
     }
     out
@@ -1007,6 +1007,19 @@ fn render_conflicts(out: &mut String, report: &HealthReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 时刻写成年月日时分_闰日与月长不错() {
+        // 从命令行那份自己折的公历搬过来的几个钉子（挂单 `Q626`，票 `core-answers-once/08`）：
+        // 命令行印裁决记录的时刻如今也走这一处，闰年与月长两处最容易写错，各钉一个。
+        assert_eq!(human_time(0), "1970-01-01 00:00");
+        assert_eq!(human_time(86_399), "1970-01-01 23:59");
+        // 2024-02-29 是闰日：不认闰年的话这里会印成 3 月 1 日。
+        assert_eq!(human_time(1_709_164_800), "2024-02-29 00:00");
+        assert_eq!(human_time(1_709_251_199), "2024-02-29 23:59");
+        // 2025 不是闰年，同一个 3 月 1 日在它那儿早一天到。
+        assert_eq!(human_time(1_740_787_200), "2025-03-01 00:00");
+    }
 
     #[test]
     fn 字节数写成人能读的形态() {

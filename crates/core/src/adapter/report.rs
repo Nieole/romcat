@@ -383,6 +383,35 @@ impl MediaReport {
     pub fn placed(&self) -> u64 {
         self.linked + self.copied
     }
+
+    /// 开着**铺媒体**的那一趟导出走完之后那句回执：铺出去几份、怎么铺的、落点上本来就有几份。
+    ///
+    /// **界面工序段导出收场与命令行 `export --media` 都印它**，两个壳不各写一份（ADR-0024）——各写一份时
+    /// 已经差过一截：命令行那一份不说没铺成的那几份（挂单 `Q655`）。
+    ///
+    /// **没铺出去的也得说出口**：落点被别的东西占着的一律不覆盖、没铺成的留在报告里，它们不会出现在前端里
+    /// ——不说的话，人对着前端里缺的那几张封面查不出为什么。明细在 [`ExportReport::render_text`] 那一节里。
+    #[must_use]
+    pub fn receipt(&self) -> String {
+        let mut line = format!(
+            "媒体：铺出去 {} 份（硬链接 {}、复制 {}），落点上本来就有 {} 份。",
+            thousands(self.placed()),
+            thousands(self.linked),
+            thousands(self.copied),
+            thousands(self.already),
+        );
+        if !self.occupied.is_empty() {
+            let _ = write!(
+                line,
+                "{} 份的落点上有别的东西，没覆盖。",
+                thousands(self.occupied.len() as u64),
+            );
+        }
+        if !self.failures.is_empty() {
+            let _ = write!(line, "{} 份没铺成。", thousands(self.failures.len() as u64));
+        }
+        line
+    }
 }
 
 /// 一份**没铺出去**的媒体：落点被别的东西占着，或者没铺成。
@@ -608,6 +637,33 @@ mod tests {
         let rest = &text[start..];
         let end = rest.find("\n\n").expect("后面还有别的节");
         &rest[..end]
+    }
+
+    #[test]
+    fn 铺媒体那句回执说得出铺了几份_怎么铺的_没铺出去的几份也说() {
+        // 票 `core-answers-once/08`（挂单 `Q655`）：界面工序段导出收场与命令行 `export --media` 都印这一句。
+        // 字照界面那一份（票 `one-criterion-per-thing/09` 立的，那一份比命令行多说没铺成的几份）。
+        let 只铺了的 = MediaReport {
+            linked: 2,
+            copied: 1,
+            already: 4,
+            ..MediaReport::default()
+        };
+        assert_eq!(
+            只铺了的.receipt(),
+            "媒体：铺出去 3 份（硬链接 2、复制 1），落点上本来就有 4 份。"
+        );
+        let 一份 = || vec![NotLaid::default()];
+        let 有没铺出去的 = MediaReport {
+            occupied: 一份(),
+            failures: [一份(), 一份()].concat(),
+            ..只铺了的
+        };
+        assert_eq!(
+            有没铺出去的.receipt(),
+            "媒体：铺出去 3 份（硬链接 2、复制 1），落点上本来就有 4 份。\
+             1 份的落点上有别的东西，没覆盖。2 份没铺成。"
+        );
     }
 
     #[test]

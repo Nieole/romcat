@@ -1589,4 +1589,38 @@ mod tests {
         );
         assert_eq!(列全的.finding_rows(Finding::UnmappedDirs).len(), 20);
     }
+
+    #[test]
+    fn 停下来的那一趟报告里叫部分完成_不叫中断() {
+        // 票 `core-answers-once/08`（挂单 `Q574`）：词表**部分完成**——没走完就收了场、交出了产物，
+        // `_Avoid_` 里有「中断」。体检报告是命令行 `scan` 印的那一份，状态那一行、增量那一节、末尾那句提醒都照它说。
+        let agg = 收(&[("库/FC/魂斗罗.zip", Some(2048))]);
+        let text = HealthReport::build(
+            &agg,
+            &ReportMeta {
+                root_name: "库".to_string(),
+                root: "/lib".to_string(),
+                interrupted: true,
+                resumed: true,
+                jobs: 1,
+                samples_per_class: 0,
+                penetrated_containers: true,
+                scan: 2,
+                delta: Some(crate::catalog::ScanDelta {
+                    added: 1,
+                    ..crate::catalog::ScanDelta::default()
+                }),
+            },
+        )
+        .render_text();
+        assert!(
+            text.contains("部分完成（断点已保存，可续跑）"),
+            "状态那一行：{text}"
+        );
+        assert!(
+            text.contains("这次扫描部分完成，没有走完整个库"),
+            "增量那一节：{text}"
+        );
+        assert!(!text.contains("中断"), "{text}");
+    }
 }
