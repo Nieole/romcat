@@ -899,6 +899,11 @@ pub struct Layout {
     pub button_large_height: f32,
     /// 大号按钮左右留白。
     pub button_large_padding: f32,
+    /// 帮助字里那颗**行内按钮**的高（设计稿元数据那一面「按数据源优先级选用」那一句里的 `.btn.ghost.sm`，
+    /// 行内样式压成 20）：比小号按钮矮一截，摆进一行帮助字里不把那一行撑高。
+    pub help_button_height: f32,
+    /// 同一颗的左右留白（同一处行内样式的 `padding:0 4px`）。
+    pub help_button_padding: f32,
     /// 控件描边的宽：未激活、悬停、按下、展开四档一样宽。
     pub control_stroke: f32,
     /// 单行输入框的高：与默认那一档按钮等高。
@@ -917,6 +922,8 @@ pub struct Layout {
     pub tag_height: f32,
     /// 行内标签左右留白。
     pub tag_padding: f32,
+    /// 标签里那颗「×」的边长（设计稿作品详情状态块「合集」那一行，`.tag` 里那颗 `.iconbtn` 的行内样式）。
+    pub tag_close: f32,
     /// 表格勾选那一列的宽。
     pub check_column: f32,
     /// 表格定宽那五列：`[平台, 变体, 容量, 年份, 元数据]`。

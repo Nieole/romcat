@@ -853,7 +853,11 @@ impl App {
                 // **刮削面板里的优先级那一层刚保存了一份**：浏览屏手上缓着的那一份跟着换，
                 // 整屏重读——详情面板上写着的显示值得是导出会写进去的那个。读这份表的别的
                 // 几条路（刮削、整理标题、导出、同步）每一趟开头自己读，不用转告。
-                if let Some(priorities) = browse.scrape_mut().priority_mut().take_saved() {
+                // 作品详情页元数据那一面开的那一层（挂单 `Q925`）同一个办法。两层一帧里只开得了一层，
+                // 两份都取走，免得哪一份留到下一帧。
+                let 刮削那一层 = browse.scrape_mut().priority_mut().take_saved();
+                let 详情页那一层 = browse.priority_mut().take_saved();
+                if let Some(priorities) = 详情页那一层.or(刮削那一层) {
                     browse.set_priorities(priorities);
                     browse.refresh(site);
                 }

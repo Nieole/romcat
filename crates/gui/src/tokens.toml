@@ -380,6 +380,8 @@ button-small-height  = 24 # 小号按钮的高（设计稿 .btn.sm）：行内�
 button-small-padding = 9  # 小号按钮左右留白（设计稿 .btn.sm 的 padding:0 9px）
 button-large-height = 36  # 大号按钮的高（设计稿 .btn.lg）：开场空态那一颗「添加主库」
 button-large-padding = 18 # 大号按钮左右留白（设计稿 .btn.lg 的 padding:0 18px）
+help-button-height = 20   # 帮助字里那颗行内按钮的高（设计稿元数据那一面「按数据源优先级选用」那一句里 .btn.ghost.sm 的 height:20px）
+help-button-padding = 4   # 同一颗的左右留白（同一处的 padding:0 4px）
 control-stroke    = 1     # 控件（按钮、输入框、勾选框）描边的宽：四档一样宽，颜色取各档自己那一格（设计稿 .btn / .input 的 1px）
 input-height      = 28    # 单行输入框的高：与同一行默认那一档按钮等高（拿主意的人 2026-09-14 第三次裁；设计稿 .input 是 30，不照它）
 input-small-height = 24   # 小号单行输入框的高：与小号按钮等高（开场贴路径那一框，旁边是小号的「换过去」）
@@ -389,6 +391,7 @@ facet-chip-height = 24    # 分面标签的高（设计稿 .fchip）
 facet-chip-padding = 8    # 分面标签左右留白（设计稿 .fchip 的 padding:0 8px）
 tag-height        = 20    # 行内标签（「未关联作品」「首选变体」）的高（设计稿 .tag）
 tag-padding       = 7     # 行内标签左右留白（设计稿 .tag 的 padding:0 7px）
+tag-close         = 16    # 标签里那颗「×」的边长（设计稿作品详情状态块「合集」那一行 .tag 里 .iconbtn 的 width/height:16px）
 check-column      = 38    # 表格勾选那一列的宽（设计稿 .wtbl .ck）
 table-columns     = [56, 48, 86, 58, 108]  # 表格定宽那五列：平台、变体、容量、年份、元数据（设计稿表头的 style="width:…"）
 thumb-list-band   = 3     # 行首封面格顶上那一道平台色的高（设计稿 .lthumb i 的 inset 0 3px）

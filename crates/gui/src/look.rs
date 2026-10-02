@@ -2130,6 +2130,73 @@ pub fn small_ghost_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) 
     })
 }
 
+/// 帮助字里那颗**行内按钮**（设计稿元数据那一面「按数据源优先级选用」那一句里的 `.btn.ghost.sm`，行内样式压成
+/// `height:20px;padding:0 4px`）：幽灵按钮的颜色、小号按钮的字，高与左右留白取令牌 `help-button-height` /
+/// `help-button-padding`——比小号按钮矮，摆在一行帮助字当中不把那一行撑高。
+pub fn help_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let font = egui::FontId::proportional(font_size(ui.ctx(), tokens.font.size_small));
+    sized_buttons(
+        ui,
+        [
+            tokens.layout.help_button_height,
+            tokens.layout.help_button_padding,
+        ],
+        Some(font),
+        |ui| {
+            ui.scope(|ui| {
+                ghost_button(ui.visuals_mut());
+                ui.button(text)
+            })
+            .inner
+        },
+    )
+}
+
+/// 一颗**带展开标的小号幽灵按钮**（设计稿元数据那一面的「其他 N 个来源 ▾」，`.btn.ghost.sm`）：字后头跟一个
+/// 画出来的小三角，收着尖朝下（`▾`）、摊开尖朝上（`▴`）。
+///
+/// **三角是画的，不是字**：打包的字形子集里没有 `▾` `▴`，写成字屏上就是两个空方块（挂单 `Q1437`；
+/// 库屏面板的折叠标、库体检的展开标早就为同一个理由改成了画的）。三角宽取令牌 `fold-mark`，与那两处同一个大小；
+/// 颜色跟着按钮上的字走（幽灵按钮平时 `ink-2`、悬停 `ink`）。按钮上的字、无障碍那一层读到的名字都只是 `text`。
+pub fn small_ghost_fold_button(ui: &mut egui::Ui, text: &str, open: bool) -> egui::Response {
+    let 宽 = Tokens::builtin().layout.fold_mark;
+    let 标 = ui.id().with(("展开标", text));
+    small_buttons(ui, |ui| {
+        ui.scope(|ui| {
+            ghost_button(ui.visuals_mut());
+            let 摆好的 =
+                egui::Button::new((text, egui::Atom::custom(标, egui::vec2(宽, 宽)))).atom_ui(ui);
+            if let Some(格) = 摆好的.rect(标) {
+                let 色 = ui.style().interact(&摆好的.response).fg_stroke.color;
+                fold_triangle(ui.painter(), 格.center(), open, 色);
+            }
+            摆好的.response
+        })
+        .inner
+    })
+}
+
+/// 画一枚**展开标**：直角等腰的小三角，宽取令牌 `fold-mark`、高取宽的一半，中心落在 `center`。
+/// `open` 时尖朝上（`▴`，点一下收起），否则尖朝下（`▾`，点一下摊开）。
+pub fn fold_triangle(painter: &egui::Painter, center: egui::Pos2, open: bool, color: Color32) {
+    let 半 = Tokens::builtin().layout.fold_mark / 2.0;
+    let (底, 尖) = if open {
+        (半 / 2.0, -半 / 2.0)
+    } else {
+        (-半 / 2.0, 半 / 2.0)
+    };
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            center + egui::vec2(-半, 底),
+            center + egui::vec2(半, 底),
+            center + egui::vec2(0.0, 尖),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
 /// 虚线一段多长、两段之间空多少，是线宽的几倍：浏览器画 `dashed` 大约是这个比例。
 const DASH_RATIO: f32 = 3.0;
 

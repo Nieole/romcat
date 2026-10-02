@@ -383,8 +383,11 @@ pub fn 点一下(
 ///
 /// [`点一下`] 与 [`点正好`] 只差「怎么找到那个点」，按下去那几帧是同一套——
 /// 抄两遍的话，哪天这几帧要改（比如多等一帧），必然只改得动其中一份。
-fn 按在(
-    ctx: &egui::Context, 位置: egui::Pos2, mut 画一帧: impl FnMut(&mut egui::Ui)
+/// 点已经由调用方量好了的（同一段字屏上有好几处、要按的是其中某一处）直接调它。
+pub fn 按在(
+    ctx: &egui::Context,
+    位置: egui::Pos2,
+    mut 画一帧: impl FnMut(&mut egui::Ui),
 ) -> String {
     use romcat_gui::headless;
 

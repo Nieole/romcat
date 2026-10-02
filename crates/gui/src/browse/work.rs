@@ -39,6 +39,7 @@ use crate::font;
 use crate::look;
 use crate::media::{Clicked, Gallery, Look};
 use crate::table;
+use crate::task::Tasks;
 use crate::tokens::Tokens;
 
 /// 来源是**裁决**的值在屏上叫什么（设计稿 `srcBadge` 的「手动」，拿主意的人 2026-09-15 定照稿）。库里记的源名照旧是
@@ -51,6 +52,21 @@ const MANUAL_HOVER: &str = "手动修改：记为一条裁决，优先于所有�
 /// 显示标题是怎么选出来的，照标题集合挑它的那一处（`title::choose`）的回退链写（词表**显示标题**）：手动添加的（来源是裁决）压过一切，
 /// 其后是中文译名、官方英文名、日文原名，最后才轮到文件名。
 const DISPLAY_RULE: &str = "选取顺序：手动添加 > 中文译名 > 官方英文名 > 日文原名 > 文件名";
+
+/// 头上那颗收藏按钮没收藏时写的字（设计稿 `renderWD` 那一排的 `☆ 收藏`）。
+const FAVOR: &str = "☆ 收藏";
+
+/// 收藏了之后那颗按钮与头上那枚标签写的字（设计稿同一处的 `★ 已收藏`）。
+const FAVORED: &str = "★ 已收藏";
+
+/// 头上与状态块「合集」那一行上那颗按钮（设计稿 `data-dg="open:coll|one"`）。
+const JOIN_COLLECTION: &str = "加入合集…";
+
+/// 只钉得住路径的收藏，头上那枚标签与状态块「收藏」那一行悬停时说的话（设计稿那枚标签的 `title`）。
+const PATH_ONLY: &str = "变体没有内容判据，收藏只能按路径记录，文件改名或移动后会丢失";
+
+/// 钉在内容上的收藏，状态块「收藏」那一行悬停时说的话。
+const CONTENT_ANCHORED: &str = "按文件内容记录：删掉中立库重扫、改名、挪目录都还认得出。";
 
 /// 有没存的改动时想离开这一页（返回、上一个、下一个）说的那一句（设计稿 `guardDirty`）。
 const UNSAVED: &str = "有未保存的修改，请先保存或放弃";
@@ -129,8 +145,8 @@ pub struct Page {
     /// 几个平台之间「 / 」。
     platform_names: String,
     /// 这个作品**收没收藏**、收了的钉在哪种锚上（核心库 `collection::favorite_of`，它转调
-    /// `standing_of_work`——与底下那一行「合集」同一处判）：状态块里「收藏」那一行照它写，只读
-    /// （拿主意的人 2026-09-15 定）。没收藏是 `None`。
+    /// `standing_of_work`——与底下那一行「合集」同一处判）：状态块里「收藏」那一行、头上那枚「★ 已收藏」标签
+    /// 与那颗收藏按钮上的字都照它写（挂单 `Q961`）。没收藏是 `None`。
     favorite: Option<&'static str>,
     /// 这个作品在**哪几个合集**里，各钉在哪种锚上（核心库 `collection::standing_of_work`，
     /// 与上面「收藏」那一行**同一处判**）：状态块里「合集」那一行照它写，每一个后头一个
@@ -274,7 +290,7 @@ impl Screen {
     }
 
     /// 画作品详情页：顶上那一条，底下一块竖着滚的正文。
-    pub(super) fn page_ui(&mut self, ui: &mut egui::Ui, site: &mut Site) {
+    pub(super) fn page_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         // 点开的那一行没了（库底下变了），详情页没东西可摆：回到三栏。
         let Some(title) = self.work.as_ref().map(|work| self.work_title(work)) else {
             self.close_page();
@@ -307,8 +323,33 @@ impl Screen {
                     .auto_shrink(false)
                     .show(ui, |ui| {
                         页动作 = self.hero(ui);
-                        self.tabs_ui(ui);
+                        // **六个面那一排吸顶**（设计稿 `.tabs{position:sticky;top:0}`，挂单 `Q926`）：自然流里它就摆在
+                        // 头上那一块底下，先把那一格占着；滚过头上那一块之后它贴着可见区的顶画。
+                        let 占位 = ui
+                            .allocate_space(egui::vec2(
+                                ui.available_width(),
+                                tokens.layout.tab_height,
+                            ))
+                            .1;
+                        let 顶 = 占位.top().max(ui.clip_rect().top());
+                        let 那一排 =
+                            egui::Rect::from_min_size(egui::pos2(占位.left(), 顶), 占位.size());
+                        // **照旧先摆它、后摆正文**：键盘 Tab 走的、无障碍那一层读的，都是摆的先后——
+                        // 头上那一块、六个面、正文，与稿上的次序一样。
+                        let mut 那一层 = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(那一排)
+                                .layout(Layout::top_down(Align::Min)),
+                        );
+                        // 底色照稿（`.tabs` 的 `background:var(--win)`）。
+                        那一层.painter().rect_filled(那一排, 0.0, 底色);
+                        self.tabs_ui(&mut 那一层);
+                        // **正文只画在那一排底下**：剪掉被它盖着的那一截，滚上来的正文既不透过它、也按不着
+                        // （egui 照剪裁区判按没按着）——不然后摆的正文会把先摆的这一排盖住、抢走点按。
+                        let mut 正文可见 = ui.clip_rect();
+                        正文可见.min.y = 正文可见.min.y.max(那一排.bottom());
                         egui::Frame::NONE.inner_margin(留白).show(ui, |ui| {
+                            ui.set_clip_rect(正文可见);
                             ui.set_width(ui.available_width());
                             match self.page.as_ref().map(Page::tab) {
                                 Some(Tab::Overview) => 概览 = self.overview_tab(ui),
@@ -353,7 +394,7 @@ impl Screen {
             self.open_media(clicked);
         }
         if let Some(action) = 页动作.or(概览) {
-            self.apply_page(site, action);
+            self.apply_page(site, tasks, action);
         }
         match 保存条 {
             Some(SaveAction::Save) => self.save_meta(site),
@@ -1047,11 +1088,13 @@ impl Screen {
             return;
         };
         ui.spacing_mut().item_spacing.y = 0.0;
-        // 稿上这句后半截「高置信自动通过；中、低置信进入待确认队列」与 ADR-0002 对不上（中置信是通过但标记），只印前半截。
+        // 前半句照稿；后半句照识别那一侧真正的判据写（拿主意的人 2026-10-02 裁，挂单 `Q922` `Q1447`）：
+        // 进不进待确认队列看有没有自动通过（`triage::in_queue` 看的是 `accepted`），眼下只有高置信自动通过，
+        // 中置信与低置信一样进队列。ADR-0002 原话「中置信通过但标记」顶不动这件事，那一段补了修订（2026-10-02）。
         look::help(
             ui,
             "识别只看文件内容（哈希、文件头、序列号），文件名只在无法按内容匹配时作为参考。\
-             高置信自动通过；中、低置信进入待确认队列。",
+             高置信自动通过；中置信与低置信进入待确认队列，等人裁决。",
         );
         ui.add_space(look::step(2));
         for (at, variant) in work.variants.iter().enumerate() {
@@ -1121,18 +1164,31 @@ impl Screen {
             动作 = Some(MetaAction::BeginEdit);
         }
         ui.add_space(look::step(1));
-        look::help(
-            ui,
-            match work.anchor {
-                WorkAnchor::Work(_) => {
-                    "同一字段可以同时保存多个来源的值，按数据源优先级选用；手动修改优先于所有数据源。"
-                }
-                WorkAnchor::Loose(_) => {
-                    "同一字段可以同时保存多个来源的值，按数据源优先级选用；手动修改优先于所有数据源。\
-                     这个变体尚未关联作品，只能编辑变体级字段。"
-                }
-            },
-        );
+        // 一句帮助，当中「数据源优先级」是一颗行内按钮（设计稿 `metaTab` 那一句，挂单 `Q925`）：按下去打开
+        // 优先级那一层。字照旧是一句话，在一排里接着摆、放不下就折行。
+        let 打开优先级 = ui
+            .horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                // 这一行最矮按那颗行内按钮那么高，不按默认那一档撑高（稿上那颗按钮压成 20 正是为了不撑高这一行）。
+                ui.spacing_mut().interact_size.y = tokens.layout.help_button_height;
+                look::help(ui, "同一字段可以同时保存多个来源的值，按");
+                let 按了 = look::help_button(ui, "数据源优先级").clicked();
+                look::help(
+                    ui,
+                    match work.anchor {
+                        WorkAnchor::Work(_) => "选用；手动修改优先于所有数据源。",
+                        WorkAnchor::Loose(_) => {
+                            "选用；手动修改优先于所有数据源。\
+                             这个变体尚未关联作品，只能编辑变体级字段。"
+                        }
+                    },
+                );
+                按了
+            })
+            .inner;
+        if 打开优先级 {
+            动作 = Some(MetaAction::Priority);
+        }
         ui.add_space(tokens.space.meta_row_gap[0]);
         // 照稿的次序：显示标题、简介、类型、开发商、发行商、年份；没认出作品的连汉化组也在这一串里。
         let 次序 = [
@@ -1446,6 +1502,22 @@ impl Screen {
                                 if let Some(mark) = page.chinese {
                                     table::tag(ui, mark.label());
                                 }
+                                // **收藏了就多一枚标签**（设计稿头上那一排的 `★ 已收藏`，挂单 `Q961`）：只钉得住路径的那一档
+                                // 照稿换留神那一对颜色、接「只按路径记录」——与状态块「收藏」那一行同一处判（`standing_of_work`）。
+                                match page.favorite {
+                                    None => {}
+                                    Some(romcat_core::verdict::ANCHOR_CONTENT) => {
+                                        table::tag(ui, FAVORED);
+                                    }
+                                    Some(_) => {
+                                        look::plain_chip(
+                                            ui,
+                                            look::Tone::Caution,
+                                            &format!("{FAVORED} · 只按路径记录"),
+                                        )
+                                        .on_hover_text(PATH_ONLY);
+                                    }
+                                }
                                 table::tag(ui, &format!("元数据：{}", row.meta_label()));
                             });
                         }
@@ -1466,8 +1538,21 @@ impl Screen {
                                         "只对这一个作品取元数据与媒体。按下去之前看得见要发多少请求、大概多久。",
                                     )
                                     .clicked();
-                                // **「合并…」照稿摆在这儿**（稿上夹在「加入合集…」与
-                                // 「在文件系统中打开」之间；收藏与合集那两颗归票 13，位置留着）。
+                                // **收藏与加入合集照稿夹在「刮削此作品」与「合并…」之间**（挂单 `Q961` `Q1108`）：
+                                // 收没收藏由核心库答（`standing_of_work`），按下去走的是右键菜单与 `F` 那一条路。
+                                let 收藏 = ui
+                                    .button(if page.favorite.is_some() { FAVORED } else { FAVOR })
+                                    .on_hover_text(if page.favorite.is_some() {
+                                        "再按一下取消收藏。作品本身一个字不动。"
+                                    } else {
+                                        "放进收藏，落沉淀库，删掉中立库重扫也还在。认得出内容的变体按内容记录，改名、挪目录都还认得出；\
+                                         拿不到内容判据的只能按路径记录，改名或挪走就丢了。"
+                                    })
+                                    .clicked();
+                                let 加入合集 = ui
+                                    .button(JOIN_COLLECTION)
+                                    .on_hover_text("把这一部作品加进一个合集，或者用它新建一个。")
+                                    .clicked();
                                 let 合并 = ui
                                     .button(super::merge::MERGE_ONE)
                                     .on_hover_text(
@@ -1490,6 +1575,10 @@ impl Screen {
                                     Some(PageAction::EditMeta)
                                 } else if 刮削 {
                                     Some(PageAction::Scrape)
+                                } else if 收藏 {
+                                    Some(PageAction::ToggleFavorite)
+                                } else if 加入合集 {
+                                    Some(PageAction::JoinCollection)
                                 } else if 合并 {
                                     Some(PageAction::Merge)
                                 } else if 打开 {
@@ -1772,8 +1861,16 @@ impl Screen {
     }
 
     /// 办头上那一块与概览那一面上按下去的那一下。
-    fn apply_page(&mut self, site: &mut Site, action: PageAction) {
+    fn apply_page(&mut self, site: &mut Site, tasks: &mut Tasks, action: PageAction) {
         match action {
+            // **与右键菜单、`F` 同一条路**（`toggle_favorite_of`）：排一趟活，跑完认领才落库，
+            // 认领那一步整屏重读（`settle` → `refresh`），这一页那两格跟着换。
+            PageAction::ToggleFavorite => {
+                if let Some(anchor) = self.work.as_ref().map(|work| work.anchor.clone()) {
+                    self.toggle_favorite_of(site, tasks, &anchor);
+                }
+            }
+            PageAction::JoinCollection => self.open_join_here(site),
             PageAction::EditMeta => self.begin_meta_edit(),
             // **就地移出**：范围是这个作品底下那几个变体（成员关系挂在变体上）。
             //
@@ -1913,6 +2010,9 @@ impl Screen {
     fn apply_meta(&mut self, site: &mut Site, action: MetaAction) {
         match action {
             MetaAction::BeginEdit => self.begin_meta_edit(),
+            // **照稿停在简介那一栏**（`open:prio|简介`，挂单 `Q925` 那句「停在对应字段」）：这句帮助说的是所有字段，
+            // 稿上给的那一栏是简介。挂单 `Q1448` 记着另一种读法。
+            MetaAction::Priority => self.priority.open_at(Field::Description),
             MetaAction::Toggle(subject, field) => {
                 if let Some(page) = self.page.as_mut() {
                     let key = (subject, field);
@@ -2636,6 +2736,8 @@ fn member_name(variant_key: &str, member_key: &str) -> String {
 enum MetaAction {
     /// 「编辑」：进编辑态。
     BeginEdit,
+    /// 帮助里那颗「数据源优先级」：打开优先级那一层，停在简介那一栏（设计稿 `open:prio|简介`）。
+    Priority,
     /// 「其他 N 个来源」摊开或收起：哪个锚点上的哪一格。
     Toggle(String, Field),
     /// 「使用这个值」：把那个源说的那一句写成这一格的裁决。
@@ -2974,8 +3076,9 @@ fn field_value(
             look::help(ui, "由标题集合按规则选出");
         }
         if 别家数 > 0 {
-            let 字 = format!("其他 {} 个来源 {}", 别家数, if open { "▴" } else { "▾" });
-            if ghost_small(ui, &字).clicked() {
+            // 展开标是画的三角（打包字体里没有 `▾` `▴`，挂单 `Q1437`）。
+            let 字 = format!("其他 {别家数} 个来源");
+            if look::small_ghost_fold_button(ui, &字, open).clicked() {
                 动作 = Some(MetaAction::Toggle(subject.to_owned(), one.field));
             }
         }
@@ -3652,6 +3755,10 @@ enum PageAction {
     /// 状态块「合集」那一行上按的那个「×」：把这个作品从这个合集里**就地移出**
     /// （票 `gui-looks-like-the-design/13`）。
     LeaveCollection(String),
+    /// 头上那颗「☆ 收藏」／「★ 已收藏」：收没收藏反过来（挂单 `Q961`）。
+    ToggleFavorite,
+    /// 头上与状态块「合集」那一行上的「加入合集…」：开浏览屏现成那一层，只加这一部（设计稿 `coll|one`）。
+    JoinCollection,
 }
 
 /// 变体卡片头一行右头按下去的是哪一颗。
@@ -3889,13 +3996,14 @@ fn description_card(ui: &mut egui::Ui, page: &Page) -> Option<PageAction> {
 /// **稿上夹在「收藏」与「子库」中间的那一行「合集」就在这儿**（票 13）：列出这部作品进了哪几个
 /// 自建合集，每一个后头一颗「×」就地移出。**收藏不在这一行里**——它是那个默认的一组，
 /// 上头「收藏」那一行已经说了它，两处都写就成了同一件事说两遍。
-/// 稿上这一行末尾还有一颗「加入合集…」，眼下没摆（票 13 没做，挂单 `Q1108`）。
+/// 这一行末尾照稿一颗「加入合集…」（挂单 `Q1108`），与头上那一颗开同一层。
 ///
 /// 「子库」与「导出」两行的判断**一个字都不在这儿**（票 `gui-looks-like-the-design/34`）：
 /// 落在哪几个子库里由求值那一处答（`sublibrary::holding`），上次几点写出去的由导出那一趟
 /// 逐条记下的账答（`Catalog::entry_exported`）。界面只把它们印出来。
 fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<PageAction> {
-    let mut 移出 = None;
+    // 「合集」那一行上按下去的那一下：「×」移出，或者行尾「加入合集…」。
+    let mut 按了 = None;
     let tokens = Tokens::builtin();
     let 字号 = look::font_size(ui.ctx(), tokens.font.size_small_plus);
     let 强 = ui.visuals().strong_text_color();
@@ -3926,6 +4034,10 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<Page
         // 收藏：只读地写一行（设计稿状态块「收藏」那一格）；收没收藏、钉在哪种锚上由核心库答
         // （`collection::standing_of_work`——它一趟把收藏与自建合集的锚一起答了，
         // 底下「合集」那一行读的是同一份，不会对同一批变体报出两种锚）。
+        //
+        // **那一行只写结论，为什么挪进悬停**（拿主意的人 2026-10-02 裁）：从前「只按路径记录」后头接一句
+        // 「：变体没有内容判据，文件改名或移动后会丢失」，这一栏窄，一折行下一行就以「，」打头（挂单 `Q1449`）。
+        // 留神那一对颜色照旧，与头上那枚收藏标签、合集标签同一个说法。
         ui.add_space(tokens.space.info_list_gap[0]);
         info_row(ui, "收藏", |ui| {
             let 留神 = look::tone_colors(look::Tone::Caution, ui.visuals()).0;
@@ -3937,16 +4049,25 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<Page
                     egui::TextFormat::simple(egui::FontId::proportional(字号), color),
                 );
             };
-            match page.favorite {
-                None => 段("未收藏", 强),
-                Some(romcat_core::verdict::ANCHOR_CONTENT) => 段("已收藏 · 按文件内容记录", 强),
+            let 为什么 = match page.favorite {
+                None => {
+                    段("未收藏", 强);
+                    None
+                }
+                Some(romcat_core::verdict::ANCHOR_CONTENT) => {
+                    段("已收藏 · 按文件内容记录", 强);
+                    Some(CONTENT_ANCHORED)
+                }
                 Some(_) => {
                     段("已收藏 · ", 强);
                     段("只按路径记录", 留神);
-                    段("：变体没有内容判据，文件改名或移动后会丢失", 强);
+                    Some(PATH_ONLY)
                 }
+            };
+            let 那一行 = ui.add(egui::Label::new(job).wrap());
+            if let Some(为什么) = 为什么 {
+                那一行.on_hover_text(为什么);
             }
-            ui.add(egui::Label::new(job).wrap());
         });
         // **合集：稿上夹在「收藏」与「子库」中间那一行**（票 `gui-looks-like-the-design/13`）。
         //
@@ -3957,40 +4078,21 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<Page
         // 锚取弱的那一头，与上面「收藏」那一行**同一处判**（`standing_of_work`）。
         ui.add_space(tokens.space.info_list_gap[0]);
         info_row(ui, "合集", |ui| {
-            if page.collections.is_empty() {
-                ui.label(egui::RichText::new("—").size(字号).color(强));
-                return;
-            }
             ui.horizontal_wrapped(|ui| {
+                // 这一行最矮按小号按钮那么高（行尾那颗「加入合集…」），不按默认那一档撑高。
+                ui.spacing_mut().interact_size.y = tokens.layout.button_small_height;
+                if page.collections.is_empty() {
+                    ui.label(egui::RichText::new("—").size(字号).color(强));
+                }
                 for (name, anchor) in &page.collections {
                     let 只按路径 = *anchor == romcat_core::verdict::ANCHOR_PATH;
-                    let 话 = if 只按路径 {
-                        format!("{name} · 只按路径记录")
-                    } else {
-                        name.clone()
-                    };
-                    let 色 = if 只按路径 {
-                        look::tone_colors(look::Tone::Caution, ui.visuals()).0
-                    } else {
-                        强
-                    };
-                    ui.label(egui::RichText::new(话).size(字号).color(色))
-                        .on_hover_text(if 只按路径 {
-                            "这个合集里有变体拿不到内容判据（无判据那一档），\
-                             成员关系只能按文件路径记下来——文件改名或挪到别的目录之后，\
-                             它会从这个合集里消失。识别出作品之后自动改成按内容记录。"
-                        } else {
-                            "成员关系钉在内容上：删掉中立库重扫、改名、挪目录都还认得出。"
-                        });
-                    if look::small_buttons(ui, |ui| {
-                        ui.button("×")
-                            .on_hover_text(format!(
-                                "把这个作品从「{name}」里移出。作品本身不受影响。"
-                            ))
-                            .clicked()
-                    }) {
-                        移出 = Some(name.clone());
+                    if collection_tag(ui, name, 只按路径) {
+                        按了 = Some(PageAction::LeaveCollection(name.clone()));
                     }
+                }
+                // 行尾那颗「加入合集…」（设计稿 `ovTab` 那一行的 `.btn.ghost.sm`，挂单 `Q1108`）：与头上那一颗同一件事。
+                if ghost_small(ui, JOIN_COLLECTION).clicked() {
+                    按了 = Some(PageAction::JoinCollection);
                 }
             });
         });
@@ -4019,7 +4121,83 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<Page
             ui.add(egui::Label::new(egui::RichText::new(话).size(字号).color(强)).wrap());
         });
     });
-    移出.map(PageAction::LeaveCollection)
+    按了
+}
+
+/// 状态块「合集」那一行里的**一个合集**（设计稿 `ovTab` 的 `cl`）：一枚行内标签（`.tag`），名字后头一颗
+/// `tag-close` 见方的「×」就地移出（`.iconbtn`，11 号字、平时 `ink-3`，悬停凹陷底、`ink` 字、一圈分隔线）。按了「×」交回 `true`。
+///
+/// **只钉得住路径的那一档照实标出来**（票 `gui-looks-like-the-design/13` 第 4 条）：换留神那一对颜色、名字后头接
+/// 「只按路径记录」——与头上那枚只按路径记录的「★ 已收藏」同一对颜色、同一句话。
+fn collection_tag(ui: &mut egui::Ui, name: &str, path_only: bool) -> bool {
+    let tokens = Tokens::builtin();
+    let palette = look::palette(ui);
+    let (字色, 底色) = if path_only {
+        look::tone_colors(look::Tone::Caution, ui.visuals())
+    } else {
+        (palette.ink_2, palette.sunken)
+    };
+    // 名字后头那个空格就是稿上 `${name} <button>` 当中那一个：名字与「×」之间隔开的那一点。
+    let 字 = if path_only {
+        format!("{name} · 只按路径记录 ")
+    } else {
+        format!("{name} ")
+    };
+    let galley = ui.painter().layout_no_wrap(
+        字,
+        egui::FontId::proportional(look::font_size(ui.ctx(), tokens.font.size_caption_plus)),
+        字色,
+    );
+    let [边, 叉边] = [tokens.layout.tag_padding, tokens.layout.tag_close];
+    let (rect, 标签) = ui.allocate_exact_size(
+        egui::vec2(边 + galley.size().x + 叉边 + 边, tokens.layout.tag_height),
+        egui::Sense::hover(),
+    );
+    标签.on_hover_text(if path_only {
+        "这个合集里有变体拿不到内容判据（无判据那一档），\
+         成员关系只能按文件路径记下来——文件改名或挪到别的目录之后，\
+         它会从这个合集里消失。识别出作品之后自动改成按内容记录。"
+    } else {
+        "成员关系钉在内容上：删掉中立库重扫、改名、挪目录都还认得出。"
+    });
+    let painter = ui.painter();
+    painter.rect_filled(rect, tokens.radius.small, 底色);
+    painter.galley(
+        egui::pos2(rect.left() + 边, rect.center().y - galley.size().y / 2.0),
+        galley,
+        字色,
+    );
+    let 叉 = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 边 - 叉边 / 2.0, rect.center().y),
+        egui::vec2(叉边, 叉边),
+    );
+    let response = ui.interact(叉, ui.id().with(("移出合集", name)), egui::Sense::click());
+    let 叉色 = if response.hovered() || response.has_focus() {
+        ui.painter().rect(
+            叉,
+            tokens.radius.small,
+            palette.sunken,
+            egui::Stroke::new(tokens.layout.control_stroke, palette.line),
+            egui::StrokeKind::Inside,
+        );
+        palette.ink
+    } else {
+        palette.ink_3
+    };
+    ui.painter().text(
+        叉.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        egui::FontId::proportional(look::font_size(ui.ctx(), tokens.font.size_caption)),
+        叉色,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("从「{name}」移出"))
+    });
+    look::focus_ring(ui.ctx(), ui.clip_rect(), &response);
+    response
+        .on_hover_text(format!("把这个作品从「{name}」里移出。作品本身不受影响。"))
+        .clicked()
 }
 
 /// 媒体那一格底下那行小字：「来源 · 尺寸 · 时长 · 大小」（设计稿 `mediaOf` 的 `src · dim · size`）。
