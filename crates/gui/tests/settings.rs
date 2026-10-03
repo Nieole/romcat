@@ -55,13 +55,22 @@ const 工作目录字样: &str = "~/.local/share/romcat";
 /// （`catalog.file()` 是 `None` 那一支），改了名屏上也不会变——那验的就不是改名了。
 fn 开在设置屏上(tag: &str) -> (App, TempDir) {
     let 工作区 = temp_dir(tag);
-    let 库文件 = 工作区.path().join("catalog").join("主库.sqlite3");
-    drop(romcat_core::catalog::Catalog::create(&库文件, "主库").expect("建得出中立库"));
-    let site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");
+    drop(romcat_core::catalog::Catalog::create(&库文件(&工作区), "主库").expect("建得出中立库"));
+    (开一扇窗(&工作区), 工作区)
+}
+
+/// 那份库文件在哪。
+fn 库文件(工作区: &TempDir) -> std::path::PathBuf {
+    工作区.path().join("catalog").join("主库.sqlite3")
+}
+
+/// 在这个工作目录里那份**已经建好**的库上开一扇窗，停在设置屏。关窗再开走的也是它。
+fn 开一扇窗(工作区: &TempDir) -> App {
+    let site = Site::open_file(工作区.path(), &库文件(工作区), None).expect("开得出现场");
     let mut app = App::new(site, 工作区.path().to_path_buf());
     app.show_view(View::Settings);
     app.set_workspace_label(工作目录字样);
-    (app, 工作区)
+    app
 }
 
 /// 这一帧画出来的每一段字与它的外框。
@@ -587,4 +596,114 @@ fn 导出目录不整条印绝对路径() {
         "导出目录整条印了绝对路径：\n{屏上}",
     );
     assert!(屏上.contains("Pegasus"), "没印设过的那个前端格式：\n{屏上}");
+}
+
+// ——— ScreenScraper 账号：设置屏填一次，存进工作目录（票 `verdict-store-and-sync/15`，收挂单 `Q1063`）———
+//
+// 账号全是编的：真账号不许进夹具、不许进日志。**这台机器上真给没给环境变量不许左右这几条**
+// ——环境变量优先，维护者的机器上可能真配着一套——所以设置屏一律 `ignore_env`。
+
+/// 往正好写着 `提示` 的那个空框里打一段字：先点它拿到焦点，再发一条文本事件。
+fn 往框里打字(ctx: &egui::Context, app: &mut App, 提示: &str, 字: &str) {
+    shared::点正好(ctx, 提示, |ui| app.ui(ui));
+    let mut input = headless::input();
+    input.events.push(egui::Event::Text(字.to_owned()));
+    headless::frame(ctx, input, |ui| app.ui(ui));
+}
+
+/// 翻到数据源那一节，并且不看这台机器的环境变量。
+fn 停在数据源(app: &mut App) {
+    app.settings_mut().show_section(Section::Sources);
+    app.settings_mut().ignore_env();
+}
+
+#[test]
+fn 设置屏填好账号_关窗再开还在_密码格不明文回显() {
+    let (mut app, 工作区) = 开在设置屏上("设置屏-账号");
+    停在数据源(&mut app);
+    let ctx = headless::context();
+    let 屏上 = 跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(屏上.contains("账号没给"), "一套都没存时该说没给：\n{屏上}");
+
+    let [开发者标识, 开发者密码, 用户名, 密码] = settings::ACCOUNT_FIELDS.map(|格| 格.hint);
+    assert_eq!(
+        settings::ACCOUNT_FIELDS.map(|格| 格.secret),
+        [false, true, false, true],
+        "两格密码该是密码格"
+    );
+    往框里打字(&ctx, &mut app, 开发者标识, "编的开发者");
+    往框里打字(&ctx, &mut app, 开发者密码, "编的开发者密码");
+    往框里打字(&ctx, &mut app, 用户名, "编的用户");
+    往框里打字(&ctx, &mut app, 密码, "编的用户密码");
+    let 屏上 = 跑一帧(&ctx, |ui| app.ui(ui));
+    for 密码 in ["编的开发者密码", "编的用户密码"] {
+        assert!(
+            !屏上.contains(密码),
+            "密码格把「{密码}」明文画出来了：\n{屏上}"
+        );
+    }
+
+    let 屏上 = shared::点正好(&ctx, settings::SAVE_ACCOUNT, |ui| app.ui(ui));
+    assert!(屏上.contains("账号已给"), "存好之后该说给了：\n{屏上}");
+    // 存进去的是核心库那一处读得回的那一套——命令行刮削读的就是它。
+    assert_eq!(
+        romcat_core::scrape::online::saved_account(工作区.path()).expect("读得动"),
+        Some(romcat_core::scrape::online::Account {
+            dev_id: "编的开发者".to_owned(),
+            dev_password: "编的开发者密码".to_owned(),
+            user: "编的用户".to_owned(),
+            user_password: "编的用户密码".to_owned(),
+        }),
+    );
+    drop(app);
+
+    // 关窗再开：几格照旧摆着那一套，两格密码照旧不明文。
+    let mut app = 开一扇窗(&工作区);
+    停在数据源(&mut app);
+    let ctx = headless::context();
+    跑一帧(&ctx, |ui| app.ui(ui));
+    let 屏上 = 跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(屏上.contains("账号已给"), "关窗再开不该忘了：\n{屏上}");
+    for 还在 in ["编的开发者", "编的用户"] {
+        assert!(
+            屏上.lines().any(|一行| 一行 == 还在),
+            "关窗再开「{还在}」那一格空了：\n{屏上}"
+        );
+    }
+    for 密码 in ["编的开发者密码", "编的用户密码"] {
+        assert!(
+            !屏上.contains(密码),
+            "关窗再开密码格把「{密码}」明文画出来了：\n{屏上}"
+        );
+    }
+}
+
+#[test]
+fn 开发者那两样缺一样时存不进去_说清为什么() {
+    let (mut app, 工作区) = 开在设置屏上("设置屏-账号缺一样");
+    停在数据源(&mut app);
+    let ctx = headless::context();
+    跑一帧(&ctx, |ui| app.ui(ui));
+    往框里打字(&ctx, &mut app, settings::ACCOUNT_FIELDS[2].hint, "编的用户");
+    let 屏上 = shared::点正好(&ctx, settings::SAVE_ACCOUNT, |ui| app.ui(ui));
+    assert!(
+        屏上.contains("403"),
+        "存不进去要说为什么（无 devid 直接 403）：\n{屏上}"
+    );
+    assert_eq!(
+        romcat_core::scrape::online::saved_account(工作区.path()).expect("读得动"),
+        None,
+    );
+}
+
+/// 服务端那两条配额**刮削面板从来没画过**（`gaps-scrape-dialog.md` 文末「顺带看见」）：屏上不许再说它写在那儿。
+#[test]
+fn 配额那句话说实话_不说写在刮削面板上() {
+    let (mut app, _工作区) = 开在设置屏上("设置屏-配额实话");
+    停在数据源(&mut app);
+    let ctx = headless::context();
+    跑一帧(&ctx, |ui| app.ui(ui));
+    let 屏上 = 跑一帧(&ctx, |ui| app.ui(ui));
+    assert!(!屏上.contains("写在刮削面板上"), "{屏上}");
+    assert!(屏上.contains("界面上眼下哪儿都看不到"), "{屏上}");
 }

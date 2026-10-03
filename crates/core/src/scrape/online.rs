@@ -31,8 +31,9 @@
 //! ## 凭据只有一套，而且不由这个模块去申请
 //!
 //! ScreenScraper 的 `devid` 要在论坛人工审批（调研 §1.1，实测无 devid 直接 403）。
-//! [`Credentials`] 只从环境变量读**一套**，读不到就整档不启动——**绝不匿名试探**，
-//! 也**没有任何一处能装第二套凭据**：轮换是被永久封禁的那条路，代码里不留这个口子。
+//! [`Credentials`] 只从**一套账号**拼出来（[`find_account`]：环境变量优先，其次工作目录里存着的那一套，
+//! 见 [`account`] 模块），读不到就整档不启动——**绝不匿名试探**，也**没有任何一处能装第二套凭据**：
+//! 那份文件的形状只装得下一套，两处也不拼；轮换是被永久封禁的那条路，代码里不留这个口子。
 //!
 //! ## 服务端说的数字比我们猜的准
 //!
@@ -54,6 +55,12 @@ use crate::scan::CancelToken;
 use super::{
     AnchorKind, Basis, Failure, Field, Harvest, Locality, MediaClaim, MediaFrom, MediaKind, Source,
     Subject,
+};
+
+pub mod account;
+pub use account::{
+    Account, AccountError, AccountFrom, DEVID_NOTE, Saved, WHO_CAN_READ, find_account,
+    find_account_with, has_account, save_account, saved_account,
 };
 
 /// 这一发问的是什么。
@@ -84,7 +91,7 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(1_000);
 /// 一趟最多发多少个在线请求。
 ///
 /// 这是**我们自己设的保守闸**，不是服务端的配额（那个从响应里读，见 [`Server`]）。
-/// 默认往小里设：真库 9,226 个作品锚点，第一次就放开跑等于拿账号做实验。
+/// 默认往小里设：真库九千多个作品锚点（见台账 `docs/library-facts.md`），第一次就放开跑等于拿账号做实验。
 pub const DEFAULT_BUDGET: u64 = 200;
 
 /// 429（线程数超了）最多退避几次。**退避是给 429 的，配额超限一次都不退。**
@@ -281,6 +288,9 @@ impl Default for Limits {
 ///
 /// `devid` / `devpassword` 是**开发者**凭据，要在论坛人工申请（调研 §1.1）；
 /// `ssid` / `sspassword` 是**终端用户**的站点账号，可以不给。
+///
+/// 它由那**一套账号**拼出来（[`Account::credentials`]，账号从哪儿来见 [`find_account`]），
+/// 不另有读环境变量或读文件的入口。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credentials {
     /// 开发者标识。
@@ -295,7 +305,7 @@ pub struct Credentials {
     pub user_password: Option<String>,
 }
 
-/// 凭据从哪几个环境变量读。
+/// 账号从哪几个环境变量读（[`find_account`]：**它们优先**，其次工作目录里存着的那一套）。
 pub const ENV_KEYS: [&str; 4] = [
     "SCREENSCRAPER_DEVID",
     "SCREENSCRAPER_DEVPASSWORD",
@@ -304,22 +314,6 @@ pub const ENV_KEYS: [&str; 4] = [
 ];
 
 impl Credentials {
-    /// 从环境变量读那**一套**凭据；开发者那两样缺一样就返回 `None`。
-    ///
-    /// **不提供「读第二套」的办法**，这是有意的：多账号轮换绕配额的处置是永久封禁
-    /// （调研 §1.1），代码里不留这个口子比写一句注释管用。
-    #[must_use]
-    pub fn from_env() -> Option<Self> {
-        let get = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
-        Some(Self {
-            dev_id: get(ENV_KEYS[0])?,
-            dev_password: get(ENV_KEYS[1])?,
-            soft_name: concat!("romcat", env!("CARGO_PKG_VERSION")).to_string(),
-            user: get(ENV_KEYS[2]),
-            user_password: get(ENV_KEYS[3]),
-        })
-    }
-
     /// 拿一份**判据**造一条条目查询的 URL。
     ///
     /// 造 URL 归凭据管，是因为这条 URL 一半是身份、一半是判据，而身份只在这里。
@@ -684,7 +678,7 @@ impl Source for ScreenScraper<'_> {
 
     fn probe(&self, subject: &Subject<'_>) -> Option<String> {
         // **只对已确认的条目发请求。** 没有自动通过的候选就没有可发的哈希，而拿文件名
-        // 去碰运气正是 431 惩罚的那件事——真库里那是 16,420 个变体。
+        // 去碰运气正是 431 惩罚的那件事——真库里那是一万六千多个变体（见台账 `docs/library-facts.md`）。
         if subject.kind != AnchorKind::Work || !subject.confirmed {
             return None;
         }
@@ -1023,7 +1017,7 @@ mod tests {
         };
         assert!(source.probe(&subject).is_some(), "已确认的该发");
 
-        // **未识别的一个字节都不发**：真库里那是 16,420 个变体，
+        // **未识别的一个字节都不发**：真库里那是一万六千多个变体（见台账 `docs/library-facts.md`），
         // 每一个在 ScreenScraper 眼里都是一次「未识别 ROM」。
         subject.confirmed = false;
         assert!(source.probe(&subject).is_none());

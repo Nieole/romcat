@@ -13,6 +13,7 @@
 //! | 换工作目录收不收 | `Roots::refuse_writing_into`（主库只读，ADR-0004） |
 //! | 数据源各多少条、上次什么时候取的 | `sources::survey` |
 //! | ffmpeg 在不在、是哪一版 | `scrape::preview::probe` |
+//! | ScreenScraper 有没有账号、用的是哪一套、存进去收不收 | `scrape::online::find_account` / `saved_account` / `save_account` |
 //! | 认得哪几种前端格式 | `adapter::names` |
 //! | 这个库导出到哪、导出成什么 | `Catalog::export_setup` |
 //! | 库文件结构版本 | `catalog::SCHEMA_VERSION` |
@@ -24,8 +25,9 @@
 //! 设计稿在这一屏上画了六颗开关（每周自动检查更新、启动时直接打开上次那份、刮削下载媒体、
 //! 导出时铺媒体……）。**这几样今天一个都没有落点**：数据源没有「自动检查」这条路，刮削面板
 //! 那几个旋钮每次开窗从头起、一个都不落盘（挂单 `Q652` 明写导出铺媒体那颗「只记在那一段上、
-//! 不记进库」），ScreenScraper 的账号只认启动前给的环境变量、配额只在一趟联网刮削跑着的时候
-//! 报得出。
+//! 不记进库」）。ScreenScraper 那一格稿上还画着服务端报的两条配额与「测试连接」：配额只在一趟
+//! 联网刮削跑着的时候由服务端报回来，界面上眼下哪儿都不画；测一次连接扣不扣配额另议。
+//! 账号那几格接上了（票 `verdict-store-and-sync/15`）：存进工作目录，命令行读的也是那一份。
 //!
 //! 画一颗拨得动、关了窗就忘的开关，等于在屏上写一件做不到的事。所以这几格**摆的是一句实话
 //! 加一个去处**——今天是怎么回事、要办这件事该上哪儿。挂单 `Q1062`–`Q1066` 记着每一格差的是
@@ -42,6 +44,7 @@
 use std::path::PathBuf;
 
 use romcat_core::report::thousands;
+use romcat_core::scrape::online::{self, Account, AccountFrom, Saved};
 use romcat_core::scrape::preview;
 use romcat_core::site::Site;
 use romcat_core::sources::{self, SourceState, SourceStatus};
@@ -175,6 +178,54 @@ pub const REPROBE: &str = "重新检测";
 /// 「撞上外部修改」那一格的值：这一项**不给自动覆盖的开关**。
 pub const EXTERNAL_EDIT: &str = "总是停下，逐份列出";
 
+/// ScreenScraper 那一格里的一个输入框。
+#[derive(Debug, Clone, Copy)]
+pub struct AccountField {
+    /// 屏上的名。
+    pub label: &'static str,
+    /// 框里还没字时的提示：带着 ScreenScraper 自己那个参数名，照着它论坛上的说明填得对得上。
+    pub hint: &'static str,
+    /// 是不是密码：是的话**不明文回显**。
+    pub secret: bool,
+}
+
+/// ScreenScraper 那四格，次序与 `online::Account` 那四样一一对应：开发者那两样一行、终端用户那两样一行。
+pub const ACCOUNT_FIELDS: [AccountField; 4] = [
+    AccountField {
+        label: "开发者标识",
+        hint: "论坛申请到的 devid",
+        secret: false,
+    },
+    AccountField {
+        label: "开发者密码",
+        hint: "devpassword",
+        secret: true,
+    },
+    AccountField {
+        label: "用户名",
+        hint: "ssid，可以不填",
+        secret: false,
+    },
+    AccountField {
+        label: "密码",
+        hint: "sspassword，可以不填",
+        secret: true,
+    },
+];
+/// 存账号那颗按钮上的字。
+pub const SAVE_ACCOUNT: &str = "保存";
+
+/// ScreenScraper 有没有账号，这一趟问出来是什么（核心库 `online::find_account` 那一处答的）。
+#[derive(Debug, Clone)]
+enum 账号状况 {
+    /// 环境变量里没有一整套，工作目录里也没存。
+    没给,
+    /// 有一套：用的是从哪儿读到的那一套（环境变量优先）。
+    给了(AccountFrom),
+    /// 存着的那一份读不动、读不懂：核心库说的那句为什么。
+    读不动(String),
+}
+
 /// 设置那一屏。
 pub struct Screen {
     /// 工作目录：数据源、优先级表、媒体池都在它下面。
@@ -200,8 +251,14 @@ pub struct Screen {
     /// **收着核心库那个类型、不当场折成一句话**：「没装」与「装了但跑不起来」是两档
     /// （`Missing::is_no_ffmpeg`），屏上要分开说，而分那一刀是核心库的事（ADR-0024）。
     ffmpeg: Option<Result<String, preview::Missing>>,
-    /// ScreenScraper 的账号给了没有。`None` 是这一趟还没问过。
-    account: Option<bool>,
+    /// ScreenScraper 有没有账号、用的是哪一套。`None` 是这一趟还没问过——**不每帧问**，它要读一次文件。
+    account: Option<账号状况>,
+    /// 那四格里摆着的那一套。`None` 是这一趟还没从工作目录里读过。
+    account_draft: Option<Account>,
+    /// 上一次按「保存」的回话：`Ok` 是落成了哪一样，`Err` 是核心库拒的那句话。
+    account_saved: Option<Result<Saved, String>>,
+    /// 读环境变量问谁。截图与测试那一路换成「一个都没给」（[`Self::ignore_env`]）。
+    account_env: fn(&str) -> Option<String>,
     /// 人刚在「外观」那一排上挑的那一档，还没被窗口记进版式文件。
     theme_pick: Option<egui::ThemePreference>,
     /// 人刚把「启动时」那颗开关拨到的那一档，还没被窗口记进版式文件。
@@ -229,6 +286,9 @@ impl Screen {
             ffmpeg_program: preview::FFMPEG.to_string(),
             ffmpeg: None,
             account: None,
+            account_draft: None,
+            account_saved: None,
+            account_env: 真环境变量,
             theme_pick: None,
             open_last_pick: None,
             clock: crate::clock::Clock::default(),
@@ -256,12 +316,14 @@ impl Screen {
         self.ffmpeg = None;
     }
 
-    /// ScreenScraper 的账号算不算给了。
+    /// **不看这台机器的环境变量**：问账号时当一个都没给，只看工作目录里存着的那一套。
     ///
-    /// **截图那一路要它**，与 [`Self::probe_with`] 同一个理由：账号读的是开工具之前给的那四个
-    /// 环境变量，而门禁那几台机器上给没给不一定——照实画的话，同一张基线在两台机器上是两个样子。
-    pub fn pin_account(&mut self, 给了: bool) {
-        self.account = Some(给了);
+    /// **截图与测试那一路要它**，与 [`Self::probe_with`] 同一个理由：账号先看开工具之前给的那四个
+    /// 环境变量，而门禁那几台机器上给没给不一定——照实画的话，同一张基线在两台机器上是两个样子；
+    /// 维护者的机器上真配着一套时，「存进去再读回来」那几条测试读到的也会是环境变量那一套。
+    pub fn ignore_env(&mut self) {
+        self.account_env = |_| None;
+        self.account = None;
     }
 
     /// 画时刻拿哪一刻当此刻（数据源那张表的「上次更新」）。
@@ -635,31 +697,148 @@ impl Screen {
             }
             look::help(ui, "同一个字段有好几个源给了值时，显示哪一个。");
         });
-        Self::一行(ui, "ScreenScraper", |ui| {
-            let 给了 = *self.account.get_or_insert_with(|| {
-                romcat_core::scrape::online::Credentials::from_env().is_some()
-            });
-            if 给了 {
+        Self::一行(ui, "ScreenScraper", |ui| self.screenscraper(ui));
+    }
+
+    /// **ScreenScraper** 那一格：有没有账号、那四格、存，以及配额那几句实话。
+    ///
+    /// 存与读都是核心库那一处（`online::save_account` / `online::find_account`，ADR-0024）：
+    /// 存在工作目录里、只本人读得了、只一套；命令行刮削与刮削面板读的是同一份，环境变量优先。
+    fn screenscraper(&mut self, ui: &mut egui::Ui) {
+        if self.account.is_none() {
+            self.account = Some(self.问账号());
+        }
+        match &self.account {
+            Some(账号状况::给了(_)) => {
                 look::read_only(ui, "账号已给");
-            } else {
+            }
+            Some(账号状况::没给) | None => {
                 look::chip(ui, look::Tone::Caution, "账号没给");
             }
-            // **那四个名字不整条写**：整条排下来一行摆不下，折行会把一个标识符从半中间劈开
-            // （`SCREENSCRAPER_` 一行、`SSPASSWORD` 下一行）。共同的前缀提到前面，后半截用顿号
-            // 断得开，怎么折都不会劈开一个名字。
+            Some(账号状况::读不动(why)) => {
+                look::chip(ui, look::Tone::Bad, "账号读不动");
+                ui.colored_label(ui.visuals().error_fg_color, why);
+            }
+        }
+        if self.账号表(ui) {
+            let 这一套 = self.account_draft.clone().unwrap_or_default();
+            self.account_saved =
+                Some(online::save_account(&self.workspace, &这一套).map_err(|why| why.to_string()));
+            // 存过一次，「有没有、用的是哪一套」重问一遍。
+            self.account = Some(self.问账号());
+        }
+        match &self.account_saved {
+            Some(Ok(Saved::Stored)) => {
+                ui.label(format!("存好了：这一套{}。", online::WHO_CAN_READ));
+            }
+            Some(Ok(Saved::Cleared)) => {
+                ui.label("四格都空着：不留账号了，工作目录里那份删掉了。");
+            }
+            Some(Err(why)) => {
+                ui.colored_label(ui.visuals().error_fg_color, why);
+            }
+            None => {}
+        }
+        if let Some(账号状况::给了(from @ AccountFrom::Env)) = self.account {
             look::help(
                 ui,
-                "账号眼下只认开工具之前给好的那四个环境变量（SCREENSCRAPER_ 打头的 DEVID、\
-                 DEVPASSWORD、SSID、SSPASSWORD）；屏上还存不下来，也还测不了连接。",
+                &format!(
+                    "眼下用的是{}（SCREENSCRAPER_ 打头的那几个）：它们优先，\
+                     这儿存的那一套要等环境变量撤掉之后才用。",
+                    from.label()
+                ),
             );
-            look::help(
-                ui,
-                "两条配额只有联网刮削跑着的那一趟报得出，写在刮削面板上；这儿留不住。",
-            );
-            // **头上那一句留空**：这一段警示全仓只有一处写（[`QUOTA`]），
-            // 把它拆成「粗体一句 + 正文」就是在第二处再写一遍同一件事。
-            look::warn_box(ui, "", QUOTA);
+        }
+        look::help(
+            ui,
+            &format!(
+                "只存一套，存在工作目录里，{}；命令行刮削读的也是它。\
+                 开工具之前给了 SCREENSCRAPER_ 打头的那四个环境变量时，环境变量优先。\
+                 四格都清空再保存，就是不留账号。还测不了连接。",
+                online::WHO_CAN_READ
+            ),
+        );
+        look::help(
+            ui,
+            "服务端报的两条配额（今日请求、今日「未识别 ROM」）只在一趟联网刮削跑着的时候才有，\
+             界面上眼下哪儿都看不到，这儿也留不住；命令行刮削的报告里印着。",
+        );
+        // **头上那一句留空**：这一段警示全仓只有一处写（[`QUOTA`]），
+        // 把它拆成「粗体一句 + 正文」就是在第二处再写一遍同一件事。
+        look::warn_box(ui, "", QUOTA);
+    }
+
+    /// 问一遍有没有账号、用的是哪一套（核心库那一处，环境变量问 [`Self::ignore_env`] 换上的那一个）。
+    fn 问账号(&self) -> 账号状况 {
+        match online::find_account_with(&self.workspace, &self.account_env) {
+            Ok(Some((_, from))) => 账号状况::给了(from),
+            Ok(None) => 账号状况::没给,
+            Err(why) => 账号状况::读不动(why.to_string()),
+        }
+    }
+
+    /// 那四格（设计稿数据源那一节的 `.frm`）与「保存」那一颗：开发者那两样一行、终端用户那两样一行。
+    /// 返回这一帧按没按「保存」。
+    ///
+    /// **两格密码不明文回显**：`TextEdit::password` 画出来、读屏读出来、复制出去的都是圆点。
+    /// 稿上只画了用户名与密码两格：开发者那两样稿上没有，可没有它们这一套账号起不来
+    /// （无 devid 直接 403，而这个工具不带自己的 devid）。
+    fn 账号表(&mut self, ui: &mut egui::Ui) -> bool {
+        let workspace = self.workspace.clone();
+        let 这一套 = self.account_draft.get_or_insert_with(|| {
+            // 存着的那一套读不动时空着摆——为什么读不动，头上那一行已经说了。
+            online::saved_account(&workspace)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
         });
+        let tokens = Tokens::builtin();
+        let layout = &tokens.layout;
+        let 名宽 = layout.settings_account_label;
+        let 名 = |ui: &mut egui::Ui, 字: &str| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(名宽, layout.input_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_size(egui::vec2(名宽, layout.input_height));
+                    ui.label(
+                        font::strong(字)
+                            .size(tokens.font.size_small_plus)
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                },
+            );
+        };
+        // 次序与 [`ACCOUNT_FIELDS`] 一一对应。
+        let [甲, 乙, 丙, 丁] = [
+            &mut 这一套.dev_id,
+            &mut 这一套.dev_password,
+            &mut 这一套.user,
+            &mut 这一套.user_password,
+        ];
+        let [字甲, 字乙, 字丙, 字丁] = &ACCOUNT_FIELDS;
+        for 一行 in [[(字甲, 甲), (字乙, 乙)], [(字丙, 丙), (字丁, 丁)]] {
+            ui.horizontal(|ui| {
+                let 缝 = ui.spacing().item_spacing.x;
+                let 框宽 = ((ui.available_width() - 2.0 * 名宽 - 3.0 * 缝) / 2.0).max(0.0);
+                for (格, 值) in 一行 {
+                    名(ui, 格.label);
+                    look::text_input(
+                        ui,
+                        框宽,
+                        egui::TextEdit::singleline(值)
+                            .hint_text(格.hint)
+                            .password(格.secret),
+                    );
+                }
+            });
+        }
+        let mut 按了 = false;
+        ui.horizontal(|ui| {
+            按了 = look::small_buttons(ui, |ui| ui.button(SAVE_ACCOUNT)).clicked();
+            look::help(ui, "只在联网刮削时使用。");
+        });
+        按了
     }
 
     /// 本机那三份数据源：条数右对齐，上次更新照钟画。
@@ -871,6 +1050,11 @@ fn 条数(status: &SourceStatus) -> String {
 fn 间隔() -> String {
     let 秒 = romcat_core::scrape::online::DEFAULT_INTERVAL.as_secs_f32();
     format!("{秒:.0} 秒")
+}
+
+/// 读这个进程真的环境变量：设置屏问账号时默认问它（[`Screen::ignore_env`] 换掉它）。
+fn 真环境变量(key: &str) -> Option<String> {
+    std::env::var(key).ok()
 }
 
 /// 探一下 ffmpeg：核心库那一处判据（`preview::probe`），这一层只把它交回来的那一档摆出来。

@@ -155,6 +155,7 @@
 核查（2026-09-23）：crates/core/src/scrape/online.rs:312-321 Credentials::from_env 只认四个环境变量、无落盘；无 ping/verify；:249-251 requests_left/ko_left 只存剩余、只在联网刮削跑着时有（:554-557 observe）；:35「没有任何一处能装第二套凭据」。
 依赖／可并：Q1062、Q1066（程序级落盘同一处）
 （大小 M，来自票 `gui-looks-like-the-design/31`）
+**settled（2026-10-03）：** 票 `15` 收了账号那一半——核心库 `scrape::online` 一处读写（`find_account` / `saved_account` / `save_account`，「有没有」是 `has_account`），存工作目录 `screenscraper.toml`、Unix 上 0600、只一套，读的时候环境变量优先、两边不拼；设置屏能填，命令行刮削与刮削面板都走它。「测试连接」照裁定不做。「两条配额留不住」那一半本票只把设置屏那句话改成实话，留不留、怎么画记在挂单 `Q1688`。
 
 ### `Q1066` — ffmpeg：状态与重新检测接上了，**路径还指不了**
 

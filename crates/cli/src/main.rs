@@ -689,8 +689,8 @@ struct ScrapeArgs {
 
     /// 策略档案：`离线`（默认，一个网络请求都不发）或 `在线`（再加联网源补**封面**——离线档补不上的只剩它）
     ///
-    /// 在线档要一套 ScreenScraper 凭据，从环境变量读。它默认限流，且把配额超限
-    /// 当作硬停止——配额同时按账号与 IP 计，撞穿了会被永久封禁
+    /// 在线档要一套 ScreenScraper 账号：环境变量优先，其次工作目录里存着的那一套（界面的设置屏存的就是它）。
+    /// 它默认限流，且把配额超限当作硬停止——配额同时按账号与 IP 计，撞穿了会被永久封禁
     #[arg(long, value_name = "档案", default_value = "离线")]
     profile: String,
 
@@ -2395,18 +2395,29 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     // 上面那道闸管的是「一趟发几个」，这一道管的是「打得多快」。
     let limits = args.limits();
     let online = profile == scrape::Profile::Online;
-    let credentials = match (online, scrape::online::Credentials::from_env()) {
-        (false, _) => None,
-        (true, Some(credentials)) => Some(credentials),
-        // **宁可不启动也不匿名试探**：没有 devid 的请求直接 403，而那是白扣一次的。
-        (true, None) => {
-            return fail(format!(
-                "在线档要一套 ScreenScraper 凭据，从环境变量读：{}。\n\
-                 devid / devpassword 要在 ScreenScraper 的论坛人工申请（无 devid 直接 403），\n\
-                 **不要拿别人的 devid 用**——那会连累对方被拉黑（426）。",
-                scrape::online::ENV_KEYS.join(" / ")
-            ));
+    // **账号只问核心库那一处**（`online::find_account`）：环境变量优先，其次工作目录里存着的那一套
+    // ——界面的设置屏存的就是那一套，两边读的是同一份。
+    let credentials = if online {
+        match scrape::online::find_account(&workspace) {
+            Ok(Some((account, from))) => {
+                eprintln!("ScreenScraper 账号：用的是{}。", from.label());
+                Some(account.credentials())
+            }
+            // **宁可不启动也不匿名试探**：没有 devid 的请求直接 403，而那是白扣一次的。
+            Ok(None) => {
+                return fail(format!(
+                    "在线档要一套 ScreenScraper 凭据，这里一套账号都没有。\n\
+                     在界面的设置屏「数据源」那一节填一次（存进工作目录 {}），\n\
+                     或者开工具之前给环境变量：{}（环境变量优先）。\n{}",
+                    romcat_core::path::display(&workspace),
+                    scrape::online::ENV_KEYS.join(" / "),
+                    scrape::online::DEVID_NOTE,
+                ));
+            }
+            Err(error) => return fail(format!("在线档起不来：{error}")),
         }
+    } else {
+        None
     };
     let fetcher = online.then(|| HttpFetcher::with_throttle(limits.interval));
     let net = match (fetcher.as_ref(), credentials) {

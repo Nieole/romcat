@@ -443,6 +443,7 @@ settings-switch   = [30, 18, 14]  # 开关那个小滑块：外框宽、外框�
 settings-name-width = 240 # 设置屏「主库原名」那一格输入框的宽。**设计稿上没有这一格**（改名是票 31 补的落点，
                           # 见 .scratch/gui-looks-like-the-design/issues/31-settings-screen.md），取这一档是因为
                           # 真库那几个名字（「我的主库」「Game 盘」）摆得下，又不会把旁边那颗「改名」挤出这一栏。
+settings-account-label = 70  # 设置屏 ScreenScraper 那几格名那一列的宽（设计稿数据源那一节 .frm 的 grid-template-columns:70px）
 seg-padding       = 2     # 分段开关外框与里头按钮之间（设计稿 .seg 的 padding:2px）
 seg-button-height = 24    # 分段开关里一颗的高（设计稿 .seg button 的 height:24px）
 seg-button-padding = 11   # 分段开关里一颗的左右留白（设计稿 .seg button 的 padding:0 11px）
