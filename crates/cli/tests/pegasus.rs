@@ -292,6 +292,51 @@ fn 导出加上铺媒体才铺_干跑先说要铺几份多大() {
 }
 
 #[test]
+fn 铺媒体那句回执是核心库那一句_与界面一字不差() {
+    // 票 `core-answers-once/08`（挂单 `Q655`）：铺媒体那句回执由核心库在 `MediaReport` 上立一句，界面工序段
+    // 导出收场与命令行 `export --media` 都印它——从前两边各写一份，命令行那一份不说没铺成的那几份。
+    // 数从 `--json` 那份报告里读：硬链接还是复制看临时目录在哪块盘上，不在这儿猜。
+    let (dir, workspace) = 现场();
+    塞一份封面(
+        workspace.path(),
+        "库/FC/魂斗罗.zip",
+        b"\x89PNG-- receipt --",
+    );
+    let 报告目录 = temp_dir("pegasus-cli-receipt");
+    let 报告 = 报告目录.path().join("导出.json");
+    let out = romcat(&[
+        "export",
+        "--out",
+        &dir.path().to_string_lossy(),
+        "--library",
+        "测试库",
+        "--workspace",
+        &workspace.path().to_string_lossy(),
+        "--media",
+        "--quiet",
+        "--json",
+        &报告.to_string_lossy(),
+    ]);
+    let 说的 = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{说的}");
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&报告).expect("报告写出来了")).expect("是 JSON");
+    let 数 = |key: &str| json["media"][key].as_u64().expect("媒体那一半带着这一格");
+    let 账 = romcat_core::adapter::report::MediaReport {
+        linked: 数("linked"),
+        copied: 数("copied"),
+        already: 数("already"),
+        ..romcat_core::adapter::report::MediaReport::default()
+    };
+    assert_eq!(账.placed(), 1, "前提：铺出去一份：{json}");
+    assert!(
+        说的.lines().any(|line| line == 账.receipt()),
+        "命令行该逐字印核心库那一句「{}」：\n{说的}",
+        账.receipt(),
+    );
+}
+
+#[test]
 fn 导出时定的首选变体_删掉中立库重扫之后还在() {
     // 真入口上的「删库重扫」（票 `verdict-store-and-sync/01`）：`export --prefer` 定的首选变体
     // 原件落沉淀库，删掉中立库、从零 `scan` 一遍，中立库里那份投影在扫描那一趟就照沉淀库回来了。

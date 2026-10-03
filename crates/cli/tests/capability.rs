@@ -6,7 +6,7 @@
 //! 哪天核实的。这个文件验的正是那几样真的印出来了。
 //!
 //! 工作目录一律显式指到临时目录：绝不能让测试往开发者真实的
-//! `~/.local/share/romcat` 里写东西。目标设备一律拿本地临时目录模拟。
+//! `~/.local/share/romcat` 里写东西。目标设备一律拿本地临时目录模拟，摆在工作目录之外。
 
 use std::fs;
 use std::path::Path;
@@ -34,6 +34,16 @@ fn 出来的话(out: &std::process::Output) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     )
+}
+
+/// 一张当目标设备用的空「卡」：摆在工作目录之外——目标属于工作目录的子库建不出来（`sublibrary::target::vet`）。
+/// 交回那个临时目录（活多久卡就在多久）与卡的路径。
+fn 一张卡() -> (TempDir, String) {
+    let 卡目录 = temp_dir("cap-cli-卡");
+    let 卡 = 卡目录.path().join("卡");
+    fs::create_dir_all(&卡).expect("能建目标目录");
+    let 卡 = 卡.display().to_string();
+    (卡目录, 卡)
 }
 
 fn 现场() -> (TempDir, TempDir) {
@@ -152,9 +162,7 @@ fn 坏掉的名册不静默退回内置的() {
 fn 子库挑得了档案_挑不存在的当场拦下来() {
     let (_library, workspace) = 现场();
     let ws = workspace.path();
-    let 卡 = ws.join("卡");
-    fs::create_dir_all(&卡).expect("能建目标目录");
-    let 卡 = 卡.display().to_string();
+    let (_卡目录, 卡) = 一张卡();
 
     // 不挑：默认**不作声称**，而且说清那是什么意思。
     let out = romcat(
@@ -222,9 +230,7 @@ fn 子库挑得了档案_挑不存在的当场拦下来() {
 fn 差量预览里说得出哪些到了掌机上打不开() {
     let (_library, workspace) = 现场();
     let ws = workspace.path();
-    let 卡 = ws.join("卡2");
-    fs::create_dir_all(&卡).expect("能建目标目录");
-    let 卡 = 卡.display().to_string();
+    let (_卡目录, 卡) = 一张卡();
     let out = romcat(
         ws,
         &[
@@ -272,9 +278,7 @@ fn 差量预览里说得出哪些到了掌机上打不开() {
 fn 子库记着的档案在名册里没有时不静默当没事_明说退回了不作声称() {
     let (_library, workspace) = 现场();
     let ws = workspace.path();
-    let 卡 = ws.join("卡3");
-    fs::create_dir_all(&卡).expect("能建目标目录");
-    let 卡 = 卡.display().to_string();
+    let (_卡目录, 卡) = 一张卡();
     let out = romcat(
         ws,
         &[

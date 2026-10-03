@@ -16,7 +16,8 @@
 //!
 //! ## 为什么在核心里
 //!
-//! 界面上的弹层、命令行、点同步时那道闸问的是同一件事（ADR-0024）。「落在主库里」那一条与
+//! 界面上的弹层、命令行 `sublibrary set`、点同步时那道闸问的是同一件事（ADR-0024）；拦下时那句话也只有一份
+//! （[`TargetRefusal`] 与 [`NameRefusal`] 的 `Display`）。「落在主库里」那一条与
 //! [`refuse_target_in_library`](crate::sync::prepare::refuse_target_in_library) 共用 [`library_overlap`]，
 //! 两边不各判一遍。
 //!
@@ -83,6 +84,27 @@ pub struct Volume {
     pub removable: bool,
 }
 
+/// 拦下时那句话：界面画在路径底下、命令行 `sublibrary set` 拦下时印的都是它，两个壳不各写一份（ADR-0024）。
+///
+/// 稿上画了的三句（落在根里、属于工作目录、被占用）逐字照设计稿 `probePath`；稿上「落在根里」那一句
+/// 换成「包含」就是把根包在里面那一支。**不带命令、不带 ADR 编号**：这几句画在屏上。
+impl std::fmt::Display for TargetRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("目标路径没填。"),
+            Self::InLibrary { around: false, .. } => {
+                f.write_str("这个目录在主库的根之内。子库需要写入文件，不能放在只读的主库里。")
+            }
+            Self::InLibrary { around: true, .. } => {
+                f.write_str("这个目录包含主库的根。子库需要写入文件，不能放在只读的主库里。")
+            }
+            Self::InWorkspace { .. } => f.write_str("这个目录属于工作目录，请选择其他目录。"),
+            Self::Taken { by } => write!(f, "已被子库「{by}」使用。"),
+            Self::NotADirectory => f.write_str("这条路径是一份文件，不是目录。"),
+        }
+    }
+}
+
 /// 一个子库名字**不能用**的理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameRefusal {
@@ -90,6 +112,16 @@ pub enum NameRefusal {
     Empty,
     /// 已经有别的子库叫这个名字。子库按名字存，放行就是悄悄把那一台的目标设置盖掉。
     Taken,
+}
+
+/// 拦下时那句话，同 [`TargetRefusal`] 那一句：界面与命令行都印它。
+impl std::fmt::Display for NameRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "名称没填。",
+            Self::Taken => "已经有同名的子库。",
+        })
+    }
 }
 
 /// 目标路径与主库的根撞在一起的那一处。

@@ -123,34 +123,6 @@ fn media_refusal() -> String {
 /// 算「这一趟最多要铺多少」那一趟在任务台上叫什么。测试按它在任务台上找那一趟。
 pub const COUNT_MEDIA: &str = "算一遍要铺多少媒体";
 
-/// 开着**铺媒体**的那一趟走完之后回执里那一句：铺出去几份、怎么铺的、落点上本来就有几份。
-///
-/// **没铺出去的也得说出口**：落点被别的东西占着的一律不覆盖、没铺成的留在报告里
-/// （`romcat_core::adapter::report::MediaReport`），它们不会出现在前端里——不说的话，
-/// 人对着前端里缺的那几张封面查不出为什么。
-fn media_laid(media: &romcat_core::adapter::report::MediaReport) -> String {
-    let mut line = format!(
-        "媒体：铺出去 {} 份（硬链接 {}、复制 {}），落点上本来就有 {} 份。",
-        thousands(media.placed()),
-        thousands(media.linked),
-        thousands(media.copied),
-        thousands(media.already),
-    );
-    if !media.occupied.is_empty() {
-        line.push_str(&format!(
-            "{} 份的落点上有别的东西，没覆盖。",
-            thousands(media.occupied.len() as u64),
-        ));
-    }
-    if !media.failures.is_empty() {
-        line.push_str(&format!(
-            "{} 份没铺成。",
-            thousands(media.failures.len() as u64)
-        ));
-    }
-    line
-}
-
 /// 开着**铺媒体**时那句代价（[`media_cost`]）眼下是什么样。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MediaCost {
@@ -764,10 +736,11 @@ impl Section {
                         report.tier,
                     )
                 };
-                // **开着铺媒体就说铺了什么**（`media_laid`）；关着时报告里没有这一半，一个字都不多。
+                // **开着铺媒体就说铺了什么**：那句是核心库那一句（`MediaReport::receipt`），命令行 `export --media`
+                // 印的也是它（挂单 `Q655`）；关着时报告里没有这一半，一个字都不多。
                 if let Some(media) = &report.media {
                     回执.push('\n');
-                    回执.push_str(&media_laid(media));
+                    回执.push_str(&media.receipt());
                 }
                 // **照写掉了哪几份得说出口**（`ExportReport::forced`）：「不静默覆盖」说的是
                 // 不许悄悄发生，不是不许发生。逐份点名，与撞上时那份名单一个粒度。
@@ -1705,9 +1678,9 @@ fn scrape_run(site: &mut Site, workspace: &Path, task: &Handle) -> Result<Produc
 ///
 /// 重折是「把折出来的那批清掉再写回去」（[`title::refold`]），**中间停下等于把整份
 /// 标题集合丢掉**。所以这一段在开折之前 `?` 一下把手，之后一步都不看停下的信号：
-/// 那一折在真库上是秒级的事（`romcat titles` 整趟不到 3 秒，`docs/library-facts.md`）,
+/// 那一折在真库上是秒级的事（`romcat titles` 整趟只要几秒，见台账 `docs/library-facts.md`），
 /// 等它走完比留下一份空集合便宜得多。于是这一趟**要么写完、要么一个字节都没写**
-/// ——被按停的那一趟走的是「停了」，不是**停在半路**。
+/// ——被按停的那一趟收场是「已取消」，不是**部分完成**。
 ///
 /// ## 优先级表读不出来就停下，不退回内置那份
 ///

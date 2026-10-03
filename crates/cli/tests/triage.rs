@@ -1120,3 +1120,118 @@ fn 疑似同一作品列出来的那几句与核心库逐字相等_不是同一�
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn 印给人看的是主库原名_不是带哈希的主库标识() {
+    // 票 `core-answers-once/08`（挂单 `Q454`）：主库标识是中立库的主文件名（可读的一半加十六位哈希），
+    // 路径锚与断点认它，**不是给人看的名字**；人看的是主库原名（`Site::display_name`，词表**主库原名**）。
+    let (library, workspace) = 现场();
+    let 工作目录 = workspace.path().to_string_lossy().into_owned();
+    let out = 跑(&[
+        "scan",
+        "--root-name",
+        "库",
+        &library.path().to_string_lossy(),
+        "--library",
+        "小库",
+        "--workspace",
+        &工作目录,
+        "--quiet",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let 标识 = workspace::Slug::Named("小库").text();
+    assert_ne!(标识, "小库", "前提：主库标识带着哈希，与主库原名不是同一串");
+    let 选库 = ["--library", "小库", "--workspace", 工作目录.as_str()];
+    for (命令, 该说) in [
+        (
+            vec!["triage", "batches"],
+            "主库「小库」上还没有落过一批裁决。",
+        ),
+        (
+            vec!["triage", "undo", "--last"],
+            "主库「小库」上还没有落过一批裁决。",
+        ),
+        (
+            vec!["triage", "same-work"],
+            "主库「小库」上没有疑似同一作品的建议。",
+        ),
+    ] {
+        let mut args = 命令.clone();
+        args.extend(选库);
+        let out = 跑(&args);
+        let 话 = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            话.contains(该说),
+            "`{}` 该说「{该说}」：{话}",
+            命令.join(" ")
+        );
+        assert!(
+            !话.contains(&标识),
+            "`{}` 印出了主库标识：{话}",
+            命令.join(" ")
+        );
+    }
+}
+
+#[test]
+fn 裁决记录的时刻是核心库那一处折的() {
+    // 票 `core-answers-once/08`（挂单 `Q626`）：一批裁决的时刻，命令行 `batches` / `undo` 与界面裁决记录都走核心库
+    // `report::human_time` 那一处公历换算——命令行从前自己折一份。命令行照旧 UTC（挂单 `Q901` 已裁维持），
+    // 界面在它上面加本机时区、去掉今年的年份。
+    let (library, workspace) = 现场();
+    扫并识别(library.path(), workspace.path());
+    let 工作目录 = workspace.path().to_string_lossy().into_owned();
+    let 选库 = ["--library", "小库", "--workspace", 工作目录.as_str()];
+    let mut 落一批 = vec![
+        "triage",
+        "decide",
+        "--name",
+        "外星科技",
+        "--work",
+        "某部作品",
+        "--yes",
+    ];
+    落一批.extend(选库);
+    let out = 跑(&落一批);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let 那一刻 = {
+        let site = romcat_core::site::Site::open(
+            workspace.path(),
+            workspace::Slug::Named("小库"),
+            None,
+            "--library",
+        )
+        .expect("开得出现场");
+        site.store
+            .batches(&site.library_identity, 0)
+            .expect("读得出沉淀库")
+            .first()
+            .expect("落下了一批")
+            .decided_at
+    };
+    let 该印 = romcat_core::report::human_time(那一刻);
+
+    let mut 列 = vec!["triage", "batches"];
+    列.extend(选库);
+    let out = 跑(&列);
+    let 列表 = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(列表.contains(&format!("#1  {该印}  ")), "{列表}");
+
+    let mut 看一眼 = vec!["triage", "undo", "--batch", "1", "--dry-run"];
+    看一眼.extend(选库);
+    let out = 跑(&看一眼);
+    let 那一行 = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(那一行.contains(&format!("落于 {该印}。")), "{那一行}");
+}

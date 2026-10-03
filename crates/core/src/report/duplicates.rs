@@ -87,7 +87,7 @@ impl DuplicateDetails {
             "{}{}{}",
             pad("扫描", LABEL),
             if self.interrupted {
-                "已中断（明细只覆盖已扫到的部分）"
+                "部分完成（明细只覆盖已扫到的部分）"
             } else {
                 "已完成"
             },
@@ -407,12 +407,17 @@ mod tests {
     }
 
     #[test]
-    fn 中断与索引截断都写在明细抬头上() {
+    fn 部分完成与索引截断都写在明细抬头上() {
+        // 停下来的那一趟叫**部分完成**（词表，`_Avoid_` 里有「中断」；票 `core-answers-once/08`）。
         let mut agg = 若干组重复(2, &Limits::default());
         agg.duplicate_index_truncated = true;
         let report = 报告(&agg, true, true);
         let text = DuplicateDetails::build(&agg, &report).render_text();
-        assert!(text.contains("已中断"));
+        assert!(
+            text.contains("部分完成（明细只覆盖已扫到的部分）"),
+            "{text}"
+        );
+        assert!(!text.contains("中断"), "{text}");
         assert!(text.contains("由断点续跑"));
         assert!(text.contains("实际重复比这份明细还多"));
     }
