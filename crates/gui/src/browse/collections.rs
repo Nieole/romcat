@@ -391,8 +391,8 @@ impl Join {
     /// ⚠️ **稿上这儿还有一句「其中 N 个只能按路径记录」，这一版印不出那个 `N`**
     /// （挂单 `Q1103`）：那个数要为这一批每个变体折一次内容判据
     /// （`collection::anchor_of` ← `identify::content_prints`），而全选那一档在真库上是
-    /// 46,444 个变体、秒级的读——那是**排上任务台**才做得起的事（`Screen::queue_collection`
-    /// 正是这么排的），不是画一帧弹层时顺手算得出的。
+    /// 四万多个变体（见台账 `docs/library-facts.md`）、秒级的读——那是**排上任务台**才做得起的事
+    /// （`Screen::queue_collection` 正是这么排的），不是画一帧弹层时顺手算得出的。
     /// 所以这一层只指路：**按下去之后的回执里会点名说有几个**，而那句回执的数是准的。
     /// 宁可少印一个数，也不印一个现编的。
     pub fn ui(
@@ -444,7 +444,7 @@ impl Join {
         }
     }
 
-    /// 内容区：已有那几个各一档、「新建合集」一档，外加路径锚那句警告。
+    /// 内容区：已有那几个各一档、「新建合集」一档，外加路径锚那块说明（中性底，挂单 `Q1110`）。
     fn body(&mut self, ui: &mut egui::Ui, collections: &[Recorded]) {
         for 一个 in collections.iter().filter(|一个| 一个.name != FAVORITE) {
             let 选中 = self.target.as_deref() == Some(一个.name.as_str());
@@ -470,17 +470,25 @@ impl Join {
                 width,
                 egui::TextEdit::singleline(&mut self.fresh).hint_text("例如：通关过的"),
             );
-            // **为什么「加入」按不动，屏上说得出**（ADR-0005）：空着那一档不说，
-            // 人还没打字就先见一句红的。
+            // **为什么「加入」按不动，屏上常驻着说**（ADR-0005 再修订：画灰的条件之一是理由常驻在屏上，
+            // 不只挂在那颗按不动的按钮的悬停里）。**空着那一档用帮助字的弱色**：那是还没打字，不是打错了
+            // ——人还没动手就先见一句红的，读着像挨了骂。打了字还用不得的那几档照旧红。
+            //
+            // 空名那一句与排活入口拒下时说的是同一句（`Screen::合集名空着`，票
+            // `gui-draws-the-rest-of-the-design/07`，收挂单 `Q798`）：两处都取 `check_name` 交回的那一档。
             let 已有: Vec<String> = collections
                 .iter()
                 .map(|一个| 一个.name.clone())
                 .filter(|一个| 一个 != FAVORITE)
                 .collect();
-            if let Err(不行) = collection::check_name(&self.fresh, &已有)
-                && !self.fresh.trim().is_empty()
-            {
-                ui.colored_label(ui.visuals().error_fg_color, 不行.advice());
+            match collection::check_name(&self.fresh, &已有) {
+                Ok(_) => {}
+                Err(空的 @ collection::BadName::Empty) => {
+                    look::help(ui, &空的.advice());
+                }
+                Err(不行) => {
+                    ui.colored_label(ui.visuals().error_fg_color, 不行.advice());
+                }
             }
         }
         // **挂不住内容锚那件事照实说，但不现编那个数**（挂单 `Q1103`，理由见 `ui` 的文档）：
@@ -488,15 +496,40 @@ impl Join {
         // 内容判据——全选那一档在真库上是四万多个变体、秒级的读，排任务台才做得起。
         // **不含糊成一句「加好了」**（ADR-0021 那条纪律在这一屏上的样子），
         // 也不印一个现编的数：说清有这一档、并指向那句准的回执。
+        //
+        // **中性底，不是警示色**（拿主意的人裁，挂单 `Q1110`；票 `gui-draws-the-rest-of-the-design/07`）：
+        // 稿上那一块（`.midbox`）只在这一批里真有无判据的时候才画，这儿数不起「有没有」（与「有几个」同价，
+        // 见上），于是**每次都画**——常驻的一块就不能是警示色，一批全是认出作品的也照样跳一块色底，久了就没人看了。
         一段之间(ui);
-        look::warn_box(
-            ui,
-            "拿不到内容判据的那些只钉得住本机路径。",
+        路径锚的说明(ui);
+    }
+}
+
+/// 「加入合集」底下那块**路径锚的说明**：中性的提示框（设计稿 `.note`，[`look::note_box`]），
+/// 头一句用强调字、后面接着正文——与 [`look::warn_box`] 同一个读法，只是不带警示色（挂单 `Q1110`）。
+fn 路径锚的说明(ui: &mut egui::Ui) {
+    look::note_box(ui, |ui| {
+        let mut job = egui::text::LayoutJob::default();
+        font::strong("拿不到内容判据的那些只钉得住本机路径。").append_to(
+            &mut job,
+            ui.style(),
+            egui::FontSelection::Default,
+            egui::Align::LEFT,
+        );
+        egui::RichText::new(
             "无判据那一档的变体，成员关系只能按文件路径记下来——文件改名或挪到别的目录\
              之后，它们会从这个合集里消失（识别出作品之后自动改成按内容记录）。\
              这一批里有几个是这样，加进去之后的回执里会点名说。",
+        )
+        .append_to(
+            &mut job,
+            ui.style(),
+            egui::FontSelection::Default,
+            egui::Align::LEFT,
         );
-    }
+        job.wrap.max_width = ui.available_width();
+        ui.label(job);
+    });
 }
 
 /// 「N 个成员」那半句。

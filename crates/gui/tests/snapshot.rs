@@ -1575,6 +1575,71 @@ fn 浏览_整理建议_暗色() {
     拍浏览("browse/suspicion-dark", Theme::Dark, 浏览态::整理建议);
 }
 
+// ——— 左栏条件组与「加入合集」那一层（票 `gui-draws-the-rest-of-the-design/07`） ———
+
+/// 条件组那一态的规则：头一条筛不出东西（库里没有这个合集），第二条筛得出——**任一满足**，表里照旧有行。
+/// 那句「眼下还没有」的提示贴在头一条底下、第二条之上（设计稿 `.tnote`，挂单 `Q1104`）。
+const 条件组那一条规则: &str = "合集=还没建的 或 平台=SFC";
+
+/// **左栏条件组里有一条筛不出东西的子句**：提示贴在那一条底下（票 `gui-draws-the-rest-of-the-design/07`，收挂单 `Q1104`）。
+#[track_caller]
+fn 拍条件组筛不出(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    let rule = Rule::parse(条件组那一条规则).expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule));
+    let harness = 开一个(主题, move |ui| app.ui(ui));
+    控件都落在所在那一栏里(&harness, 名字);
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 浏览_条件组筛不出_浅色() {
+    拍条件组筛不出("browse/filter-thin-light", Theme::Light);
+}
+
+#[test]
+fn 浏览_条件组筛不出_暗色() {
+    拍条件组筛不出("browse/filter-thin-dark", Theme::Dark);
+}
+
+/// **「加入合集」那一层**：勾一行、按表格上方那颗「加入合集…」。库里一个合集都没有，落在「新建合集」那一档、
+/// 名字还空着——「请输入名称。」常驻在框底下（ADR-0005 再修订，挂单 `Q798`），路径锚那块说明是中性底（挂单 `Q1110`）。
+#[track_caller]
+fn 拍加入合集(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    {
+        let (browse, site) = app.browse_and_site();
+        let anchor = site
+            .catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一行")
+            .remove(0)
+            .anchor;
+        browse.picked_mut().toggle(&anchor);
+    }
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    按(&mut harness, "加入合集…");
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 浏览_加入合集_浅色() {
+    拍加入合集("browse/join-collection-light", Theme::Light);
+}
+
+#[test]
+fn 浏览_加入合集_暗色() {
+    拍加入合集("browse/join-collection-dark", Theme::Dark);
+}
+
 // ——— 作品详情页（票 `gui-looks-like-the-design/15`） ———
 //
 // 同一份浏览屏的现场：点一下「Chrono Trigger (Japan)」那一行（五样元数据都齐、两个变体）——走表格自己那条选中的路，
