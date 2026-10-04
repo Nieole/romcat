@@ -158,6 +158,38 @@ pub fn 摆一份读不动的dat库(工作目录: &std::path::Path) {
     std::fs::write(&dat, b"this is not a database").expect("写得进去");
 }
 
+/// 在这个工作目录里摆一份**取回过的** DAT 库（一份 DAT、一条条目）：数据源那几处读它，说的是「下载了」那一档。
+/// 刮削弹层的截图里 DAT 那一行于是写照稿那句小字（票 `gui-draws-the-rest-of-the-design/17`）。
+pub fn 摆一份取回过的dat库(工作目录: &std::path::Path) {
+    use romcat_core::dat::logiqx::{DatHeader, GameRecord};
+    use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
+    let mut repo =
+        DatRepo::open(&romcat_core::workspace::dat_repo_path(工作目录)).expect("开得出 DAT 库");
+    let mut writer = repo
+        .begin(&Unit {
+            source: "No-Intro".to_owned(),
+            name: "SFC - 截图门".to_owned(),
+            url: "https://example.invalid/x".to_owned(),
+            fingerprint: "sha".to_owned(),
+        })
+        .expect("开得了事务");
+    writer
+        .write_dat(
+            &DatMeta {
+                name: "SFC - 截图门".to_owned(),
+                platform: "SFC".to_owned(),
+                convention: romcat_core::dat::Convention::AsIs,
+                header: DatHeader::default(),
+            },
+            &[GameRecord {
+                name: "截图门 (Japan)".to_owned(),
+                ..GameRecord::default()
+            }],
+        )
+        .expect("写得进");
+    writer.commit().expect("提交");
+}
+
 #[must_use]
 pub fn 小库(
     手上的: &[(&str, &str, 档)], workspace: std::path::PathBuf

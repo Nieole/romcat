@@ -2979,7 +2979,8 @@ impl Screen {
                 let shown = self
                     .scope
                     .unwrap_or(u64::try_from(keys.len()).unwrap_or(u64::MAX));
-                self.scrape.open(keys, shown);
+                let reach = scrape::Reach::of_pick(&self.picked, self.window.total());
+                self.scrape.open(keys, shown, reach);
                 self.error = None;
             }
             Err(error) => self.error = Some(format!("中立库读不动：{error}")),
@@ -3469,7 +3470,10 @@ impl Screen {
                     self.notice = Some("这个作品底下一个变体都没有，没什么可刮的。".to_owned());
                 } else {
                     let shown = u64::try_from(keys.len()).unwrap_or(u64::MAX);
-                    self.scrape.open(keys, shown);
+                    let reach = scrape::Reach::Work {
+                        name: facts.title.clone(),
+                    };
+                    self.scrape.open(keys, shown, reach);
                 }
             }
             menu::Pressed::Reveal => self.reveal_row(site, anchor),

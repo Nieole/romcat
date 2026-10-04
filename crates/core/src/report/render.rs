@@ -107,6 +107,20 @@ pub fn human_duration(ms: u64) -> String {
     }
 }
 
+/// 一段**估出来的**时长排成人看得懂的样子：不到一秒写「不到 1 秒」，一秒以上与 [`human_duration`] 同一个写法。
+///
+/// 给按下去之前那本账用（刮削弹层「预计耗时」那一格，票 `gui-draws-the-rest-of-the-design/17` 的 `F-10`）：那个数是
+/// 锚点数乘一个常量估出来的，写成「0 毫秒」「42 毫秒」是假精确——估的数写到毫秒，人会以为工具量过。
+/// 跑完之后**量出来的**用时照旧走 [`human_duration`]：跑了 42 毫秒就是 42 毫秒。
+#[must_use]
+pub fn rough_duration(ms: u64) -> String {
+    if ms < 1000 {
+        "不到 1 秒".to_string()
+    } else {
+        human_duration(ms)
+    }
+}
+
 /// **一份媒体自己有多长**排成钟点：`0:30`、`1:02:03`（设计稿 `mediaOf` 的 `dim`）。
 ///
 /// **它不是 [`human_duration`]**，两者答的是两个问题。那一条量的是「这趟活跑了多久」，
@@ -1086,6 +1100,20 @@ mod tests {
         // 同一个毫秒数交给它们，写出来必须不一样——合成一个函数是这条最容易犯的错。
         assert_eq!(media_duration(95_000), "1:35");
         assert_eq!(human_duration(95_000), "1 分 35 秒");
+    }
+
+    #[test]
+    fn 估出来的时长不到一秒写不到1秒_其余照粗估那一条() {
+        // 票 `gui-draws-the-rest-of-the-design/17` 的 `F-10`：按下去之前那本账是锚点数乘一个常量估的，
+        // 写成「0 毫秒」「42 毫秒」是假精确。不到一秒的一律「不到 1 秒」；一秒以上与 `human_duration` 同一个写法，
+        // 两处不各写一份。
+        assert_eq!(rough_duration(0), "不到 1 秒");
+        assert_eq!(rough_duration(999), "不到 1 秒");
+        assert_eq!(rough_duration(1_000), human_duration(1_000));
+        assert_eq!(rough_duration(95_000), "1 分 35 秒");
+        assert_eq!(rough_duration(7_380_000), human_duration(7_380_000));
+        // 跑完之后量出来的用时那一条照旧写到毫秒：跑完一趟花了 42 毫秒就是 42 毫秒。
+        assert_eq!(human_duration(42), "42 毫秒");
     }
 
     #[test]

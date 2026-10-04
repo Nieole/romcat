@@ -352,7 +352,8 @@ impl<'a, A> Dialog<'a, A> {
     /// 摆在页脚而不是内容区末尾：内容区滚得动，这句话滚出去就看不见了，而它说的是**整层**的规矩，
     /// 不是最后那一段的注脚。
     ///
-    /// 配 [`Footer::dismiss_on_right`] 才是设计稿那个样子：说明字靠左、退出那一颗贴右当主按钮。
+    /// 配 [`Footer::dismiss_on_right`] 才是设计稿那个样子：说明字靠左、退出那一颗贴右当主按钮。退出那一颗照旧靠左的
+    /// 弹层（刮削，说「开始刮削」为什么按不动），说明字摆在退出那一颗后头、往前走那几颗前头。
     /// **不给就一点地方都不占。**
     #[must_use]
     pub fn footer_note(mut self, text: impl Into<String>) -> Self {
@@ -757,20 +758,15 @@ fn pages_ui(ui: &mut egui::Ui, labels: &[String], at: usize) {
 /// 一共多宽、空出左边那一截，再从左往右摆——看着靠右，Tab 照读的次序走。
 fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>, note: Option<&str>) -> Option<Slot> {
     let mut clicked = None;
+    // **页脚那句说明字**（[`Dialog::footer_note`]）。没给就一个控件都不摆——那一行画出来与没有这个槽之前一模一样。
+    // 截断而不是折行：页脚是一行高的，折行会把按钮挤下去；说明字本来就该是一句短话。
     ui.horizontal(|ui| {
-        // **页脚左边那句说明字**（[`Dialog::footer_note`]）：摆在最前头，按钮照旧从它右边接着排。
-        // 没给就一个控件都不摆——那一行画出来与没有这个槽之前一模一样。
-        //
-        // 截断而不是折行：页脚是一行高的，折行会把按钮挤下去；说明字本来就该是一句短话。
-        if let Some(note) = note {
-            ui.add(
-                egui::Label::new(egui::RichText::new(note).small().weak())
-                    .truncate()
-                    .selectable(false),
-            );
-        }
-        // 退出那一颗摆右边的写法（[`Footer::dismiss_on_right`]）：其余几颗先从左往右摆，再空出中间、退出那一颗贴右当主按钮。
+        // 退出那一颗摆右边的写法（[`Footer::dismiss_on_right`]）：说明字摆在最前头，其余几颗从它右边从左往右摆，
+        // 再空出中间、退出那一颗贴右当主按钮。
         if footer.dismiss_on_right {
+            if let Some(note) = note {
+                footer_note_ui(ui, note);
+            }
             for (at, button) in footer.rest.iter().enumerate() {
                 if add_button(ui, button, button.primary).clicked() {
                     clicked = Some(Slot::Rest(at));
@@ -793,6 +789,15 @@ fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>, note: Option<&str>) -> Op
             .map(|button| look::button_width(ui, &button.label))
             .sum::<f32>()
             + gap * footer.rest.len().saturating_sub(1) as f32;
+        // 退出那一颗靠左时，说明字摆在它后头、往前走那几颗前头（刮削弹层「开始刮削」为什么按不动，票
+        // `gui-draws-the-rest-of-the-design/17`）：退出那一颗照旧在最左，与没有说明字时同一个位置。
+        // 截断照让出右边那几颗之后剩下的宽截。
+        if let Some(note) = note {
+            let room = (ui.available_width() - wide - gap).max(0.0);
+            ui.allocate_ui(egui::vec2(room, ui.available_height()), |ui| {
+                footer_note_ui(ui, note);
+            });
+        }
         ui.add_space((ui.available_width() - wide).max(0.0));
         for (at, button) in footer.rest.iter().enumerate() {
             if add_button(ui, button, button.primary).clicked() {
@@ -801,6 +806,15 @@ fn footer_ui<A>(ui: &mut egui::Ui, footer: &Footer<A>, note: Option<&str>) -> Op
         }
     });
     clicked
+}
+
+/// 页脚那句说明字：弱字、说明字号，**截断不折行**（页脚是一行高的）。
+fn footer_note_ui(ui: &mut egui::Ui, note: &str) {
+    ui.add(
+        egui::Label::new(egui::RichText::new(note).small().weak())
+            .truncate()
+            .selectable(false),
+    );
 }
 
 /// 摆一颗页脚按钮。主按钮、危险按钮、幽灵按钮在一个 `scope` 里换上那一档颜色，别的控件不受影响。`primary` 是这一颗

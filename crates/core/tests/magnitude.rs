@@ -1,5 +1,5 @@
 //! **量级测量**：整理标题与导出各跑一趟要多久，折算到真库是几秒——还是不是比一帧的
-//! 预算差着两个数量级。
+//! 预算差着两个数量级；外加刮削弹层「读取硬盘」那一格要的那一问在真库个头上要多久。
 //!
 //! ## 为什么留在树里
 //!
@@ -8,9 +8,12 @@
 //! 那两支的文档）。撑着这句话的是两趟一次性的量，量完就删了（挂单 `Q426`、`Q436`），
 //! 要复核得照条目里那段重搭一遍。这份文件就是那两趟，留下来了。
 //!
+//! 刮削弹层「读取硬盘」那一格写不写数，撑着的是第三趟（票 `gui-draws-the-rest-of-the-design/17`
+//! 的 `F-11`）：那一问在摊开弹层那一刻、画帧那条线程上现算，超过一两百毫秒就不现算。
+//!
 //! ## 这不是回归测试
 //!
-//! 两条基准都挂着 `#[ignore]`：门禁不跑，平常的 `cargo test` 也不跑。它们**不断言耗时**
+//! 三条基准都挂着 `#[ignore]`：门禁不跑，平常的 `cargo test` 也不跑。它们**不断言耗时**
 //! ——挂钟数在一台忙着的机器上是彩票——只把量到的数与折算印出来给人读。
 //! 要看的是**差几个数量级**，不是慢了 5%，所以不引 criterion、不建 `benches/`。
 //! `#[ignore]` 在这个仓库只给这种东西，房规在 `docs/agents/long-jobs.md`。
@@ -22,16 +25,21 @@
 //! ```
 //!
 //! 默认是 debug 构建，与当初那两趟同一个口径；加 `--release` 量的是另一件事，
-//! 报告头上会写明是哪一种。
+//! 报告头上会写明是哪一种。读盘那一问要拿去比「一两百毫秒」那道门槛，得用 `--release` 量
+//! （交付出去的界面是 release 构建）。
 //!
-//! ## 夹具只有一份
+//! ## 夹具两份
 //!
-//! 两条基准量的是**同一种合成库**（`合成库::造`）：N 个变体摊在十个卡带平台上，扫描、
+//! 整理标题与导出量的是**同一种合成库**（`合成库::造`）：N 个变体摊在十个卡带平台上，扫描、
 //! 识别（每个变体撞上一条合成的 DAT 条目，于是各自认出一部作品）、离线刮削、整理标题
 //! 都跑过——也就是工序段那一行被现算时库所处的样子。
 //!
-//! 唯一一条不挂 `#[ignore]` 的测试钉的是夹具本身：**造 N 个变体就真有 N 个**，每个都
-//! 认出了作品。夹具悄悄少造了，基准照样印得出一个数，只是量的不是报告上说的那个库。
+//! 读盘那一问量的是另一份（`读盘库::造`）：只有文件表与变体表，照真库的形状与个头摆——那一问只读这两样，
+//! 而它的代价跟着全库的文件表走，造小了再放大量的不是同一件事。
+//!
+//! 两份夹具各有一条不挂 `#[ignore]` 的测试钉着夹具本身：**造 N 个变体就真有 N 个**、每个都
+//! 认出了作品；读盘那份归得上的只有同名兄弟、转储里的图真写进了文件表。夹具悄悄少造了，
+//! 基准照样印得出一个数，只是量的不是报告上说的那个库。
 //!
 //! 主库拿临时目录模拟，一个字节都不碰真实设备（ADR-0004）。
 
@@ -45,15 +53,18 @@ use std::time::{Duration, Instant};
 use romcat_core::adapter::converge;
 use romcat_core::adapter::pegasus::Pegasus;
 use romcat_core::adapter::transfer;
-use romcat_core::catalog::{Catalog, Roots};
+use romcat_core::catalog::{Catalog, EntryRecord, Roots, Verdict};
 use romcat_core::dat::Convention;
 use romcat_core::dat::logiqx::{DatHeader, GameRecord, RomRecord};
 use romcat_core::dat::repo::{DatMeta, DatRepo, Unit};
-use romcat_core::fs::RealFs;
+use romcat_core::fs::{EntryKind, EntryMeta, RealFs};
 use romcat_core::identify::{self, fuzzy};
-use romcat_core::report::thousands;
+use romcat_core::platform::Manifest;
+use romcat_core::report::{human_bytes, thousands};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
-use romcat_core::scrape::{self, Priorities};
+use romcat_core::scrape::pool::MediaPool;
+use romcat_core::scrape::{self, Priorities, local};
+use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
 use romcat_core::task::Handle;
 use romcat_core::testing::container::{ZipEntrySpec, crc32, zip_container};
 use romcat_core::testing::{TempDir, temp_dir};
@@ -373,6 +384,218 @@ fn 导出一趟的量级() {
         折算("converge::run", &收敛),
         折算("transfer::export，只排计划不写盘", &整趟),
         脚注.to_string(),
+    ]
+    .join("\n"));
+}
+
+// ——— 刮削弹层「读取硬盘」那一格要的那一问（票 `gui-draws-the-rest-of-the-design/17` 的 `F-11` / 差距 `C-1`） ———
+//
+// 那一格要的数是「这一批收媒体首趟要从主库读多少字节」：拿本地媒体源那份归属表（`local::index`）按范围求一次和，
+// 已经入池的不算。票上定的是**先量一次那一问多久**：超过一两百毫秒就不在摊开弹层那一刻现算，退成「读多少要读过才知道」。
+// 弹层摊开那一下在画帧那条线程上，一百多毫秒就是一下看得见的卡顿。
+
+/// 读盘那一问量的合成库有多少个变体：**真库的个头**，不线性折算。
+///
+/// 那一问的代价跟着**全库的文件表**走，不跟着这一批有多大走：它要把每一条文件记录读出来挑媒体扩展名，再把全部变体
+/// 读一遍定「独占目录」——全选整库与只勾一行花的是同一笔。所以直接造一份真库那么大的，不造小的再放大。
+const 读盘_变体数: usize = 真库变体数的量级 as usize;
+
+/// 每多少个变体里有一份**目录树转储**（一个变体吞掉一整棵目录）。
+///
+/// 真库的文件表大半是这种转储里的内部资源：几百份转储吞掉十几万个文件（台账 `docs/library-facts.md`「成型：从文件到变体」）。
+const 读盘_转储间隔: usize = 200;
+
+/// 一份转储里有多少个文件，其中多少个带媒体扩展名。
+///
+/// 照台账的比例摆：每份转储平均七百来个文件；全库带媒体或元数据扩展名的文件四五万个（「容器构成」那一节），
+/// 几乎全在转储里——它们够不着归属规则，一张都不归，可那一问照样要把它们一条条读出来。
+const 读盘_转储文件数: usize = 700;
+const 读盘_转储里的图: usize = 180;
+
+/// 每多少个变体带三份**同名兄弟**（`游戏.zip` 旁边的 `游戏.png` / `.jpg` / `.mp4`）——那一问真正归得上的那几百份
+/// （台账「成型：从文件到变体」底下「媒体」那一小节：归得上的几百份）。
+const 读盘_兄弟间隔: usize = 200;
+
+/// 一份同名兄弟多大。真库归得上的那几百份合起来十来 GiB（同一节），大头是视频；这里一律取 16 MiB，求出来的和只看量级。
+const 读盘_兄弟字节: u64 = 16 * 1024 * 1024;
+
+/// 一份**照真库形状摆的合成库**：只有文件表与变体表——读盘那一问只读这两样。写在盘上：真库是盘上的一份 SQLite。
+struct 读盘库 {
+    _目录: TempDir,
+    catalog: Catalog,
+}
+
+impl 读盘库 {
+    fn 造(变体数: usize) -> Self {
+        let 目录 = temp_dir("magnitude-first-read");
+        let mut catalog =
+            Catalog::create(&目录.path().join("catalog.sqlite"), "读盘量级").expect("建得出中立库");
+        let 文件 = |key: String, len: u64| EntryRecord {
+            key,
+            kind: EntryKind::File,
+            meta: EntryMeta::Known {
+                len,
+                modified: None,
+            },
+            non_utf8: false,
+            verdict: Verdict::Added,
+            sample: None,
+            container: None,
+        };
+        let mut entries = Vec::new();
+        let mut variants = Vec::with_capacity(变体数);
+        for i in 0..变体数 {
+            let 平台名 = 平台[i % 平台.len()];
+            if i % 读盘_转储间隔 == 读盘_转储间隔 - 1 {
+                // 一份转储：主文件是那个目录，内部资源躺在更深的目录里（两条归属规则都够不着）。
+                let key = format!("{根名}/PSV/转储{i:06}");
+                let mut members = Vec::with_capacity(读盘_转储文件数);
+                for at in 0..读盘_转储文件数 {
+                    let 扩展名 = if at < 读盘_转储里的图 {
+                        "png"
+                    } else {
+                        "at9"
+                    };
+                    let member = format!("{key}/资源/{:02}/{at:04}.{扩展名}", at % 16);
+                    entries.push(文件(member.clone(), 64 * 1024));
+                    members.push((member, Role::Internal));
+                }
+                variants.push(Variant {
+                    main_key: key.clone(),
+                    platform: Some("PSV".to_string()),
+                    rule: "PSV 目录树".to_string(),
+                    manual: false,
+                    files: 读盘_转储文件数 as u64,
+                    bytes: 读盘_转储文件数 as u64 * 64 * 1024,
+                    unreadable_files: 0,
+                    members,
+                    key,
+                });
+                continue;
+            }
+            // 其余一文件一变体，几千个挤在同一个平台目录里（真库 `FC/` 底下就是这样）。
+            let key = format!("{根名}/{平台名}/游戏{i:06}.zip");
+            entries.push(文件(key.clone(), 4 * 1024 * 1024));
+            if i % 读盘_兄弟间隔 == 0 {
+                for 扩展名 in ["png", "jpg", "mp4"] {
+                    entries.push(文件(
+                        format!("{根名}/{平台名}/游戏{i:06}.{扩展名}"),
+                        读盘_兄弟字节,
+                    ));
+                }
+            }
+            variants.push(Variant {
+                main_key: key.clone(),
+                platform: Some(平台名.to_string()),
+                rule: SINGLE_FILE_RULE.to_string(),
+                manual: false,
+                files: 1,
+                bytes: 4 * 1024 * 1024,
+                unreadable_files: 0,
+                members: vec![(key.clone(), Role::Main)],
+                key,
+            });
+        }
+        catalog.write(1, &entries).expect("写得进文件表");
+        catalog
+            .replace_variants(&variants, 1, &Manifest::default())
+            .expect("写得进变体");
+        Self {
+            _目录: 目录,
+            catalog,
+        }
+    }
+
+    /// **那一问本身**：全部变体读一遍、归属表立一遍，按范围（这里是全选整库）求和，池里已经有的不算。
+    /// 交回（归得上几份、合起来多少字节）。
+    fn 那一问(&self, 池: &MediaPool) -> (u64, u64) {
+        let variants = self.catalog.variants().expect("读得出变体");
+        let index = local::index(&self.catalog, &variants).expect("立得出归属表");
+        let (mut 份数, mut 字节) = (0_u64, 0_u64);
+        for media in index.values().flatten() {
+            let 入过池 = self
+                .catalog
+                .media_blob(&media.key)
+                .expect("读得出")
+                .and_then(|(_, hash)| {
+                    let ext = self.catalog.media_ext(&hash).expect("读得出")?;
+                    Some(池.contains(&hash, &ext))
+                })
+                .unwrap_or(false);
+            if !入过池 {
+                份数 += 1;
+                字节 += media.bytes.unwrap_or(0);
+            }
+        }
+        (份数, 字节)
+    }
+
+    /// 报告里说明这份库的那一行——数都是从库里读回来的。
+    fn 说明(&self) -> String {
+        let mut 文件数 = 0_u64;
+        self.catalog
+            .for_each_file(&mut |_, _, _| 文件数 += 1)
+            .expect("数得出文件");
+        format!(
+            "  合成库（盘上一份 SQLite）：{} 个变体、{} 条文件记录",
+            thousands(self.catalog.variants().expect("读得出变体").len() as u64),
+            thousands(文件数),
+        )
+    }
+}
+
+#[test]
+fn 读盘那一问的合成库照真库的形状摆_归得上的只有同名兄弟() {
+    let _独占 = 独占();
+    let 库 = 读盘库::造(400);
+    let 池目录 = temp_dir("magnitude-first-read-pool");
+    let (份数, 字节) = 库.那一问(&MediaPool::at(池目录.path()));
+    // 400 个变体里每 200 个带三份同名兄弟（第 0 个、第 200 个），转储里那几百张图一张都归不上。
+    assert_eq!(份数, 6, "归得上的该只有那两组同名兄弟");
+    assert_eq!(字节, 6 * 读盘_兄弟字节);
+    let mut 带媒体扩展名的 = 0;
+    库.catalog
+        .for_each_file(&mut |key, _, _| {
+            if key.ends_with(".png") || key.ends_with(".jpg") || key.ends_with(".mp4") {
+                带媒体扩展名的 += 1;
+            }
+        })
+        .expect("数得出文件");
+    assert_eq!(
+        带媒体扩展名的,
+        6 + 2 * 读盘_转储里的图,
+        "两份转储里的图也得真写进文件表——那一问的代价正在它们身上",
+    );
+}
+
+#[test]
+#[ignore = "量级测量，要人主动跑、一趟要造一份真库那么大的合成库：cargo test --release -p romcat-core --test magnitude -- --ignored 读盘"]
+fn 读盘那一问的量级() {
+    let _独占 = 独占();
+    let 起 = Instant::now();
+    let 库 = 读盘库::造(读盘_变体数);
+    let 造库 = 起.elapsed();
+    let 池目录 = temp_dir("magnitude-first-read-pool");
+    let 池 = MediaPool::at(池目录.path());
+
+    let mut 答 = (0, 0);
+    let 耗时 = 连跑(5, || 答 = 库.那一问(&池));
+    let 最快 = 耗时.iter().min().copied().unwrap_or_default();
+    let 最慢 = 耗时.iter().max().copied().unwrap_or_default();
+
+    印(&[
+        题头("刮削弹层读盘那一问"),
+        库.说明(),
+        format!("  造库 {:.1} 秒（不算在那一问里）", 造库.as_secs_f64()),
+        format!(
+            "  那一问（全选整库）：归得上 {} 份、{}；{} 趟 {:.1}–{:.1} 毫秒",
+            thousands(答.0),
+            human_bytes(答.1),
+            耗时.len(),
+            最快.as_secs_f64() * 1_000.0,
+            最慢.as_secs_f64() * 1_000.0,
+        ),
+        "  （不折算：这份库就是真库的个头。票上的门槛是一两百毫秒——摊开弹层那一下在画帧线程上现算）".to_string(),
     ]
     .join("\n"));
 }

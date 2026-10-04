@@ -1808,13 +1808,12 @@ fn 刮削面板每一种样子都画得出来() {
     摊开刮削面板(&ctx, &mut app);
     跑(&ctx, &mut app, 2);
 
-    // 配额提醒摆着的那一帧（那时四个旋钮让位给它）。
+    // 勾上联网源那一帧：勾上即生效（票 `gui-draws-the-rest-of-the-design/17` 的 `F-6`），预估框换警示样。
     app.browse_site_and_tasks().0.scrape_mut().toggle_online();
-    assert!(app.browse().scrape().quota_prompt());
+    assert!(app.browse().scrape().online());
     跑(&ctx, &mut app, 2);
 
-    // 勾上联网源之后那一帧：底下那本账多出「每份图还要各下一次」那一句。
-    app.browse_site_and_tasks().0.scrape_mut().confirm_online();
+    // 再收媒体那一帧：底下那本账多出「每份图还要各下一次」那一句。
     app.browse_site_and_tasks().0.scrape_mut().set_media(true);
     跑(&ctx, &mut app, 2);
     assert!(
@@ -1895,35 +1894,81 @@ fn 刮削面板的范围就是屏上写着的那个数() {
 }
 
 #[test]
-fn 勾联网源先弹配额提醒_说清赌的是账号与地址() {
+fn 勾联网源即生效_警示常驻在预估框里_那句说清赌的是账号与地址() {
+    // 拿主意的人 2026-10-02 裁 `F-6`（票 `gui-draws-the-rest-of-the-design/17`，翻掉票 gr-10 当年那一条验收）：
+    // 勾上即生效，不再先摆「我知道，勾上」那一层；警示从「点一下就消失的一层」换成**勾着就一直在**的那一框——
+    // 紧挨着请求数，就在按「开始刮削」之前。ADR-0007 要的限流与 431 硬停在核心里，不靠这一层。
     let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
     let mut app = 界面(小库);
     摊开刮削面板(&ctx, &mut app);
-    let (browse, ..) = app.browse_site_and_tasks();
-    let panel = browse.scrape_mut();
+    跑(&ctx, &mut app, 2);
 
-    panel.toggle_online();
-    // **提醒摆出来了，而联网源还没勾上。** 反过来的话，人是在勾完之后才读到
-    // 「撞穿是永久封禁」——那时候已经晚了。
-    assert!(panel.quota_prompt(), "勾联网源该先弹配额提醒");
-    assert!(!panel.online(), "点头之前不该算勾上");
-
-    let 提醒 = romcat_gui::scrape::QUOTA_WARNING;
-    for 该说的 in ["账号", "IP", "永久封禁"] {
-        assert!(提醒.contains(该说的), "配额提醒里没说「{该说的}」：{提醒}");
-    }
-
-    panel.decline_online();
+    // **按的是屏上那一行**：数据源那一栏的「ScreenScraper」。
+    let 屏上 = shared::点正好(&ctx, "ScreenScraper", |ui| app.ui(ui));
     assert!(
-        !panel.online() && !panel.quota_prompt(),
-        "「算了」该把这一下整个撤掉"
+        app.browse().scrape().online(),
+        "勾上联网源该当场生效：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("我知道，勾上") && !屏上.contains("勾上联网源之前"),
+        "不该再摆配额提醒那一层：\n{屏上}"
     );
 
-    panel.toggle_online();
-    panel.confirm_online();
+    // **先跑完淡入再看颜色**：弹层打开时从透明淡进来，淡到一半时每一格颜色都只有一半的不透明度
+    // （`tests/dialog.rs` 那条主按钮的测试同一个道理）。按帧推，不等挂钟。
+    跑(&ctx, &mut app, 30);
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    let 那本账 = app
+        .browse()
+        .scrape()
+        .estimate()
+        .cloned()
+        .expect("这本账该算得出来");
     assert!(
-        panel.online() && !panel.quota_prompt(),
-        "点过头之后才算勾上"
+        那本账.requests > 0,
+        "前提：合成数据里有已确认的条目，联网那一档真会发请求"
+    );
+    // **警示常驻在预估框里**：三格所在那一框换成警示样（`mid` 描边、`mid-soft` 底）。
+    let 警示底 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme())
+        .mid_soft;
+    let 三格 = 预估三格(&out);
+    assert!(
+        shared::填着这个颜色的框(&out, 警示底)
+            .iter()
+            .any(|框| 三格.iter().all(|格| 框.contains_rect(*格))),
+        "勾着联网源时预估那一框该换成警示样：\n{屏上}"
+    );
+    let 那句 = "将消耗 ScreenScraper 配额。配额按账号和 IP 计算，超出可能导致封禁。";
+    assert!(屏上.contains(那句), "预估框右边该写配额那句短话：\n{屏上}");
+    for 该说的 in ["账号", "IP", "封禁"] {
+        assert!(那句.contains(该说的), "配额那句里没说「{该说的}」：{那句}");
+    }
+    // 那句长警告不丢：挂在 ScreenScraper 那一行的悬停上，设置屏照旧用它（`tests/settings.rs` 钉着它的字）。
+    for 该说的 in ["账号", "IP", "永久封禁"] {
+        assert!(
+            romcat_gui::scrape::QUOTA_WARNING.contains(该说的),
+            "长警告里没说「{该说的}」"
+        );
+    }
+    let 停住之后 = shared::悬停在(&ctx, "ScreenScraper", |ui| app.ui(ui));
+    assert!(
+        停住之后.contains(romcat_gui::scrape::QUOTA_WARNING),
+        "指针停在 ScreenScraper 那一行上，悬停该说那句长警告：\n{停住之后}"
+    );
+
+    // 取消勾选同样一下就成，警示跟着撤掉。
+    let _ = shared::点正好(&ctx, "ScreenScraper", |ui| app.ui(ui));
+    assert!(!app.browse().scrape().online(), "取消勾选该当场生效");
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(!屏上.contains(那句), "取消勾选之后配额那句还挂着：\n{屏上}");
+    assert!(
+        屏上.contains("仅使用本地数据源，不会产生网络请求。"),
+        "只勾本地源时右边该说不会产生网络请求：\n{屏上}"
     );
 }
 
@@ -2143,6 +2188,649 @@ fn 刮削弹层的采法照稿两行_名字底下一行核心库那句() {
     // 两颗照旧是两颗单选：点小字那一行也换得过去。
     let _ = shared::点正好(&ctx, Gather::Refresh.why(), |ui| app.ui(ui));
     assert_eq!(app.browse().scrape().sweep(), Gather::Refresh);
+}
+
+// ── 刮削弹层照稿（票 `gui-draws-the-rest-of-the-design/17`）──────────────────────────
+//
+// 「刮削元数据」那一层照设计稿 `prototype.html` 刮削那一段画：标头、三栏、`.est` 预估框、底部 `.note` 提示框、页脚。
+// 岔路口 `F-1`…`F-16` 拿主意的人 2026-10-02 逐条裁过（`gaps-scrape-dialog.md` 文末「裁定」）。这一组**拿矩形断摆法、
+// 拿字断说法**，不比像素——像素那一层是截图门（`tests/snapshot.rs` 的 `scrape/*`）。
+
+/// 这一帧画出来的每一段字，连同画在哪儿，按画出来的次序。
+fn 字与位置(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+    fn 收(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => out.push((
+                text.galley.text().to_owned(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+            )),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// 屏上**正好**写着这几个字、而且只有一处的地方。
+#[track_caller]
+fn 唯一一处(output: &egui::FullOutput, 这几个字: &str) -> egui::Rect {
+    let 每一处 = shared::画着的每一处(output, &|text| text == 这几个字);
+    assert_eq!(
+        每一处.len(),
+        1,
+        "屏上该正好有一处「{这几个字}」：\n{}",
+        画出来的字(output)
+    );
+    每一处[0]
+}
+
+/// 预估框那三格的小标签各画在哪儿（设计稿 `.est .l`）。
+#[track_caller]
+fn 预估三格(output: &egui::FullOutput) -> [egui::Rect; 3] {
+    ["网络请求", "预计耗时", "读取硬盘"].map(|标签| 唯一一处(output, 标签))
+}
+
+/// 预估框里**这一格那个数**（设计稿 `.est .v`）：摆在小标签正上方、与它左缘对齐的那一段字。
+#[track_caller]
+fn 格里的数(output: &egui::FullOutput, 标签: egui::Rect) -> String {
+    let 上头的: Vec<String> = 字与位置(output)
+        .into_iter()
+        .filter(|(_, rect)| {
+            (rect.left() - 标签.left()).abs() < 0.5 && rect.bottom() <= 标签.top() + 0.5
+        })
+        .filter(|(_, rect)| 标签.top() - rect.bottom() < 4.0)
+        .map(|(text, _)| text)
+        .collect();
+    assert_eq!(
+        上头的.len(),
+        1,
+        "小标签正上方该正好有一个数：{上头的:?}\n{}",
+        画出来的字(output)
+    );
+    上头的[0].clone()
+}
+
+/// 浏览屏「列表」那一条右端那一句写着的两个数：已选几个作品、几个变体（`browse::Screen::count_line`）。
+fn 浏览屏那一句的两个数(app: &App) -> (u64, u64) {
+    let browse = app.browse();
+    (
+        browse.picked().count(browse.window().total()),
+        browse.scope_total().expect("前提：变体数数得出来"),
+    )
+}
+
+fn 千分(value: u64) -> String {
+    romcat_core::report::thousands(value)
+}
+
+#[test]
+fn 刮削弹层照稿_标题与说明带作品数和变体数_预估一个框里三格_优先级按钮与那句话在同一块提示框里() {
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    // **先跑完淡入再看颜色**：弹层打开时从透明淡进来，淡到一半时每一格颜色都只有一半的不透明度
+    // （`tests/dialog.rs` 那条主按钮的测试同一个道理）。按帧推，不等挂钟。
+    跑(&ctx, &mut app, 30);
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+
+    // 标头：标题照稿，范围挪进底下那句说明（`S-03`）。
+    let _ = 唯一一处(&out, "刮削元数据");
+    // 说明那句带作品数与变体数，与浏览屏那一句是同两个数（全选那一档照稿，`F-1`）。
+    let (作品数, 变体数) = 浏览屏那一句的两个数(&app);
+    assert!(
+        屏上.contains(&format!("已选 {} 个作品", 千分(作品数)))
+            && 屏上.contains(&format!("{} 个变体", 千分(变体数))),
+        "前提：浏览屏那一句写着这两个数：\n{屏上}"
+    );
+    let 说明 = format!(
+        "应用于当前筛选结果：{} 个作品（{} 个变体）。如需调整范围，请修改筛选条件。",
+        千分(作品数),
+        千分(变体数),
+    );
+    assert!(屏上.contains(&说明), "说明那句该是「{说明}」：\n{屏上}");
+    assert!(
+        !屏上.contains("三处同一个数"),
+        "实现口径不念给人听（`S-05`）：\n{屏上}"
+    );
+
+    // 预估：**一个框里三格**，一行排开（设计稿 `.est`）。
+    let 次级底 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme())
+        .panel_2;
+    let 框们 = shared::填着这个颜色的框(&out, 次级底);
+    let 三格 = 预估三格(&out);
+    let 预估框 = *框们
+        .iter()
+        .find(|框| 三格.iter().all(|格| 框.contains_rect(*格)))
+        .unwrap_or_else(|| panic!("三格不在同一个框里：{三格:?}，框 {框们:?}"));
+    assert!(
+        三格
+            .windows(2)
+            .all(|两格| (两格[0].center().y - 两格[1].center().y).abs() < 0.5
+                && 两格[0].right() < 两格[1].left()),
+        "三格该在一行上从左到右排开：{三格:?}"
+    );
+
+    // 提示框：「调整优先级…」与「不会覆盖你的裁决……」在同一块里（`S-13`）。
+    let 按钮 = 唯一一处(&out, romcat_gui::priority::OPEN);
+    let 那句话 = shared::画着的每一处(&out, &|text| {
+        text.contains("不会覆盖你的裁决和手动修改的元数据。")
+    });
+    assert_eq!(那句话.len(), 1, "那句话该正好画一处：\n{屏上}");
+    let 提示框 = *框们
+        .iter()
+        .find(|框| 框.contains_rect(按钮) && 框.contains_rect(那句话[0]))
+        .unwrap_or_else(|| {
+            panic!(
+                "「调整优先级…」与那句话不在同一块提示框里：按钮 {按钮:?}，那句 {:?}",
+                那句话[0]
+            )
+        });
+    assert!(
+        提示框.top() >= 预估框.bottom(),
+        "提示框该在预估框底下：预估 {预估框:?}，提示 {提示框:?}"
+    );
+    assert!(
+        (按钮.center().y - 那句话[0].center().y).abs() < 2.0 || 按钮.left() > 那句话[0].right(),
+        "按钮该在那句话右边：按钮 {按钮:?}，那句 {:?}",
+        那句话[0]
+    );
+    // 那句「有值了但我想换一个」不再常驻在采法那一栏（并进了提示框）。
+    assert!(!屏上.contains("不该靠重采"), "{屏上}");
+}
+
+#[test]
+fn 刮削弹层的说明_勾了几行时说勾选的那几个作品() {
+    // `F-1` 部分勾选那一档：屏上说的范围与按下去动的那一批是同一批，这一档改的是勾选，不是筛选条件。
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = 界面(小库);
+    跑(&ctx, &mut app, 2);
+    {
+        let (browse, site) = app.browse_and_site();
+        let rows = site
+            .catalog
+            .work_page(browse.query(), 0, 3)
+            .expect("取得出一页");
+        browse.picked_mut().toggle(&rows[0].anchor);
+        browse.picked_mut().toggle(&rows[2].anchor);
+    }
+    跑(&ctx, &mut app, 2);
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.open_scrape(&site.catalog);
+    }
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    let (作品数, 变体数) = 浏览屏那一句的两个数(&app);
+    assert_eq!(作品数, 2, "前提：勾了两行");
+    assert_eq!(
+        app.browse().scrape().scope_total(),
+        变体数,
+        "前提：范围就是勾中的那一批"
+    );
+    let 说明 = format!(
+        "应用于勾选的 {} 个作品（{} 个变体）。如需调整范围，请修改勾选。",
+        千分(作品数),
+        千分(变体数),
+    );
+    assert!(屏上.contains(&说明), "说明那句该是「{说明}」：\n{屏上}");
+    assert!(
+        !屏上.contains("当前筛选结果"),
+        "只勾了两行，不许说成当前筛选结果：\n{屏上}"
+    );
+
+    // **全选之后又点掉一行**：勾中的就只是剩下那几行，同样不许说成当前筛选结果。
+    app.browse_site_and_tasks().0.scrape_mut().close();
+    {
+        let (browse, site) = app.browse_and_site();
+        let rows = site
+            .catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一页");
+        browse.picked_mut().select_all();
+        browse.picked_mut().toggle(&rows[0].anchor);
+    }
+    跑(&ctx, &mut app, 2);
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.open_scrape(&site.catalog);
+    }
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    let (作品数, 变体数) = 浏览屏那一句的两个数(&app);
+    assert_eq!(
+        作品数 + 1,
+        app.browse().window().total(),
+        "前提：全选之后点掉了一行"
+    );
+    let 说明 = format!(
+        "应用于勾选的 {} 个作品（{} 个变体）。如需调整范围，请修改勾选。",
+        千分(作品数),
+        千分(变体数),
+    );
+    assert!(屏上.contains(&说明), "说明那句该是「{说明}」：\n{屏上}");
+}
+
+#[test]
+fn 刮削弹层的说明_从详情页刮削此作品进来时说那一个作品() {
+    // `F-1` 单个作品那一档、`F-15` 详情页照旧摊开这一层：「应用于「作品名」：M 个变体。」
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = 界面(小库);
+    跑(&ctx, &mut app, 2);
+    {
+        let (browse, site) = app.browse_and_site();
+        let rows = site
+            .catalog
+            .work_page(browse.query(), 0, 50)
+            .expect("取得出一页");
+        let 作品 = rows
+            .iter()
+            .find(|row| matches!(row.anchor, WorkAnchor::Work(_)))
+            .expect("总有一行是认出作品的");
+        browse.open_work(&site.catalog, &作品.anchor);
+        browse.open_page(browse::work::Tab::Overview);
+    }
+    跑(&ctx, &mut app, 3);
+    let 作品名 = app.browse().page_title().expect("前提：详情页开着");
+    let _ = shared::点正好(&ctx, "刮削此作品", |ui| app.ui(ui));
+    assert!(
+        app.browse().scrape().is_open(),
+        "按「刮削此作品」该摊开刮削那一层"
+    );
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    let 说明 = format!(
+        "应用于「{作品名}」：{} 个变体。",
+        千分(app.browse().scrape().scope_total())
+    );
+    assert!(屏上.contains(&说明), "说明那句该是「{说明}」：\n{屏上}");
+}
+
+#[test]
+fn 预估三格的数逐格等于核心那本账() {
+    // `F-8` 收媒体的联网那一档请求数是下界，数后加「+」；`F-9` 撞上自设上限写这一趟真会发的数；
+    // `F-10` 不到 1 秒写「不到 1 秒」（核心 `rough_duration`）；`F-11` 读盘那一格（退路：不收媒体 0 B、收媒体「—」）。
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+
+    for (联网, 媒体) in [(false, false), (false, true), (true, false), (true, true)] {
+        {
+            let panel = app.browse_site_and_tasks().0.scrape_mut();
+            if panel.online() != 联网 {
+                panel.toggle_online();
+            }
+            panel.set_media(媒体);
+        }
+        跑(&ctx, &mut app, 2);
+        let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+        let 屏上 = 画出来的字(&out);
+        let 那本账 = app
+            .browse()
+            .scrape()
+            .estimate()
+            .cloned()
+            .expect("这本账该算得出来");
+        let [请求格, 耗时格, 读盘格] = 预估三格(&out);
+
+        let 该写的请求 = if 那本账.media_downloads && 那本账.requests > 0 {
+            format!("{}+", 千分(那本账.requests))
+        } else {
+            千分(那本账.requests)
+        };
+        assert_eq!(
+            格里的数(&out, 请求格),
+            该写的请求,
+            "联网 {联网} 媒体 {媒体}：\n{屏上}"
+        );
+        assert_eq!(
+            格里的数(&out, 耗时格),
+            romcat_core::report::rough_duration(
+                u64::try_from(那本账.elapsed.as_millis()).unwrap_or(u64::MAX)
+            ),
+            "联网 {联网} 媒体 {媒体}：\n{屏上}"
+        );
+        assert_eq!(
+            格里的数(&out, 读盘格),
+            if 媒体 { "—" } else { "0 B" },
+            "联网 {联网} 媒体 {媒体}：\n{屏上}"
+        );
+
+        if !联网 {
+            assert_eq!(那本账.requests, 0, "只勾本地源一个请求都不该发");
+            assert!(
+                屏上.contains("仅使用本地数据源，不会产生网络请求。"),
+                "{屏上}"
+            );
+        }
+        if 媒体 {
+            assert!(
+                屏上.contains("首趟要把图从主库读一遍，读多少要读过才知道。"),
+                "收媒体时右边该说读多少要读过才知道：\n{屏上}"
+            );
+        }
+        if 联网 && 媒体 {
+            assert!(
+                屏上.contains("另加下载图片的请求，有几份要查过才知道。"),
+                "请求数是下界时右边该补那一句：\n{屏上}"
+            );
+        }
+        if let Some(想问的) = 那本账.over_budget {
+            assert_eq!(
+                那本账.requests, 那本账.budget,
+                "撞上上限时格里写这一趟真会发的数"
+            );
+            assert!(
+                屏上.contains(&format!(
+                    "这一批想问 {} 条，这一趟到 {} 就停，剩下的下一趟再来。",
+                    千分(想问的),
+                    千分(那本账.budget)
+                )),
+                "撞上自设上限时右边该说清：\n{屏上}"
+            );
+        }
+        // 「（a 个变体锚点、b 个作品锚点）」那半句去掉了（`S-19`）：作品数与变体数在标头。
+        assert!(!屏上.contains("个变体锚点"), "{屏上}");
+    }
+}
+
+#[test]
+fn 勾了联网却一个可查的条目都没有时不警示_右边说清不会产生网络请求() {
+    // `F-12`：汉化版在 ScreenScraper 眼里是「未识别 ROM」，整批都是没确认的条目时这一态很常见——
+    // 警示一个零请求的趟是狼来了。
+    use shared::档;
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = shared::小库(
+        &[
+            ("SFC", "待裁决.zip", 档::待裁决),
+            ("GBA", "没候选.zip", 档::没有候选),
+        ],
+        shared::干净工作目录("romcat-测试-刮削-没有可查的"),
+    );
+    app.show_view(View::Browse);
+    摊开刮削面板(&ctx, &mut app);
+    app.browse_site_and_tasks().0.scrape_mut().toggle_online();
+    // **先跑完淡入再看颜色**：弹层打开时从透明淡进来，淡到一半时每一格颜色都只有一半的不透明度
+    // （`tests/dialog.rs` 那条主按钮的测试同一个道理）。按帧推，不等挂钟。
+    跑(&ctx, &mut app, 30);
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    assert_eq!(
+        app.browse()
+            .scrape()
+            .estimate()
+            .map(|account| account.requests),
+        Some(0),
+        "前提：一个已确认的条目都没有，一个请求都不发"
+    );
+    assert!(
+        屏上.contains("这一批没有可查的条目（只对已确认的条目发请求），不会产生网络请求。"),
+        "右边该说清不会产生网络请求：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("将消耗 ScreenScraper 配额"),
+        "零请求不该警示：\n{屏上}"
+    );
+    let 警示底 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme())
+        .mid_soft;
+    let 三格 = 预估三格(&out);
+    assert!(
+        !shared::填着这个颜色的框(&out, 警示底)
+            .iter()
+            .any(|框| 三格.iter().all(|格| 框.contains_rect(*格))),
+        "零请求时预估框不该换警示样"
+    );
+}
+
+#[test]
+fn 那本账算不出来时开始刮削画灰_页脚常驻那句为什么_按下去被拒的是同一句_台上不多一趟() {
+    // `F-13`、差距 `S-20`：ADR-0005 再修订两条——画灰的同时，唯一的入口 `start()` 拒下要带着理由；屏上常驻着那条理由
+    // （页脚左边，`Dialog::footer_note`），而且两处是同一句。从前 `start()` 只拦「台上有一趟」与「范围空」，绕过界面
+    // 能在零估算下开跑。
+    use romcat_core::catalog::{Catalog, roots};
+    use romcat_core::platform::Manifest;
+    use romcat_core::site::Site;
+    use romcat_core::verdict::Store;
+
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let 目录 = shared::干净工作目录("romcat-测试-刮削-账算不出来");
+    std::fs::create_dir_all(&目录).expect("建得出工作目录");
+    // **库在盘上**：要从另一条连接把它弄坏，才造得出「这本账算不出来」。
+    let 库文件 = 目录.join("中立库.sqlite");
+    let mut catalog = Catalog::create(&库文件, "测试主库").expect("建得出中立库");
+    roots::add_root(&catalog, None, shared::根, std::path::Path::new("/主库")).expect("建得出根");
+    catalog
+        .replace_variants(&[shared::变体("SFC", "短.zip")], 1, &Manifest::default())
+        .expect("写得进变体");
+    let site = Site::in_memory(
+        catalog,
+        Store::in_memory().expect("开得出沉淀库"),
+        shared::根,
+    );
+    let mut app = App::new(site, 目录.clone());
+    app.show_view(View::Browse);
+    摊开刮削面板(&ctx, &mut app);
+    assert!(app.browse().scrape().is_open(), "前提：摊开了");
+
+    // 弄坏那本账读的表：从另一条连接把变体表挪走（这一层下一次问库就读不动）。
+    let conn = rusqlite::Connection::open(&库文件).expect("再开得出那份库");
+    conn.execute_batch("ALTER TABLE variant RENAME TO 挪走了的变体表")
+        .expect("挪得走");
+    drop(conn);
+
+    // 只画刮削这一层：浏览屏那一屏也读变体表，这条测的是这一层自己。
+    let mut 那一帧 = None;
+    {
+        let (browse, site, tasks) = app.browse_site_and_tasks();
+        for _ in 0..3 {
+            那一帧 = Some(headless::frame(&ctx, headless::input(), |ui| {
+                browse.scrape_mut().show(ui.ctx(), site, tasks);
+            }));
+        }
+    }
+    let out = 那一帧.expect("画过");
+    let 屏上 = 画出来的字(&out);
+    assert!(
+        app.browse().scrape().estimate().is_none(),
+        "前提：这本账算不出来"
+    );
+    // 页脚左边那一句：与「取消」「开始刮削」在同一行、摆在它们左边的那一段字。
+    let 取消 = 唯一一处(&out, "取消");
+    let 开始 = 唯一一处(&out, "开始刮削");
+    let 页脚那句: Vec<String> = 字与位置(&out)
+        .into_iter()
+        .filter(|(text, rect)| {
+            text != "取消" && text != "开始刮削" && (rect.center().y - 取消.center().y).abs() < 4.0
+        })
+        .map(|(text, _)| text)
+        .collect();
+    assert_eq!(
+        页脚那句.len(),
+        1,
+        "页脚左边该常驻一句为什么按不动：{页脚那句:?}\n{屏上}"
+    );
+    let 理由 = 页脚那句[0].clone();
+
+    // 按真按钮：画灰着，按下去什么都不排，这一层留着。
+    let 排过的 = app.tasks().history().len() + app.tasks().queued().len();
+    {
+        let (browse, site, tasks) = app.browse_site_and_tasks();
+        let _ = shared::按在(&ctx, 开始.center(), |ui| {
+            browse.scrape_mut().show(ui.ctx(), site, tasks);
+        });
+        assert!(browse.scrape().is_open(), "画灰的按钮按下去，这一层该留着");
+        // 绕过界面直接调那个唯一的入口：拒下，拒的就是页脚那一句。
+        browse.scrape_mut().start(site, tasks);
+        assert_eq!(
+            browse.scrape().error(),
+            Some(理由.as_str()),
+            "守卫拒下的那句该与页脚常驻的那句是同一句"
+        );
+        assert!(browse.scrape().is_open(), "拒下了，这一层该留着");
+    }
+    assert_eq!(
+        app.tasks().history().len() + app.tasks().queued().len(),
+        排过的,
+        "那本账算不出来，任务台上却多了一趟"
+    );
+}
+
+#[test]
+fn 没有联网账号时那一行照样勾得上_小字与按开始刮削拒下的那句都指向设置屏() {
+    // `F-7`：「缺一样东西」的拒绝不禁按钮、点了要说话（ADR-0005 修订段）；按之前那一行小字就说清，按下去拒的那句指设置屏。
+    // 「有没有账号」问核心库那一处（`online::has_account`：环境变量与工作目录里那份文件哪一条都算）。
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let 目录 = shared::干净工作目录("romcat-测试-刮削-没有账号");
+    let site = demo::site(demo::browse(小库).expect("造得出合成数据")).expect("开得出现场");
+    let mut app = App::new(site, 目录.clone());
+    app.show_view(View::Browse);
+    摊开刮削面板(&ctx, &mut app);
+    跑(&ctx, &mut app, 2);
+    assert!(
+        !romcat_core::scrape::online::has_account(&目录),
+        "前提：这台机器上没有 ScreenScraper 账号（环境变量与工作目录里都没有）"
+    );
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    let 小字 = "没有账号——在设置屏填好之前，开始时会拒";
+    assert!(
+        屏上.contains(小字),
+        "ScreenScraper 那一行的小字该说没有账号：\n{屏上}"
+    );
+
+    // 照样勾得上。
+    let _ = shared::点正好(&ctx, "ScreenScraper", |ui| app.ui(ui));
+    assert!(app.browse().scrape().online(), "没有账号也勾得上");
+    跑(&ctx, &mut app, 2);
+    let 排过的 = app.tasks().history().len() + app.tasks().queued().len();
+    let _ = shared::点正好(&ctx, "开始刮削", |ui| app.ui(ui));
+    assert!(app.browse().scrape().is_open(), "拒下了，这一层该留着");
+    let 拒下的 = app
+        .browse()
+        .scrape()
+        .error()
+        .expect("按下去该说一句为什么")
+        .to_owned();
+    assert!(
+        拒下的.contains("设置屏"),
+        "拒下的那句该指向设置屏：{拒下的}"
+    );
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(屏上.contains(&拒下的), "拒下的那句该画在屏上：\n{屏上}");
+    assert_eq!(
+        app.tasks().history().len() + app.tasks().queued().len(),
+        排过的,
+        "没有账号却排上了一趟"
+    );
+
+    // 工作目录里存上一套（设置屏存的就是这一份）：再摊开，那一行的小字换回联网那句。
+    romcat_core::scrape::online::save_account(
+        &目录,
+        &romcat_core::scrape::online::Account {
+            dev_id: "测试".to_owned(),
+            dev_password: "测试".to_owned(),
+            ..Default::default()
+        },
+    )
+    .expect("存得下账号");
+    app.browse_site_and_tasks().0.scrape_mut().close();
+    摊开刮削面板(&ctx, &mut app);
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(!屏上.contains(小字), "有了账号还说没有：\n{屏上}");
+    // 那一行小字在这一栏里折成两行（收尾的「）」不落行首，折行处是一个换行），比的时候不看换行。
+    assert!(
+        屏上
+            .replace('\n', "")
+            .contains("联网 · 消耗配额（按账号和 IP 计算）"),
+        "{屏上}"
+    );
+}
+
+#[test]
+fn 开发商与发行商并成一格_拨它同时拨两个字段() {
+    // `F-3`：两样同源同代价，分开勾一分钱都省不下来；只在界面层折，核心照旧是两个字段。
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::点正好(&ctx, "开发商 / 发行商", |ui| app.ui(ui));
+    let fields = app.browse().scrape().fields().clone();
+    assert!(
+        !fields.contains(&Field::Developer) && !fields.contains(&Field::Publisher),
+        "拨那一格该把两个字段一起拨掉：{fields:?}\n{屏上}"
+    );
+    assert!(fields.contains(&Field::Genre), "别的字段不该跟着掉");
+    let _ = shared::点正好(&ctx, "开发商 / 发行商", |ui| app.ui(ui));
+    let fields = app.browse().scrape().fields().clone();
+    assert!(fields.contains(&Field::Developer) && fields.contains(&Field::Publisher));
+}
+
+#[test]
+fn 数据源那一栏照稿逐行_本地三行勾着按不动_本地媒体跟着媒体那一格走() {
+    // `F-5`：照稿逐行画「中文离线源」「DAT」「本地媒体」与 ScreenScraper，源名与优先级表、报告同一个名字；
+    // 本地三行按不动（核心不加逐源开关）；没取回的那一行小字换核心库给的状态词（这份工作目录里一个源都没下载）。
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut app = 界面(小库);
+    摊开刮削面板(&ctx, &mut app);
+    跑(&ctx, &mut app, 2);
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    for 源 in [
+        romcat_core::identify::fuzzy::SOURCE,
+        "DAT",
+        romcat_core::scrape::local::LOCAL_MEDIA,
+        romcat_core::scrape::online::SCREEN_SCRAPER,
+    ] {
+        let _ = 唯一一处(&out, 源);
+    }
+    let 未下载 = romcat_core::sources::SourceState::Missing
+        .label()
+        .expect("没下载那一档有词");
+    assert!(
+        屏上.matches(未下载).count() >= 2,
+        "中文离线源与 DAT 都没下载，那两行小字该换成「{未下载}」：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("勾上「媒体」才参加"),
+        "不收媒体时本地媒体那一行该说清：\n{屏上}"
+    );
+
+    // 本地三行按不动：点了不改任何东西。
+    let 媒体原来 = app.browse().scrape().media();
+    let _ = shared::点正好(&ctx, romcat_core::scrape::local::LOCAL_MEDIA, |ui| {
+        app.ui(ui)
+    });
+    assert_eq!(
+        app.browse().scrape().media(),
+        媒体原来,
+        "本地媒体那一行按不动"
+    );
+
+    // 勾上「媒体」，本地媒体那一行跟着参加。
+    app.browse_site_and_tasks().0.scrape_mut().set_media(true);
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(!屏上.contains("勾上「媒体」才参加"), "{屏上}");
+    assert!(屏上.contains("本地 · 同名图片或独立目录中的图片"), "{屏上}");
+    // 「默认只勾本地源。」那一行去掉了（`S-12`），预估框右边那句说的是同一件事。
+    assert!(!屏上.contains("默认只勾本地源。"), "{屏上}");
 }
 
 // ── 收藏与合集（票 `gui-redesign/06`） ────────────────────────────────────────

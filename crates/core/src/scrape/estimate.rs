@@ -6,9 +6,9 @@
 //!
 //! ## 为什么它不是「把计划立起来数一遍」
 //!
-//! 那样最准，但走不通：立一份完整的[计划](super)要读全库的变体（真库 46,444 个）、
-//! 全库的候选（150,959 条）与全库的文件表（216,203 条）。那是好几秒的活，而这块面板
-//! 上每动一下旋钮都要重算一次——放在画帧那条线程上就是挂账 D156 那件事的翻版。
+//! 那样最准，但走不通：立一份完整的[计划](super)要读全库的变体（真库四万多个）、
+//! 全库的候选（十几万条）与全库的文件表（二十多万条，几个数都见台账 `docs/library-facts.md`）。
+//! 那是好几秒的活，而这块面板上每动一下旋钮都要重算一次——放在画帧那条线程上就是挂账 D156 那件事的翻版。
 //!
 //! 于是这里走一条**窄得多、但答得出同一个数**的路：
 //!
@@ -39,8 +39,8 @@ use super::{AnchorKind, Basis, Locality, Options, Profile};
 
 /// **一个锚点采一遍元数据要多久**。
 ///
-/// 实测：真库 55,670 个锚点、七个本地源，元数据那一趟 **2.3 秒**
-/// （`docs/library-facts.md`，2026-09-01）。42 微秒就是这么来的。
+/// 实测：真库五万多个锚点、七个本地源，元数据那一趟两秒多
+/// （确切数与日期见台账 `docs/library-facts.md`）。42 微秒就是这么来的。
 ///
 /// 它是个常数而不是一个学出来的数：这份估算要的是「一分半还是二十分钟」这个量级，
 /// 而不是秒表。量级说对了，人就知道该不该按下去。
@@ -80,9 +80,18 @@ pub struct Estimate {
     /// 这一趟要不要回主库读盘（收媒体、而且用了本地源）。
     ///
     /// 首趟读盘那一段不在 [`Self::elapsed`] 里：读多少取决于这一批旁边摆着多少张图、
-    /// 各自多大，那要把全库的文件表折一遍才数得出来——而这块面板每动一下旋钮都要
-    /// 重算一次。**说不出来就说说不出来**，别摆一个编出来的秒数。
+    /// 各自多大，那要把全库的文件表折一遍才数得出来。**说不出来就说说不出来**，别摆一个编出来的秒数。
+    ///
+    /// **量过**（票 `gui-draws-the-rest-of-the-design/17` 的 `F-11`，挂单 `Q1757`）：那一问——本地媒体源那份归属表
+    /// （`local::index`）按范围求一次和——在真库个头的合成库上 release 构建要两百多毫秒，不随范围变小
+    /// （`tests/magnitude.rs` 的 `读盘那一问的量级`）。刮削弹层摊开那一下在画帧那条线程上，于是不现算：
+    /// 弹层「读取硬盘」那一格收媒体时写「—」、说读多少要读过才知道。
     pub media_disk_read: bool,
+    /// **有判据可查**的作品锚点有几个：联网那一档最多问这么多（离线档不数，是 0）。
+    ///
+    /// 给弹层分开「一个请求都不发」的两种缘故：一个可查的都没有（只对已确认的条目发请求），与可查的上一趟都查过、
+    /// 输入没变（补缺那一档）。两种都不该警示配额，可说成同一句就有一种是假话。
+    pub queryable: u64,
     /// 大概多久。
     pub elapsed: Duration,
 }
@@ -114,12 +123,15 @@ pub fn estimate(
     };
     let wanted = u64::try_from(works.len()).unwrap_or(u64::MAX);
 
-    let queries = if options.profile == Profile::Online {
+    let Queries {
+        asked: queries,
+        queryable,
+    } = if options.profile == Profile::Online {
         count_queries(catalog, options, &works)?
     } else {
         // **离线档一个请求都不发。** 这不是算出来的，是那道闸门的结论：离线档只收
         // 自报本地的源，混进一个联网源会当场被拒（`scrape::sources`）。
-        0
+        Queries::default()
     };
     let (requests, over_budget) = if queries > limits.budget {
         (limits.budget, Some(queries))
@@ -140,26 +152,38 @@ pub fn estimate(
         budget: limits.budget,
         media_downloads: options.media && options.profile == Profile::Online,
         media_disk_read: options.media,
+        queryable,
         elapsed,
     })
 }
 
-/// 有几个作品锚点这一趟真会发出一次条目查询。
+/// 联网那一档数出来的两个数。
+#[derive(Debug, Default)]
+struct Queries {
+    /// 这一趟真会发出一次条目查询的作品锚点几个。
+    asked: u64,
+    /// 有判据可查的一共几个（[`Estimate::queryable`]）。
+    queryable: u64,
+}
+
+/// 有几个作品锚点这一趟真会发出一次条目查询，以及有判据可查的一共几个。
 fn count_queries(
     catalog: &Catalog,
     options: &Options,
     works: &[(String, String)],
-) -> Result<u64, CatalogError> {
+) -> Result<Queries, CatalogError> {
     // 上一趟的采集记录一次问回来。几千个作品各问一次是几千次库查询，而这块面板每动
     // 一下旋钮都要重算一遍。
     let known = catalog.scrape_inputs_of(AnchorKind::Work.label(), SCREEN_SCRAPER)?;
     let mut count = 0_u64;
+    let mut queryable = 0_u64;
     for (name, representative) in works {
         // 判据取不出来就是**没有可发的哈希**：这一条一个请求都不会发出去，
         // 而拿文件名去碰运气正是 431 惩罚的那件事（`ScreenScraper::probe`）。
         let Some((crc32, bytes, rom_name)) = catalog.accepted_hash(representative)? else {
             continue;
         };
+        queryable += 1;
         let basis = Basis {
             crc32,
             bytes,
@@ -175,7 +199,10 @@ fn count_queries(
         }
         count += 1;
     }
-    Ok(count)
+    Ok(Queries {
+        asked: count,
+        queryable,
+    })
 }
 
 /// 这一批变体的键，收成估算与真跑都认的那个形状。

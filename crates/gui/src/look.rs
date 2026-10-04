@@ -946,13 +946,221 @@ pub fn note_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner
 }
 
+/// 一块**带一颗按钮的提示框**（设计稿 `.note.row`，`flex-wrap:nowrap`）：[`note_box`] 那个样子，左边一段字（`strong` 那半句
+/// 加粗、正文色 `ink`，`text` 接在后头、`ink-2`），右边贴一颗小号按钮（[`small_buttons`]）；字照按钮让出来的宽折行
+/// （收尾标点不落行首，[`layout_avoiding_leading_punct`]），字与按钮在那一排里竖直居中，字与按钮隔 8（稿上 `.row` 的 `gap`，
+/// 取通用档位里那一格）。刮削弹层底部那一块就是它。
+///
+/// 交回（那一段字，那颗按钮）：悬停、按下去做什么由调用方挂。
+pub fn note_row(
+    ui: &mut egui::Ui,
+    strong: &str,
+    text: &str,
+    button: &str,
+) -> (egui::Response, egui::Response) {
+    note_box(ui, |ui| {
+        let tokens = Tokens::builtin();
+        let palette = palette(ui);
+        let 字号 = font_size(ui.ctx(), tokens.font.size_small_plus);
+        let 按钮宽 = small_button_width(ui, button);
+        let 按钮高 = tokens.layout.button_small_height;
+        let 缝 = step(1);
+        let mut job = egui::text::LayoutJob::default();
+        let 字体 = egui::FontId::proportional(字号);
+        crate::font::strong(strong)
+            .size(字号)
+            .color(palette.ink)
+            .append_to(
+                &mut job,
+                ui.style(),
+                egui::FontSelection::FontId(字体.clone()),
+                Align::Center,
+            );
+        egui::RichText::new(format!(" {text}"))
+            .size(字号)
+            .color(palette.ink_2)
+            .append_to(
+                &mut job,
+                ui.style(),
+                egui::FontSelection::FontId(字体),
+                Align::Center,
+            );
+        job.wrap.max_width = (ui.available_width() - 按钮宽 - 缝).max(0.0);
+        let 字 = layout_avoiding_leading_punct(ui, job);
+        let 字尺寸 = 字.size();
+        let (那一排, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 字尺寸.y.max(按钮高)),
+            egui::Sense::hover(),
+        );
+        let 字框 = egui::Rect::from_min_size(
+            egui::pos2(那一排.left(), 那一排.center().y - 字尺寸.y / 2.0),
+            字尺寸,
+        );
+        let 字那一段 = ui.put(字框, egui::Label::new(字));
+        let 钮框 = egui::Rect::from_min_size(
+            egui::pos2(那一排.right() - 按钮宽, 那一排.center().y - 按钮高 / 2.0),
+            egui::vec2(按钮宽, 按钮高),
+        );
+        let 按钮 = small_buttons(ui, |ui| ui.put(钮框, egui::Button::new(button)));
+        (字那一段, 按钮)
+    })
+}
+
+/// 折行时**不许落在行首**的那几个收尾标点（中文排版的「避头」）。
+const 避头: &[char] = &[
+    '，', '。', '、', '；', '：', '？', '！', '）', '」', '』', '》', '〉', '】', '…',
+];
+
+/// 按 `job` 排一段字，**收尾标点不落在行首**：「，」「。」「」」这类被折到下一行开头时，把它前头那个字一起挪下去
+/// （在那个字前面断行），再排一遍。egui 折中文是逐字折、不管标点，浏览器排设计稿时会避开——一句话折成
+/// 「……即可\n，无需重新刮削。」在稿上不会出现（票 `gui-draws-the-rest-of-the-design/17` 撞上的，差距清单 `S-05` 记过同一个毛病）。
+///
+/// 只挪一个字，挪完还落在行首（连着两个收尾标点）就再挪一回，最多几回；`job` 里原有的换行不动。
+pub fn layout_avoiding_leading_punct(
+    ui: &egui::Ui,
+    mut job: egui::text::LayoutJob,
+) -> std::sync::Arc<egui::Galley> {
+    for _ in 0..8 {
+        let galley = ui.fonts_mut(|fonts| fonts.layout_job(job.clone()));
+        let mut 行首 = 0_usize;
+        let mut 上一行首 = 0_usize;
+        let mut 断在 = None;
+        for (at, row) in galley.rows.iter().enumerate() {
+            let 折下来的 = at > 0 && !galley.rows[at - 1].ends_with_newline;
+            // 上一行只有一个字时挪不得：挪下去它那一行就空了。
+            if 折下来的
+                && row
+                    .glyphs
+                    .first()
+                    .is_some_and(|glyph| 避头.contains(&glyph.chr))
+                && 行首 >= 上一行首 + 2
+            {
+                断在 = Some(行首 - 1);
+                break;
+            }
+            上一行首 = 行首;
+            行首 += row.glyphs.len() + usize::from(row.ends_with_newline);
+        }
+        let Some(断在) = 断在 else {
+            return galley;
+        };
+        let Some((字节, _)) = job.text.char_indices().nth(断在) else {
+            return galley;
+        };
+        job.text.insert(字节, '\n');
+        // 插进去的那个换行归它所在的那一段（从它开头那一段也算），其后各段整体往后挪一个字节。
+        for section in &mut job.sections {
+            if section.byte_range.start.0 > 字节 {
+                section.byte_range.start.0 += 1;
+            }
+            if section.byte_range.end.0 > 字节 {
+                section.byte_range.end.0 += 1;
+            }
+        }
+    }
+    ui.fonts_mut(|fonts| fonts.layout_job(job))
+}
+
+/// 一块**预估框**（设计稿 `.est`，刮削弹层底下那本账）：几格大数连底下那行小标签一行排开，右边贴一句说明。
+///
+/// - 框：次级底色 `panel-2`、分隔线色描边、中圆角，内边距 `estimate-padding`，占满这一栏的宽。`warn` 为真时换警示样
+///   （设计稿 `.est.warnq`：`mid` 描边、`mid-soft` 底）。
+/// - 一格：`cells` 里每一对是（数, 小标签）。数是等宽 `size-estimate-value`、正文强调色（字体预算里等宽只有常规体，
+///   与库体检那几格、差量账那五格同一个处置）；小标签 `size-caption-plus`、`ink-3`。格与格隔 `estimate-gap`。
+/// - 说明：`size-small`、`ink-3`，最宽 `estimate-note-width`、照这个宽折行，贴右摆（设计稿那一格前头一个 `.sp` 撑开）。
+/// - 格与说明各自在框里竖直居中（设计稿 `.est` 的 `align-items:center`）。
+///
+/// **与「加入子库」那一层的三格不是一个样子**（设计稿 `.estbox`：三个独立的框、15 号数）——别并成一个共用件。
+///
+/// 自己量、自己画（不拿 `horizontal` 摆）：说明折几行要先量出来才定得了框多高，格要对着那个高竖直居中。
+pub fn estimate_box(
+    ui: &mut egui::Ui,
+    cells: &[(&str, &str)],
+    note: &str,
+    warn: bool,
+) -> egui::Response {
+    let tokens = Tokens::builtin();
+    let palette = palette(ui);
+    let [上下, 左右] = tokens.layout.estimate_padding;
+    let 缝 = tokens.space.estimate_gap;
+    let 数字体 = egui::FontId::monospace(tokens.font.size_estimate_value);
+    let 标签体 = egui::FontId::proportional(font_size(ui.ctx(), tokens.font.size_caption_plus));
+    let 说明体 = egui::FontId::proportional(tokens.font.size_small);
+    let painter = ui.painter();
+    let 排好: Vec<(std::sync::Arc<egui::Galley>, std::sync::Arc<egui::Galley>)> = cells
+        .iter()
+        .map(|(数, 标签)| {
+            (
+                painter.layout_no_wrap((*数).to_owned(), 数字体.clone(), palette.ink),
+                painter.layout_no_wrap((*标签).to_owned(), 标签体.clone(), palette.ink_3),
+            )
+        })
+        .collect();
+    let 格宽 = |数: &egui::Galley, 标签: &egui::Galley| 数.size().x.max(标签.size().x);
+    let 格高 = |数: &egui::Galley, 标签: &egui::Galley| 数.size().y + 标签.size().y;
+    let 格们宽: f32 = 排好.iter().map(|(数, 标签)| 格宽(数, 标签)).sum::<f32>()
+        + 缝 * 排好.len().saturating_sub(1) as f32;
+    let 宽 = ui.available_width();
+    let 内宽 = (宽 - 2.0 * 左右).max(0.0);
+    let 说明宽 = tokens
+        .layout
+        .estimate_note_width
+        .min(内宽 - 格们宽 - 缝)
+        .max(0.0);
+    let 说明 = layout_avoiding_leading_punct(
+        ui,
+        egui::text::LayoutJob::simple(note.to_owned(), 说明体, palette.ink_3, 说明宽),
+    );
+    let 内高 = 排好
+        .iter()
+        .map(|(数, 标签)| 格高(数, 标签))
+        .fold(说明.size().y, f32::max);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(宽, 内高 + 2.0 * 上下), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let (底色, 描边色) = if warn {
+            (palette.mid_soft, palette.mid)
+        } else {
+            (palette.panel_2, palette.line)
+        };
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            tokens.radius.medium,
+            底色,
+            egui::Stroke::new(1.0, 描边色),
+            egui::StrokeKind::Inside,
+        );
+        let 内顶 = rect.top() + 上下;
+        let mut x = rect.left() + 左右;
+        for (数, 标签) in 排好 {
+            let 顶 = 内顶 + (内高 - 格高(&数, &标签)) / 2.0;
+            let 这一格宽 = 格宽(&数, &标签);
+            let 数高 = 数.size().y;
+            painter.galley(egui::pos2(x, 顶), 数, palette.ink);
+            painter.galley(egui::pos2(x, 顶 + 数高), 标签, palette.ink_3);
+            x += 这一格宽 + 缝;
+        }
+        let 说明尺寸 = 说明.size();
+        painter.galley(
+            egui::pos2(
+                rect.right() - 左右 - 说明尺寸.x,
+                内顶 + (内高 - 说明尺寸.y) / 2.0,
+            ),
+            说明,
+            palette.ink_3,
+        );
+    }
+    response
+}
+
 /// 一行**单选**（设计稿 `.opt`）：左边一枚圆点（[`radio_dot`]），右边名字、底下一行说明小字，整行按得动。
 /// 行内间距与上下留白取令牌 `option-gap` / `option-padding`；名字 `size-small-plus`、说明 `size-caption-plus`（稿 12.5 / 11.5）。
 ///
 /// 交回整行的点击（圆点、名字、说明哪一处按下去都算）。一行里要摆的不止名字与说明的（合并向导第一步那一行：
 /// 封面缩略图、名字后头那枚「保留」、底下那一句副标题），拿 [`radio_dot`] 自己拼。
 pub fn radio_option(ui: &mut egui::Ui, selected: bool, title: &str, note: &str) -> egui::Response {
-    let response = option_row(ui, title, note, |ui| radio_dot(ui, selected));
+    let response = option_row(ui, title, Some(note), |ui| radio_dot(ui, selected));
     let enabled = ui.is_enabled();
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, title)
@@ -970,6 +1178,25 @@ pub fn checkbox_option(
     checked: &mut bool,
     title: &str,
     note: &str,
+) -> egui::Response {
+    option_checkbox(ui, checked, title, Some(note))
+}
+
+/// 一行**不带说明的勾选**（设计稿 `.opt` 里只有名字那一种：刮削弹层字段那一栏的「简介」「类型」）：与 [`checkbox_option`]
+/// 同一行的摆法（上下各留 `option-padding`、方框与名字隔 `option-gap`、名字 `size-small-plus`），只是底下没有那一行小字。
+///
+/// 不拿 [`checkbox`] 摆：那一颗高至少 `interact_size.y`、是给与按钮并排的行内勾选用的，几行叠起来比稿松一截
+/// （票 `gui-draws-the-rest-of-the-design/17` 的差距 `S-09`）。
+pub fn checkbox_line(ui: &mut egui::Ui, checked: &mut bool, title: &str) -> egui::Response {
+    option_checkbox(ui, checked, title, None)
+}
+
+/// [`checkbox_option`] 与 [`checkbox_line`] 共用的那一行：`note` 给 `None` 就不摆底下那一行小字。
+fn option_checkbox(
+    ui: &mut egui::Ui,
+    checked: &mut bool,
+    title: &str,
+    note: Option<&str>,
 ) -> egui::Response {
     let 边长 = Tokens::builtin().layout.checkbox_size;
     let mut 方框那一格 = None;
@@ -993,11 +1220,11 @@ pub fn checkbox_option(
 
 /// 设计稿 `.opt` 那一行：上下各留 `option-padding`；左边一枚记号（`mark` 摆，圆点或方框，高是名字那一行），
 /// 隔 `option-gap`，右边一栏名字（`size-small-plus`、`ink`）与底下一行说明（`size-caption-plus`、`ink-3`），两行左沿对齐。
-/// 交回整行的点击（记号、名字、说明哪一处按下去都算）。
+/// `note` 给 `None` 就只有名字那一行。交回整行的点击（记号、名字、说明哪一处按下去都算）。
 fn option_row(
     ui: &mut egui::Ui,
     title: &str,
-    note: &str,
+    note: Option<&str>,
     mark: impl FnOnce(&mut egui::Ui) -> egui::Response,
 ) -> egui::Response {
     let tokens = Tokens::builtin();
@@ -1017,11 +1244,23 @@ fn option_row(
                         .extend()
                         .sense(egui::Sense::click());
                 let 名 = ui.add(名字);
-                let 注 = ui.add(
-                    egui::Label::new(egui::RichText::new(note).size(说明号).color(palette.ink_3))
-                        .sense(egui::Sense::click()),
-                );
-                名 | 注
+                match note {
+                    Some(note) => {
+                        // 说明照这一栏剩下的宽折行，收尾标点不落在行首（[`layout_avoiding_leading_punct`]）。
+                        let 排好 = layout_avoiding_leading_punct(
+                            ui,
+                            egui::text::LayoutJob::simple(
+                                note.to_owned(),
+                                egui::FontId::proportional(说明号),
+                                palette.ink_3,
+                                ui.available_width(),
+                            ),
+                        );
+                        let 注 = ui.add(egui::Label::new(排好).sense(egui::Sense::click()));
+                        名 | 注
+                    }
+                    None => 名,
+                }
             })
             .inner;
         记号 | texts
