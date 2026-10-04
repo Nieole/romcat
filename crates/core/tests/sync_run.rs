@@ -183,8 +183,8 @@ impl 现场 {
         let footprint = sync::Footprint::gather(&self.catalog, &selected, &platform_manifest)
             .expect("读得出脚印");
         let mut desired = footprint.desired(profile);
-        // 与 `sync::prepare` 同一个次序：先筛 ROM，多碟变体的播放列表排在筛过之后、再筛一遍；筛完还在的那几份
-        // 交给媒体与前端元数据（条目改指它、封面照它的名字铺），最后几样一起再筛一遍。
+        // 与 `sync::prepare` 同一个次序：先筛 ROM，多碟变体的播放列表排在筛过之后、再筛一遍；条目在卡上启动哪一份
+        // 照筛过之后的期望状态定（播放列表、转出来的那一份），交给媒体与前端元数据，最后几样一起再筛一遍。
         desired.screen(&profile.filesystem, 0);
         let playlists = sync::playlist::lay(
             &footprint,
@@ -194,7 +194,7 @@ impl 现场 {
             &platform_manifest,
         );
         desired.add_and_screen(playlists.files.iter().cloned(), &profile.filesystem, 0);
-        let launch = playlists.launching(&desired);
+        let launch = footprint.launching(&desired, &playlists);
         let media = sync::media::lay(
             &self.catalog,
             adapter.as_ref(),
@@ -2346,5 +2346,335 @@ fn 期望状态与差量预览的转换账逐碟对得上_几张碟就是几笔_
         prepared.plan.unsupported.is_empty(),
         "{:?}",
         prepared.plan.unsupported
+    );
+}
+
+// ───────────────────────── 主文件转了格式，卡上的条目指转出来的那一份（票 `verdict-store-and-sync/20`）
+//
+// 子库同步时主文件照能力档案转了格式（`.zip` 里那份镜像解出来），卡上躺的是产物。条目写的得是主文件**在卡上的落点**——
+// 期望状态里那一份——不然前端里点下去找不着文件（挂单 `Q1829`）。导出到主库那一侧不转格式（ADR-0004），条目照旧写
+// 主库里的原名。
+
+/// 一份主库：`ps/最终幻想7.zip` 里只装着一份镜像，叫 `里头`（光盘类模拟器一个归档都不吃，只吃裸镜像的档案下要把它解出来），
+/// 外加一个 FC 游戏 `FC/魂斗罗.zip`（卡带包，同一份档案下原样搬）。
+fn 建个要解开的库(里头: &str) -> TempDir {
+    let dir = temp_dir("run-convert-lib");
+    写(
+        &dir.path().join("ps/最终幻想7.zip"),
+        &zip_container(&[ZipEntrySpec::deflated(里头, 镜像(1))]),
+    );
+    写(&dir.path().join("FC/魂斗罗.zip"), &zip(2048));
+    dir
+}
+
+/// 那个要解开的单碟变体的键。
+const 要解开的变体: &str = "库/ps/最终幻想7.zip";
+
+#[test]
+fn 主文件从归档里解出来的变体同步到卡上_条目指卡上转出来的那一份_两家都是() {
+    // ES-DE 的 `<path>` 相对平台目录，Pegasus 的 `files:` 相对元数据文件所在的目录（子库根）。
+    for (格式, 元数据, 指着) in [
+        ("ES-Gamelist", "gamelists/ps/gamelist.xml", "最终幻想7.chd"),
+        ("Pegasus", "ps.metadata.pegasus.txt", "ps/最终幻想7.chd"),
+    ] {
+        let mut 现场 = 现场::摆在(建个要解开的库("最终幻想7.chd"));
+        现场.建子库(格式, "平台=PS1");
+        现场.换档案(只吃裸镜像);
+        现场.照真线同步一趟();
+
+        assert!(
+            现场.卡.path().join("ps/最终幻想7.chd").is_file(),
+            "{格式}：卡上该是解出来的那一份：{:?}",
+            盘上有什么(现场.卡.path()).keys().collect::<Vec<_>>()
+        );
+        assert!(!现场.卡.path().join("ps/最终幻想7.zip").exists(), "{格式}");
+        let 条目 = 卡上的条目(现场.卡.path(), 格式, 元数据);
+        assert_eq!(条目.len(), 1, "{格式}：{条目:#?}");
+        assert_eq!(
+            条目[0].files,
+            [指着],
+            "{格式}：条目该指卡上真有的那一份，不是主库里的原名"
+        );
+        assert!(!藏着(&条目[0]), "{格式}：{:#?}", 条目[0]);
+        // 机器读的那一半照旧带着变体在主库里的键：下次导入靠它对回中立库里那个变体，与卡上落成什么形态无关。
+        assert_eq!(
+            条目[0].extra.get("romcat-variant"),
+            Some(&vec![要解开的变体.to_string()]),
+            "{格式}"
+        );
+    }
+}
+
+#[test]
+fn 没生成播放列表的多碟变体_条目指头一张碟转出来的那一份_两家都是() {
+    // 只吃裸镜像的那份档案里 DC（Flycast）不吃 `.m3u`：两张碟照旧逐张解开，可那一套不生成播放列表，条目照旧指主文件
+    // ——碟 1 解出来的那一份，不是主库里那个 `.zip`。别的碟点不点得到是挂单 `Q1828` 的事，不归这里。
+    for (格式, 元数据, 指着) in [
+        (
+            "ES-Gamelist",
+            "gamelists/dc/gamelist.xml",
+            "某游戏/游戏 (Disc 1).chd",
+        ),
+        (
+            "Pegasus",
+            "dc.metadata.pegasus.txt",
+            "dc/某游戏/游戏 (Disc 1).chd",
+        ),
+    ] {
+        let 库 = temp_dir("run-dc-discs-lib");
+        for 碟 in 1..=2u8 {
+            写(
+                &库.path().join(format!("dc/某游戏/游戏 (Disc {碟}).zip")),
+                &zip_container(&[ZipEntrySpec::deflated(
+                    &format!("游戏 (Disc {碟}).chd"),
+                    镜像(碟),
+                )]),
+            );
+        }
+        let mut 现场 = 现场::摆在(库);
+        现场.建子库(格式, "平台=DC");
+        现场.换档案(只吃裸镜像);
+        现场.照真线同步一趟();
+
+        for 碟 in 1..=2u8 {
+            assert!(
+                现场
+                    .卡
+                    .path()
+                    .join(format!("dc/某游戏/游戏 (Disc {碟}).chd"))
+                    .is_file(),
+                "{格式}：碟 {碟} 该解开落在卡上：{:?}",
+                盘上有什么(现场.卡.path()).keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            卡上的播放列表(现场.卡.path()).is_empty(),
+            "{格式}：档案说 DC 不吃 m3u"
+        );
+        let 条目 = 卡上的条目(现场.卡.path(), 格式, 元数据);
+        assert_eq!(条目.len(), 1, "{格式}：{条目:#?}");
+        // 只断头一行（默认启动的那一份）：别的碟要不要也列进 `files:` 是挂单 `Q1828` 待裁的事，这里不替它钉死。
+        assert_eq!(
+            条目[0].files.first().map(String::as_str),
+            Some(指着),
+            "{格式}：条目该指碟 1 在卡上转出来的那一份：{条目:#?}"
+        );
+        assert!(!条目.iter().any(藏着), "{格式}：没有播放列表就没有要藏的碟");
+    }
+}
+
+#[test]
+fn 主文件转了格式_es_de_的封面照条目指着的那一份的名字铺_找得着() {
+    // ES-DE 照 `<path>` 那份文件去掉扩展名的名字找媒体。解开之后只换了扩展名的，封面名字照旧（`最终幻想7.png`）；
+    // 容器里那一份另有名字的，卡上躺的就是那个名字，条目指它，封面也得照它铺，不然 ES-DE 找不着。
+    for (里头, 指着, 封面, 找不着的) in [
+        (
+            "最终幻想7.chd",
+            "最终幻想7.chd",
+            "downloaded_media/ps/covers/最终幻想7.png",
+            None,
+        ),
+        (
+            "Final Fantasy VII (Japan).bin",
+            "Final Fantasy VII (Japan).bin",
+            "downloaded_media/ps/covers/Final Fantasy VII (Japan).png",
+            Some("downloaded_media/ps/covers/最终幻想7.png"),
+        ),
+    ] {
+        let mut 现场 = 现场::摆在(建个要解开的库(里头));
+        现场.收一份媒体(要解开的变体, MediaKind::Cover, b"cover-of-ff7");
+        现场.建子库("ES-Gamelist", "平台=PS1");
+        现场.换档案(只吃裸镜像);
+        现场.照真线同步一趟();
+
+        let 条目 = 卡上的条目(现场.卡.path(), "ES-Gamelist", "gamelists/ps/gamelist.xml");
+        assert_eq!(条目.len(), 1, "{里头}：{条目:#?}");
+        assert_eq!(条目[0].files, [指着], "{里头}");
+        assert!(
+            现场.卡.path().join(format!("ps/{指着}")).is_file(),
+            "{里头}：条目指着的那一份该在卡上"
+        );
+        assert_eq!(
+            fs::read(现场.卡.path().join(封面)).unwrap_or_else(|_| panic!(
+                "{里头}：封面该在 {封面}：{:?}",
+                盘上有什么(现场.卡.path()).keys().collect::<Vec<_>>()
+            )),
+            b"cover-of-ff7",
+        );
+        if let Some(找不着的) = 找不着的 {
+            assert!(
+                !现场.卡.path().join(找不着的).exists(),
+                "{里头}：照主库里那个名字铺的 {找不着的}，ES-DE 找不着它的主人"
+            );
+        }
+    }
+}
+
+#[test]
+fn 同一个子库里不转格式的变体_条目一个字不变_两家都是() {
+    // 同一趟同步、同一份只吃裸镜像的档案：PS1 那一份解开了，FC 那个卡带包档案吃得下、原样搬。FC 的条目整份逐字等于
+    // 票 18 之前两家写出来的样子——隔壁转了格式，它一个字都不跟着变。
+    for (格式, 元数据, 原样) in [
+        (
+            "ES-Gamelist",
+            "gamelists/FC/gamelist.xml",
+            "<?xml version=\"1.0\"?>\n\
+             <gameList>\n\
+             \x20   <game>\n\
+             \x20       <path>./魂斗罗.zip</path>\n\
+             \x20       <name>魂斗罗.zip</name>\n\
+             \x20       <x-romcat-variant>库/FC/魂斗罗.zip</x-romcat-variant>\n\
+             \x20   </game>\n\
+             </gameList>\n",
+        ),
+        (
+            "Pegasus",
+            "FC.metadata.pegasus.txt",
+            "collection: FC\n\
+             \n\
+             game: 魂斗罗.zip\n\
+             files: FC/魂斗罗.zip\n\
+             x-romcat-variant: 库/FC/魂斗罗.zip\n",
+        ),
+    ] {
+        let mut 现场 = 现场::摆在(建个要解开的库("最终幻想7.chd"));
+        现场.建子库(格式, "平台=FC 或 平台=PS1");
+        现场.换档案(只吃裸镜像);
+        现场.照真线同步一趟();
+        assert!(
+            现场.卡.path().join("ps/最终幻想7.chd").is_file(),
+            "{格式}：隔壁那一份该解开了"
+        );
+        assert!(现场.卡.path().join("FC/魂斗罗.zip").is_file(), "{格式}");
+        assert_eq!(
+            fs::read_to_string(现场.卡.path().join(元数据))
+                .unwrap_or_else(|_| panic!("卡上该有 {元数据}")),
+            原样,
+            "{格式}"
+        );
+    }
+}
+
+#[test]
+fn 导出到主库那一侧不转格式_条目照旧写主库里的原名() {
+    // ADR-0004：导出铺在主库上，主库一个字节不改，于是没有转格式这回事，条目照旧写主库里那个 `.zip`。同一份主库同步到
+    // 只吃裸镜像的卡上时条目指的是解出来的那一份（上面几条）——那件事一个字都没漏到导出这边来。
+    for adapter in adapter::all() {
+        let mut 现场 = 现场::摆在(建个要解开的库("Final Fantasy VII (Japan).bin"));
+        let 之前 = 盘上有什么(&现场.库根);
+        romcat_core::adapter::transfer::export(
+            &mut 现场.catalog,
+            adapter.as_ref(),
+            &Priorities::builtin(),
+            &romcat_core::adapter::transfer::ExportOptions {
+                out: 现场.库根.clone(),
+                dry_run: false,
+                force: false,
+                media: None,
+            },
+        )
+        .expect("导得出来");
+
+        let (元数据, 原名) = match adapter.name() {
+            "ES-Gamelist" => ("gamelists/ps/gamelist.xml", "最终幻想7.zip"),
+            _ => ("ps.metadata.pegasus.txt", "ps/最终幻想7.zip"),
+        };
+        let 条目 = 卡上的条目(&现场.库根, adapter.name(), 元数据);
+        assert_eq!(条目.len(), 1, "{}：{条目:#?}", adapter.name());
+        assert_eq!(条目[0].files, [原名], "{}", adapter.name());
+        // 主库里原来就在的每一份一个字节都没动（大小与修改时间都一样），没有解出来的那一份。
+        let 之后 = 盘上有什么(&现场.库根);
+        for (path, 原样) in &之前 {
+            assert_eq!(之后.get(path), Some(原样), "{path} 被动过");
+        }
+        assert!(
+            !之后.keys().any(|path| path.ends_with(".bin")),
+            "{}：主库里不该多出解开的那一份：{:?}",
+            adapter.name(),
+            之后.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn 几张碟都转了格式而卡上有播放列表_条目照旧指播放列表_藏起来的是转出来的那几份() {
+    // 卡上有播放列表的，条目启动播放列表（票 18）——碟转了格式也一样，不退成指碟 1 转出来的那一份；藏起来的那几条
+    // 写的是卡上真落着的那几张（转出来的 `.bin`），不是主库里的 `.zip`。
+    let mut 现场 = 现场::摆在(建个_zip_碟的库(一张一份裸镜像));
+    现场.建子库("ES-Gamelist", "平台=PS1");
+    现场.换档案(只吃裸镜像);
+    现场.照真线同步一趟();
+
+    let 条目 = 卡上的条目(现场.卡.path(), "ES-Gamelist", "gamelists/ps/gamelist.xml");
+    let 可见: Vec<_> = 条目.iter().filter(|game| !藏着(game)).collect();
+    assert_eq!(可见.len(), 1, "{条目:#?}");
+    assert_eq!(可见[0].files, ["某游戏/游戏.m3u"], "{条目:#?}");
+    let mut 藏起来的: Vec<&str> = 条目
+        .iter()
+        .filter(|game| 藏着(game))
+        .flat_map(|game| game.files.iter().map(String::as_str))
+        .collect();
+    藏起来的.sort_unstable();
+    assert_eq!(
+        藏起来的,
+        ["某游戏/游戏 (Disc 1).bin", "某游戏/游戏 (Disc 2).bin"],
+        "{条目:#?}"
+    );
+}
+
+#[test]
+fn 播放列表撞车没放行_条目退回指碟_1_转出来的那一份() {
+    // 同一个目录里两套多碟：一套是 `.zip` 碟（只吃裸镜像的档案下逐张解开），一套是 `.chd` 碟（原样搬）。剥掉碟片标记
+    // 之后都叫「游戏」，两份播放列表都想落在 `ps/某游戏/游戏.m3u`，撞车一个都不放行。卡上没有播放列表，条目退回指主文件
+    // ——转了格式的那一套指碟 1 解出来的 `.bin`，不是主库里的 `.zip`；原样搬的那一套照旧指它的 `.chd`。
+    let 库 = temp_dir("run-convert-collide-lib");
+    for 碟 in 1..=2u8 {
+        写(
+            &库.path().join(format!("ps/某游戏/游戏 (Disc {碟}).zip")),
+            &zip_container(&一张一份裸镜像(碟)),
+        );
+        写(
+            &库.path().join(format!("ps/某游戏/游戏 (CD {碟}).chd")),
+            &[碟 + 10; 1024],
+        );
+    }
+    let mut 现场 = 现场::摆在(库);
+    现场.建子库("ES-Gamelist", "平台=PS1");
+    现场.换档案(只吃裸镜像);
+    现场.照真线同步一趟();
+
+    assert!(
+        卡上的播放列表(现场.卡.path()).is_empty(),
+        "撞上的一个都不放行"
+    );
+    let 条目 = 卡上的条目(现场.卡.path(), "ES-Gamelist", "gamelists/ps/gamelist.xml");
+    let 指着 = |变体: &str| -> Vec<String> {
+        条目
+            .iter()
+            .filter(|game| {
+                game.extra
+                    .get("romcat-variant")
+                    .is_some_and(|keys| keys.iter().any(|key| key == 变体))
+            })
+            .map(|game| game.files.first().cloned().unwrap_or_default())
+            .collect()
+    };
+    assert_eq!(
+        指着("库/ps/某游戏/游戏 (Disc 1).zip"),
+        ["某游戏/游戏 (Disc 1).bin"],
+        "{条目:#?}"
+    );
+    assert!(
+        现场.卡.path().join("ps/某游戏/游戏 (Disc 1).bin").is_file(),
+        "条目指着的那一份该在卡上"
+    );
+    assert_eq!(
+        指着("库/ps/某游戏/游戏 (CD 1).chd"),
+        ["某游戏/游戏 (CD 1).chd"],
+        "{条目:#?}"
+    );
+    assert!(
+        !条目.iter().any(藏着),
+        "没有播放列表就没有要藏的碟：{条目:#?}"
     );
 }

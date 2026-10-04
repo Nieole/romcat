@@ -74,6 +74,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::Adapter;
+use crate::adapter::converge::Launch;
 use crate::capability::{BadName, Barred, Conversion, Decision, Filesystem, Profile, RejectReason};
 use crate::catalog::{Catalog, CatalogError, MemberFile};
 use crate::container::Contents;
@@ -1919,6 +1920,52 @@ impl Footprint {
             .into_iter()
             .filter(|row| row.reason == RejectReason::TooBig)
             .collect()
+    }
+
+    /// 每个变体的**条目在卡上启动哪一份**（[`Launch`]，键是变体的键）：收敛照它写条目，铺媒体照它起名。
+    ///
+    /// 条目写的是主文件**在卡上的落点**，也就是期望状态里那一份。原样搬的主文件落点就是它在主库里的键剥掉根名，
+    /// 收敛不点名也写得对，所以这里只点名两种：
+    ///
+    /// - **多碟变体、卡上有它的播放列表**：启动播放列表，几张碟藏起来（票 `verdict-store-and-sync/18`，
+    ///   [`playlist`] 模块文档）。只认筛过之后还在的那几份——播放列表放不进目标，就退到下一条。
+    /// - **主文件转了格式**：启动转出来的那一份（[`DesiredFile::convert`]，票 `verdict-store-and-sync/20`）。卡上躺的是
+    ///   产物，主库里那个名字卡上没有，写原名的话前端里点下去找不着文件。多碟变体没生成播放列表时也走这一条：条目照旧指
+    ///   主文件，转了格式就指转出来那一份。
+    ///
+    /// `desired` 得是**按目标存储筛过之后**的期望状态，播放列表也已经并进来筛过（[`Desired::add_and_screen`]）。
+    /// 主文件放不进目标的不在里头，条目照旧写原名。转不转、转成什么只在 [`Self::desired`] 判一次，这里只读它判出来的落点。
+    ///
+    /// **只有同步这一侧有**：导出到主库那一侧不转格式、不生成播放列表（ADR-0004），条目照旧指每个变体的主文件。
+    #[must_use]
+    pub fn launching(
+        &self,
+        desired: &Desired,
+        playlists: &playlist::Laid,
+    ) -> BTreeMap<String, Launch> {
+        let mut out = playlists.launching(desired);
+        // 主库里的键 → 转出来那一份在卡上的落点。只有 ROM 那一类有主库里的键。
+        let converted: BTreeMap<&str, &str> = desired
+            .files
+            .iter()
+            .filter(|file| file.kind == FileKind::Rom && file.convert.is_some())
+            .map(|file| (file.source.as_str(), file.path.as_str()))
+            .collect();
+        for member in self.members.iter().filter(|member| member.is_main()) {
+            if out.contains_key(&member.variant_key) {
+                continue;
+            }
+            if let Some(at) = converted.get(member.key.as_str()) {
+                out.insert(
+                    member.variant_key.clone(),
+                    Launch {
+                        file: (*at).to_string(),
+                        hidden: Vec::new(),
+                    },
+                );
+            }
+        }
+        out
     }
 }
 
