@@ -350,16 +350,14 @@ fn 补回之后新增几个_开没开补回答的是同一个数_勾上之后等
     assert_eq!(不补.withheld, 1, "前提：有一份记着不补的");
     assert!(不补.restorable >= 2, "前提：这一趟没了的与记着不补的都能补");
     assert_eq!(
-        不补.adds_if_restored(),
-        补.adds_if_restored(),
+        不补.adds_if_restored, 补.adds_if_restored,
         "开没开补回，「补回之后新增几个」得是同一个数",
     );
     assert_eq!(
-        补.adds_if_restored(),
-        补.adds.files,
+        补.adds_if_restored, 补.adds.files,
         "勾上之后它就是新增那一格"
     );
-    assert_eq!(不补.adds_if_restored(), 不补.adds.files + 不补.restorable);
+    assert_eq!(不补.adds_if_restored, 不补.adds.files + 不补.restorable);
 }
 
 /// 内置名册里叫这个名字的那一份文件系统声明。

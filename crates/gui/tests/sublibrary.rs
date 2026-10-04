@@ -1699,10 +1699,11 @@ fn 差量预览底下读不懂的规则与陈旧的档案声明_去处是卡上�
 }
 
 #[test]
-fn 主文件放不进目标的变体_放不进目标那一栏的说明后头接一句前端里也不列_差量账底下不另画() {
+fn 主文件放不进目标的变体_放不进目标那一栏的说明底下另起一行说前端里也不列_差量账底下不另画() {
     // 票 `verdict-store-and-sync/21`（挂单 `Q1847`）：主文件放不进目标的变体卡上的前端元数据不列、媒体也不铺，差量预览
-    // 说一句。拿主意的人 2026-10-04 裁（挂单 `Q1877`）：那一句接在「放不进目标」那一栏的说明后头（`Prepared::left_off_note`），
-    // 不重复个数、不用警示色；差量账底下不画那件怪事（`sync::Concern::LeftOffCard` 只由命令行印）。
+    // 说一句。拿主意的人 2026-10-04 裁（挂单 `Q1877`）：那一句摆进「放不进目标」那一栏（`Prepared::left_off_note`），
+    // 不重复个数、不用警示色；差量账底下不画那件怪事（`sync::Concern::LeftOffCard` 只由命令行印）。2026-10-05 又裁（票
+    // `verdict-store-and-sync/22`）：另起一行，不接在说明句末尾，与「设备上缺失」那一栏一个摆法。
     let ctx = headless::context();
     // 两个根里同一条相对路径：剥掉根名之后撞在卡上同一个文件上，撞上的一个都不放行——两个变体都没上卡。
     let 另一块盘 = temp_dir("gui-sub-lib2-left-off");
@@ -1731,8 +1732,10 @@ fn 主文件放不进目标的变体_放不进目标那一栏的说明后头接�
 
     let 屏上 = 画两帧整张卡(&ctx, &mut 场);
     assert!(
-        屏上.contains("这些文件这一趟不会复制：落点撞车、超过单文件上限、文件名里有目标不收的字符。前端里也不列它们。"),
-        "「放不进目标」那一栏的说明后头没接那一句：\n{屏上}"
+        屏上.contains(
+            "这些文件这一趟不会复制：落点撞车、超过单文件上限、文件名里有目标不收的字符。\n前端里也不列它们。\n"
+        ),
+        "「放不进目标」那一栏的说明底下没另起一行写那一句：\n{屏上}"
     );
     assert!(
         !屏上.contains("没上卡"),
@@ -1745,7 +1748,7 @@ fn 主文件放不进目标的变体_放不进目标那一栏的说明后头接�
 }
 
 #[test]
-fn 没有变体没上卡时_放不进目标那一栏的说明后头不接那一句() {
+fn 没有变体没上卡时_放不进目标那一栏的说明底下不写那一句() {
     // 说不说由核心答（`Prepared::left_off_note`）：没有变体没上卡时说「前端里也不列它们」是句假话。
     let ctx = headless::context();
     let mut 场 = 现场::摆好();
@@ -1765,6 +1768,74 @@ fn 没有变体没上卡时_放不进目标那一栏的说明后头不接那一�
         "前提：停在「放不进目标」那一栏上：\n{屏上}"
     );
     assert!(!屏上.contains("前端里也不列"), "{屏上}");
+}
+
+#[test]
+fn 设备上缺失这一趟不补的变体_设备上缺失那一栏的说明底下另起一行说前端里也不列_勾上补回就不说() {
+    // 票 `verdict-store-and-sync/22`（挂单 `Q1880`）：设备上缺失、这一趟不补的变体卡上的前端元数据不列、媒体也不铺，差量
+    // 预览说一句。照票 21 的做法（挂单 `Q1877`）：那一句由核心交（`Prepared::gone_note`），摆进「设备上缺失」那一栏，不重复
+    // 个数、不用警示色；差量账底下不画那件怪事（`sync::Concern::GoneLeftOff` 只由命令行印）。拿主意的人 2026-10-05 裁：另起
+    // 一行，不接在说明句末尾。勾上补回，那一个补回来、照旧列，就不说。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    摆出异常(&mut 场);
+    let prepared = 场.app.sublibrary().prepared().expect("排得出来");
+    assert_eq!(
+        prepared
+            .left_off
+            .iter()
+            .map(|(key, why)| (key.as_str(), *why))
+            .collect::<Vec<_>>(),
+        [(
+            "库/SFC/幻想传说 汉化版.zip",
+            romcat_core::sync::LeftOff::Gone
+        )],
+        "前提：卡上删掉的那一个设备上缺失、这一趟不补",
+    );
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::Surprise(
+            romcat_core::sync::SurpriseKind::Gone,
+        ));
+
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.contains(
+            "清单里有、设备上找不到的文件，可能被手动删除了。默认不补回。\n前端里也不列它们。\n"
+        ),
+        "「设备上缺失」那一栏的说明底下没另起一行写那一句：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("这一趟不补，前端里也不列"),
+        "差量账底下不该画设备上缺失那件怪事：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("`romcat")
+            && !屏上.contains("romcat sublibrary")
+            && !屏上.contains("--restore"),
+        "屏上出现了终端命令：\n{屏上}"
+    );
+
+    场.勾上补回(true);
+    assert!(
+        场.app
+            .sublibrary()
+            .prepared()
+            .expect("重排得出来")
+            .left_off
+            .is_empty(),
+        "勾上补回，那一个补回来、照旧列"
+    );
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.contains("清单里有、设备上找不到的文件，可能被手动删除了。默认不补回。"),
+        "前提：还停在「设备上缺失」那一栏上：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("前端里也不列"),
+        "勾上补回之后不该再说：\n{屏上}"
+    );
 }
 
 #[test]
@@ -5224,9 +5295,10 @@ fn 三方对比照稿一排五个大数字_新增删除不动异常与放不进�
         );
     }
 
-    // **变体数写在小字里，不塞进悬停**（截图门看不到悬停，等于没有）：人认得的单位是变体。
+    // **变体数写在小字里，不塞进悬停**（截图门看不到悬停，等于没有）：人认得的单位是变体。那行小字有更新时以「其中 N 个是
+    // 重传…」打头（这份夹具从票 `verdict-store-and-sync/22` 起有一份：删掉的那一个不再列，元数据要重写），所以认「含有」。
     assert!(
-        屏上.lines().any(|line| line.starts_with("按变体数：")),
+        屏上.lines().any(|line| line.contains("按变体数：")),
         "小字里没有变体数那一句：\n{屏上}",
     );
     for (什么, 几个) in [
@@ -5250,7 +5322,7 @@ fn 三方对比照稿一排五个大数字_新增删除不动异常与放不进�
     );
     let 那行小字 = 屏上
         .lines()
-        .find(|line| line.starts_with("按变体数："))
+        .find(|line| line.contains("按变体数："))
         .unwrap_or_default();
     assert!(
         那行小字.contains(&净变化)
@@ -5713,7 +5785,7 @@ fn 补回那一格的说明照稿写补回后新增变为几个_勾上之后等�
         .prepared()
         .expect("排得出来")
         .plan
-        .adds_if_restored();
+        .adds_if_restored;
     let 该说的 = format!("补回后新增变为 {补回之后} 个；只补清单里记录过的文件");
     let 屏上 = 画两帧整张卡(&ctx, &mut 场);
     assert!(屏上.contains(&该说的), "补回那一格的说明没照稿写：\n{屏上}");
@@ -5722,11 +5794,7 @@ fn 补回那一格的说明照稿写补回后新增变为几个_勾上之后等�
     // 勾上之后重排一趟：那句话还是同一个数，而新增那一格正好长到它。
     场.勾上补回(true);
     let plan = &场.app.sublibrary().prepared().expect("重排得出来").plan;
-    assert_eq!(
-        plan.adds_if_restored(),
-        补回之后,
-        "开没开补回，那个数得一样"
-    );
+    assert_eq!(plan.adds_if_restored, 补回之后, "开没开补回，那个数得一样");
     assert_eq!(
         plan.adds.files, 补回之后,
         "勾上之后新增那一格不是那句话说的数"

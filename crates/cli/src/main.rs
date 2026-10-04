@@ -4879,7 +4879,7 @@ fn run_sublibrary_plan(args: &SubPlanArgs) -> ExitCode {
         thousands(ready.actual.files.len() as u64),
         thousands(ready.plan.touched()),
     );
-    warn_about(&ready);
+    warn_about(&ready, args.restore);
     if !write_json(args.json.as_deref(), &ready.plan) {
         return ExitCode::FAILURE;
     }
@@ -4887,11 +4887,13 @@ fn run_sublibrary_plan(args: &SubPlanArgs) -> ExitCode {
 }
 
 /// 折期望状态时那几件要说出口的怪事。**`plan` 与 `sync` 印同一份**，
-/// 而且**与界面印同一份**——那几句话在核心里（[`sync::Prepared::concerns`]）。一件例外：没上卡那一件
-/// （[`sync::Concern::LeftOffCard`]）界面不在差量账底下画，在「放不进目标」那一栏接一句（挂单 `Q1877`）；命令行照旧印。
+/// 而且**与界面印同一份**——那几句话在核心里（[`sync::Prepared::concerns`]）。例外是没上卡那两件：
+/// [`sync::Concern::LeftOffCard`] 界面不在差量账底下画，写在「放不进目标」那一栏（挂单 `Q1877`）；
+/// [`sync::Concern::GoneLeftOff`] 照同一个做法写在「设备上缺失」那一栏（票 `verdict-store-and-sync/22`）。命令行照旧印。
 ///
 /// 核心那几句只说事实与去处的名字（挂单 `Q622` 那一族）；命令是命令行自己的去处，照种类在这儿补。
-fn warn_about(ready: &sync::Prepared) {
+/// `restore` 是这一趟给没给 `--restore`：给了还补不回的那几个，去处不是再加一遍它。
+fn warn_about(ready: &sync::Prepared, restore: bool) {
     let name = &ready.sublibrary.name;
     for concern in ready.concerns() {
         eprintln!("{concern}");
@@ -4909,6 +4911,8 @@ fn warn_about(ready: &sync::Prepared) {
             )),
             // 核心那句只说几个、各是哪一类；是哪几个（变体的键）与排除它们的命令由命令行补——`--exclude` 要的正是那串键。
             sync::Concern::LeftOffCard(left_off) => Some(left_off_hint(name, left_off)),
+            // 核心那句只说几个；是哪几个由命令行补。去处是补回：排除的命令差量预览「目标上对不上的」那一段已经给了。
+            sync::Concern::GoneLeftOff(gone) => Some(gone_left_off_hint(gone, restore)),
             sync::Concern::MediaUnknownKind(_) | sync::Concern::MediaCrowdedOut(_) => None,
         };
         if let Some(hint) = hint {
@@ -4924,20 +4928,47 @@ fn left_off_hint(
     name: &str,
     left_off: &std::collections::BTreeMap<String, romcat_core::capability::RejectReason>,
 ) -> String {
-    const 列几个: usize = 10;
-    let mut out = String::new();
-    for (key, reason) in left_off.iter().take(列几个) {
-        out.push_str(&format!("  {key}（{}）\n", reason.label()));
-    }
-    if left_off.len() > 列几个 {
-        out.push_str(&format!(
-            "  …… 另有 {} 个。\n",
-            thousands((left_off.len() - 列几个) as u64)
-        ));
-    }
+    let mut out = first_keys(
+        left_off
+            .iter()
+            .map(|(key, reason)| format!("{key}（{}）", reason.label())),
+    );
     out.push_str(&format!(
         "不要它们就 `romcat sublibrary except {name} --exclude <变体的键>` 从选择集里去掉；落点撞车的只排除其中一份。"
     ));
+    out
+}
+
+/// 设备上缺失、这一趟不补的那几个变体（[`sync::Concern::GoneLeftOff`]）命令行补的话：列出变体的键，再说去处。
+///
+/// 没给 `--restore` 时去处就是它；给了还补不回的，是落点上挡着清单之外的东西（补回不是覆盖别人的许可），
+/// 那几条在差量预览「目标上对不上的」那一段里列着。
+fn gone_left_off_hint(gone: &std::collections::BTreeSet<String>, restore: bool) -> String {
+    let mut out = first_keys(gone.iter().cloned());
+    out.push_str(if restore {
+        "加了 `--restore` 也补不回：落点上挡着清单之外的文件，差量预览里「落点被占」那几条就是。"
+    } else {
+        "想让它们回来，这次加上 `--restore` 补回，条目跟着回来。"
+    });
+    out
+}
+
+/// 命令行补话里**列前十个**变体的键（或带着一个小注的键），一行一个，多出来的说另有几个。
+///
+/// 差量预览里列的是卡上的路径，补话里列的是变体的键——`--exclude` 要的是它。
+fn first_keys(rows: impl ExactSizeIterator<Item = String>) -> String {
+    const 列几个: usize = 10;
+    let total = rows.len();
+    let mut out = String::new();
+    for row in rows.take(列几个) {
+        out.push_str(&format!("  {row}\n"));
+    }
+    if total > 列几个 {
+        out.push_str(&format!(
+            "  …… 另有 {} 个。\n",
+            thousands((total - 列几个) as u64)
+        ));
+    }
     out
 }
 
@@ -4984,7 +5015,7 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
         let _ = stdout.write_all(text.as_bytes());
         let _ = stdout.flush();
     }
-    warn_about(&ready);
+    warn_about(&ready, args.restore);
     if !write_json(args.json.as_deref(), &ready.plan) {
         return ExitCode::FAILURE;
     }
