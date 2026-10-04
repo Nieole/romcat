@@ -682,7 +682,14 @@ fn 子库的媒体按_downloaded_media_铺_条目里一个路径都不写() {
     };
     let facts = sublibrary::facts(&现场.catalog).expect("折得出事实");
     let selected = sublibrary::select(&selection, &facts);
-    let media = sync::media::lay(&现场.catalog, &Gamelist, &现场.pool, &selected).expect("铺得出");
+    let media = sync::media::lay(
+        &现场.catalog,
+        &Gamelist,
+        &现场.pool,
+        &selected,
+        &BTreeMap::new(),
+    )
+    .expect("铺得出");
 
     // **路径镜像 ROM 相对平台目录的路径，文件名是去掉扩展名的 ROM 文件名。**
     let 路径: Vec<&str> = media.files.iter().map(|file| file.path.as_str()).collect();
@@ -700,6 +707,7 @@ fn 子库的媒体按_downloaded_media_铺_条目里一个路径都不写() {
         &Gamelist,
         &Priorities::builtin(),
         &selected,
+        &BTreeMap::new(),
         &BTreeMap::new(),
     )
     .expect("折得出元数据");
@@ -766,7 +774,14 @@ fn 同一个变体的第二张同类图被挤掉_而且这件事说得出口() {
     };
     let facts = sublibrary::facts(&现场.catalog).expect("折得出事实");
     let selected = sublibrary::select(&selection, &facts);
-    let media = sync::media::lay(&现场.catalog, &Gamelist, &现场.pool, &selected).expect("铺得出");
+    let media = sync::media::lay(
+        &现场.catalog,
+        &Gamelist,
+        &现场.pool,
+        &selected,
+        &BTreeMap::new(),
+    )
+    .expect("铺得出");
     assert_eq!(media.files.len(), 1, "落点就一条：{:#?}", media.files);
     assert_eq!(media.crowded_out, 1, "被挤掉的那一张要数出来，不能静默");
 }

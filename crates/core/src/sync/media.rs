@@ -38,7 +38,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::adapter::Adapter;
+use crate::adapter::converge::Launch;
 use crate::catalog::{Catalog, CatalogError};
+use crate::path;
 use crate::scrape::pool::MediaPool;
 use crate::scrape::{AnchorKind, MediaKind};
 use crate::sublibrary::Selected;
@@ -79,6 +81,10 @@ impl Laid {
 /// 两个锚点都看：躺在变体目录里的那几张图挂在**变体**上，刮削来的封面与简介挂在
 /// **作品**上（[`AnchorKind`]）。只看一个锚点会让另一半媒体静默消失。
 ///
+/// `launch` 是筛过之后还在卡上的那几份播放列表（[`playlist::Laid::launching`](super::playlist::Laid::launching)）：
+/// 条目改指播放列表的那几个变体，**靠文件名找媒体的格式**（ES-DE）照播放列表的名字铺——它照 `<path>` 那份文件的名字
+/// 找媒体，照头一张碟的名字铺的那一份它找不着（票 `verdict-store-and-sync/18`）。
+///
 /// # Errors
 /// 读中立库失败时返回错误。
 pub fn lay(
@@ -86,19 +92,21 @@ pub fn lay(
     adapter: &dyn Adapter,
     pool: &MediaPool,
     selected: &Selected,
+    launch: &BTreeMap<String, Launch>,
 ) -> Result<Laid, CatalogError> {
     let variants: Vec<&str> = selected
         .picked
         .iter()
         .map(|picked| picked.key.as_str())
         .collect();
-    lay_for(catalog, adapter, pool, &variants)
+    lay_for(catalog, adapter, pool, &variants, launch)
 }
 
 /// 同 [`lay`]，只是直接给**变体的键**。
 ///
 /// **导出**铺的是整个库，没有选择集可求值（`adapter::transfer::media_to_lay`，
 /// 票 `one-criterion-per-thing/08`）——布局照旧只有这一份实现，子库与导出从这儿各取一份。
+/// 导出那一侧不生成播放列表（ADR-0004），`launch` 交空表。
 ///
 /// # Errors
 /// 读中立库失败时返回错误。
@@ -107,6 +115,7 @@ pub fn lay_for(
     adapter: &dyn Adapter,
     pool: &MediaPool,
     variants: &[&str],
+    launch: &BTreeMap<String, Launch>,
 ) -> Result<Laid, CatalogError> {
     let works = work_of_variant(catalog)?;
     let mut out = Laid::default();
@@ -115,6 +124,12 @@ pub fn lay_for(
     let mut placed: BTreeSet<String> = BTreeSet::new();
 
     for &key in variants {
+        // **媒体照条目启动的那一份起名**：条目改指播放列表的，照播放列表折回中立库那套写法的键（根名接上它在子库里的
+        // 落点——子库里的布局照搬键，挂账 D79）；别的照旧是变体的键。资源槽与清单照旧挂在变体名下。
+        let named_after = launch
+            .get(key)
+            .map(|launch| path::join_root(path::root_of_key(key), &launch.file));
+        let named_after = named_after.as_deref().unwrap_or(key);
         let mut anchors = vec![(AnchorKind::Variant.label(), key.to_string())];
         if let Some(work) = works.get(key) {
             anchors.push((AnchorKind::Work.label(), work.clone()));
@@ -132,7 +147,8 @@ pub fn lay_for(
                     out.not_in_pool += 1;
                     continue;
                 };
-                let Some(placement) = adapter.media_placement(key, kind, &reference.hash, &ext)
+                let Some(placement) =
+                    adapter.media_placement(named_after, kind, &reference.hash, &ext)
                 else {
                     out.unknown_kind += 1;
                     continue;

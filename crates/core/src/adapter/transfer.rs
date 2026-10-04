@@ -508,7 +508,8 @@ pub fn media_to_lay(
         .iter()
         .map(|variant| variant.key.as_str())
         .collect();
-    media::lay_for(catalog, adapter, pool, &keys)
+    // **主库里不生成播放列表**（ADR-0004），条目照旧指每个变体的主文件，媒体也照它起名：交空表。
+    media::lay_for(catalog, adapter, pool, &keys, &BTreeMap::new())
 }
 
 /// 这一趟一共几步。**改了 [`export_task`] 里那几句 `task.step` 就得改这个数**，

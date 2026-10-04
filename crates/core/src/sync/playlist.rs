@@ -1,7 +1,22 @@
 //! 多碟变体同步到卡上时多生成一份 **`.m3u` 播放列表**（票 `verdict-store-and-sync/11`）。
 //!
 //! 一套多碟游戏要在模拟器里换碟，得拿播放列表启动，模拟器才知道还有第二张、第三张碟可换。这一份按碟序列出
-//! 每张碟的主文件，路径相对播放列表自己所在的目录。（前端条目眼下照旧启动头一张碟、没有改指它，挂单 `Q1647`。）
+//! 每张碟的主文件，路径相对播放列表自己所在的目录。
+//!
+//! ## 前端条目拿它启动
+//!
+//! 票 `verdict-store-and-sync/18`：卡上生成了播放列表的那个变体，前端条目改指它，几张碟本身不再各成一条
+//! （[`Laid::launching`] 交出 [`Launch`]，收敛照它写条目、铺媒体照它起名）。拿主意的人 2026-10-04 裁的两条路：
+//!
+//! - **ES-DE**：`<path>` 指播放列表，封面照播放列表的名字铺（ES-DE 照 `<path>` 那份文件的名字找媒体），每张碟的主文件
+//!   各写一条 `<hidden>true</hidden>`。碟**不挪地方**——卡上的布局照旧照搬键。ES-DE 的「Show hidden games」默认开着，
+//!   藏起来的那几条默认只是变淡，要用户在 ES-DE 里关一次才真的看不见（挂单 `Q1827`）。
+//! - **Pegasus**：`files:` 里那个变体那一行写播放列表。Pegasus 拿 `{file.path}` 交给启动命令，指什么交什么；一个文件
+//!   不弹挑选框。
+//!
+//! **放不进目标的播放列表不在卡上，条目照旧指头一张碟**——条目指着一份卡上没有的文件，比指头一张碟更糟。所以
+//! [`Laid::launching`] 只交筛过之后还在的那几份。没生成播放列表的那几套（档案说不吃 `.m3u`、有一张碟放不进或落成
+//! 吃不下的形态）照旧指头一张碟，别的碟在前端里点不到（挂单 `Q1828`）。
 //!
 //! ## 只在同步这一侧生成
 //!
@@ -33,6 +48,7 @@
 use std::collections::BTreeMap;
 
 use crate::adapter::Adapter;
+use crate::adapter::converge::Launch;
 use crate::capability::{Accepts, Profile};
 use crate::path;
 use crate::platform::Manifest as PlatformManifest;
@@ -50,6 +66,30 @@ pub struct Laid {
     pub files: Vec<DesiredFile>,
     /// 相对子库根的路径 → 那份播放列表的字节。与前端元数据一样**直接写它**：主库里没有源文件。
     pub bytes: BTreeMap<String, Vec<u8>>,
+    /// 变体的键 → 它的条目在卡上启动哪一份：那份播放列表，与它列的那几张碟。**还没筛过**，所以不交出去：
+    /// 交给收敛与铺媒体的是 [`Self::launching`]。
+    launch: BTreeMap<String, Launch>,
+}
+
+impl Laid {
+    /// 哪几个变体的条目在卡上启动播放列表：**照筛过之后的期望状态**，只交播放列表还在 `desired` 里的那几份。
+    ///
+    /// 播放列表折出来之后要照文件系统声明再筛一遍（[`Desired::screen`]）——两套多碟游戏的播放列表撞在同一条路径上，
+    /// 两份都不放行。那时条目还指着它，前端里点下去就是一份卡上没有的文件；所以收敛与铺媒体读的是这一份，不是没筛过的那一份。
+    #[must_use]
+    pub fn launching(&self, desired: &Desired) -> BTreeMap<String, Launch> {
+        let kept: std::collections::BTreeSet<&str> = desired
+            .files
+            .iter()
+            .filter(|file| file.kind == FileKind::Playlist)
+            .map(|file| file.path.as_str())
+            .collect();
+        self.launch
+            .iter()
+            .filter(|(_, launch)| kept.contains(launch.file.as_str()))
+            .map(|(variant, launch)| (variant.clone(), launch.clone()))
+            .collect()
+    }
 }
 
 /// 给这个子库里的多碟变体各折一份播放列表（判据见模块文档）。
@@ -117,7 +157,14 @@ pub fn lay(
             &bytes,
             (*variant).to_string(),
         ));
-        out.bytes.insert(at, bytes);
+        out.bytes.insert(at.clone(), bytes);
+        out.launch.insert(
+            (*variant).to_string(),
+            Launch {
+                file: at,
+                hidden: paths.iter().map(ToString::to_string).collect(),
+            },
+        );
     }
     out.files.sort_by(|a, b| a.path.cmp(&b.path));
     out
@@ -355,6 +402,39 @@ mod tests {
             &PlatformManifest::builtin(),
         );
         assert_eq!(laid.files.len(), 1, "{:?}", laid.files);
+    }
+
+    #[test]
+    fn 条目启动哪一份只交筛过之后还在的播放列表() {
+        // 票 `verdict-store-and-sync/18`：条目改指播放列表、几张碟藏起来。可播放列表折出来之后还要再筛一遍（撞车、
+        // 名字太长）——筛掉了的那一份不在卡上，条目指着它比指头一张碟更糟。
+        let footprint = 脚印(
+            "库/ps/某游戏/游戏 (Disc 1).chd",
+            &[
+                ("库/ps/某游戏/游戏 (Disc 1).chd", Role::Main),
+                ("库/ps/某游戏/游戏 (Disc 2).chd", Role::Companion),
+            ],
+        );
+        let mut desired = 期望(&footprint, &[]);
+        let laid = 折(&footprint, &desired);
+        desired.files.extend(laid.files.iter().cloned());
+        assert_eq!(
+            laid.launching(&desired),
+            BTreeMap::from([(
+                "库/ps/某游戏/游戏 (Disc 1).chd".to_string(),
+                Launch {
+                    file: "ps/某游戏/游戏.m3u".to_string(),
+                    hidden: vec![
+                        "ps/某游戏/游戏 (Disc 1).chd".to_string(),
+                        "ps/某游戏/游戏 (Disc 2).chd".to_string(),
+                    ],
+                },
+            )])
+        );
+
+        // 再筛一遍时它被挡下了（不在期望状态里了）：条目照旧指头一张碟。
+        desired.files.retain(|file| file.kind != FileKind::Playlist);
+        assert!(laid.launching(&desired).is_empty());
     }
 
     #[test]

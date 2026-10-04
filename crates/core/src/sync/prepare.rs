@@ -3,8 +3,8 @@
 //! ## 为什么这一步在核心里
 //!
 //! 它是十来个步骤串起来的一条线：读子库 → 读选择集 → 折事实 → 求值 → 看一眼目标 →
-//! 读能力档案 → 折期望状态 → 铺媒体 → 折前端元数据 → 按目标存储筛一遍 → 读清单 →
-//! 排计划。每一步都是领域
+//! 读能力档案 → 折期望状态 → 按目标存储筛一遍（连多碟变体的播放列表）→ 铺媒体 → 折前端元数据 →
+//! 读清单 → 排计划。每一步都是领域
 //! 判断，而**命令行与界面必须得到同一份计划**——`romcat sublibrary plan` 印出来的那份
 //! 差量，与界面上按钮旁边显示的那份，不能是两条各自演化的代码。
 //!
@@ -437,7 +437,7 @@ pub fn prepare(
 }
 
 /// **对着一份已经求过值的选择集排计划**：看一眼目标 → 读能力档案 → 折期望状态 →
-/// 铺媒体 → 折前端元数据 → 按目标存储筛一遍 → 读清单 → 排计划。
+/// 按目标存储筛一遍（连多碟变体的播放列表）→ 铺媒体 → 折前端元数据 → 读清单 → 排计划。
 ///
 /// [`prepare`] 的后半截，也是「装得下吗」唯一的那条线（[`sublibrary::fit`]）。
 /// 收 [`Selected`] 而不是去库里读选择集，是因为问「装得下吗」的不止存着的那一套：
@@ -509,37 +509,27 @@ pub fn prepare_selected(
     let footprint = super::Footprint::gather(catalog, selected)
         .map_err(|error| format!("中立库读不动：{error}"))?;
     let mut desired = footprint.desired(&profile);
-    step("铺媒体")?;
-    let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, selected)
-        .map_err(|error| format!("中立库读不动：{error}"))?;
-    step("折前端元数据")?;
-    let frontend = super::frontend::lay(
-        catalog,
-        adapter.as_ref(),
-        &priorities,
-        selected,
-        &media.assets,
-    )
-    .map_err(|error| format!("元数据折不出来：{error}"))?;
-    desired.files.extend(media.files.iter().cloned());
-    desired.files.extend(frontend.files.iter().cloned());
-    desired.files.sort_by(|a, b| a.path.cmp(&b.path));
-    // 生成物：相对子库根的路径 → 字节。前端元数据先进来，多碟变体的播放列表筛过之后再进来。
-    let mut generated = frontend.bytes;
     // **放不进目标存储的在这里就被拦下来**（ADR-0017 补充段）：FAT32 那 4 GiB 的
     // 单文件上限、文件名不收的字符、路径太长。拦在排计划**之前**，于是它们连成为一条
     // 步骤的路径都没有——「传到一半失败」这件事在构造上不会发生。
     //
     // 路径上限比的是**完整路径**，因此把子库根那串的长度也交进去。
+    //
+    // **先筛 ROM 那一类**（票 `verdict-store-and-sync/18`）：多碟变体的播放列表只列筛下来还在的碟，而前端条目与
+    // 媒体的名字又要先知道哪几份播放列表真落得下——三样排成一串，ROM 打头，后面每进来一截再筛一遍
+    // （`Desired::add_and_screen`）。
     step("按目标存储筛一遍")?;
     let prefix_chars = path::display(&root).encode_utf16().count();
     desired.screen(&profile.filesystem, prefix_chars);
+    // 生成物：相对子库根的路径 → 字节。多碟变体的播放列表先进来，前端元数据后进来。
+    let mut generated = BTreeMap::new();
     // **多碟变体的播放列表排在筛过之后**（`playlist` 模块文档）：它列的是卡上真落着的那几张碟，有一张放不进目标
-    // 的那一套就不生成。折出来的那几份再照同一份文件系统声明筛一遍——它们自己也可能撞车、名字太长；
-    // 已经筛过的那些再筛一遍结论不变（筛过的彼此不撞，单份的判据只看它自己）。
+    // 的那一套就不生成。折出来的那几份照同一份文件系统声明再筛一遍——它们自己也可能撞车、名字太长；筛完还在的那几份
+    // 才交给前端元数据与媒体（[`super::playlist::Laid::launching`]）：条目改指它、封面照它的名字铺。
     //
-    // **用不上播放列表的前端连平台清单都不读**：认各张碟要它（`shape::discs`，与扫描、成型同一条查法），
-    // 可 Pegasus 的子库不该因为一份它用不上的清单读不动而排不出计划。
+    // **用不上播放列表的前端连平台清单都不读**：认各张碟要它（`shape::discs`，与扫描、成型同一条查法），可一个用不上
+    // 播放列表的前端不该因为一份它用不上的清单读不动而排不出计划。内置的两家眼下都用得上（ES-DE 与 Pegasus）。
+    let mut launch = BTreeMap::new();
     if adapter.uses_playlists() {
         let platform_manifest = crate::sources::manifest(workspace)
             .map_err(|error| format!("平台清单读不动：{error}"))?;
@@ -551,12 +541,36 @@ pub fn prepare_selected(
             &platform_manifest,
         );
         if !playlists.files.is_empty() {
-            desired.files.extend(playlists.files);
-            desired.files.sort_by(|a, b| a.path.cmp(&b.path));
-            desired.screen(&profile.filesystem, prefix_chars);
+            desired.add_and_screen(
+                playlists.files.iter().cloned(),
+                &profile.filesystem,
+                prefix_chars,
+            );
+            launch = playlists.launching(&desired);
             generated.extend(playlists.bytes);
         }
     }
+    step("铺媒体")?;
+    let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, selected, &launch)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    step("折前端元数据")?;
+    let frontend = super::frontend::lay(
+        catalog,
+        adapter.as_ref(),
+        &priorities,
+        selected,
+        &media.assets,
+        &launch,
+    )
+    .map_err(|error| format!("元数据折不出来：{error}"))?;
+    // 媒体与前端元数据最后进来、再筛一遍。播放列表在这一遍里结论不变（`launch` 因此不必重取）：它们落在平台目录里，
+    // 媒体落在 `downloaded_media/`、`media/` 下，元数据落在 `gamelists/` 下或子库根上，路径撞不到一起。
+    desired.add_and_screen(
+        media.files.iter().chain(&frontend.files).cloned(),
+        &profile.filesystem,
+        prefix_chars,
+    );
+    generated.extend(frontend.bytes);
 
     step("读清单")?;
     let manifest = catalog

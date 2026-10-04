@@ -8,8 +8,9 @@
 //!
 //! 这在这里是**构造上**成立的，不是靠记得：`file:` 写的是变体在主库里的**键**
 //! （相对主库根，ADR-0020），而子库里的布局照搬那个键（挂账 D79），于是同一串字符
-//! 两边都对；`assets.*` 写的是 [`media`](super::media) 铺出来的相对路径。两处都不
-//! 经过任何绝对路径。
+//! 两边都对；多碟变体那一条写的是它的播放列表在子库里的落点（[`playlist`](super::playlist)，
+//! 票 `verdict-store-and-sync/18`），本来就相对子库根；`assets.*` 写的是 [`media`](super::media)
+//! 铺出来的相对路径。几处都不经过任何绝对路径。
 //!
 //! ## 元数据是**生成物**，没有主库侧的源文件
 //!
@@ -27,7 +28,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::adapter::converge;
+use crate::adapter::converge::{self, Launch};
 use crate::adapter::{Adapter, AdapterError};
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::priority::Priorities;
@@ -73,6 +74,10 @@ pub enum FrontendError {
 /// **靠文件名找媒体的格式这一份是空的**（ES-DE），于是这一步什么都不写进条目——
 /// 那正是它要的：媒体已经按 ROM 文件名铺在 `downloaded_media/` 下了。
 ///
+/// `launch` 是**筛过之后**还在卡上的那几份播放列表（[`playlist::Laid::launching`](super::playlist::Laid::launching)）：
+/// 点了名的多碟变体，条目改指播放列表、几张碟不再各成一条（票 `verdict-store-and-sync/18`）。所以这一步排在播放列表
+/// 之后——前端元数据要先知道哪几份播放列表真落得下。
+///
 /// # Errors
 /// 读中立库失败、或者适配器写不出来时返回错误。
 pub fn lay(
@@ -81,13 +86,14 @@ pub fn lay(
     priorities: &Priorities,
     selected: &Selected,
     assets: &BTreeMap<String, BTreeMap<&'static str, Vec<String>>>,
+    launch: &BTreeMap<String, Launch>,
 ) -> Result<Laid, FrontendError> {
     let picked: BTreeSet<String> = selected
         .picked
         .iter()
         .map(|variant| variant.key.clone())
         .collect();
-    let converged = converge::run_within(catalog, priorities, adapter, Some(&picked))?;
+    let converged = converge::run_within(catalog, priorities, adapter, Some(&picked), launch)?;
 
     let mut out = Laid {
         entries: converged.entries,

@@ -317,11 +317,15 @@ impl Adapter for Pegasus {
         STRUCTURAL_LOSSES
     }
 
-    /// **查过了，用不上**（不是没查过的那个默认）：Pegasus 只列元数据文件里写着的条目，不走目录认游戏，
-    /// 卡上多一份没有哪个条目指着的 `.m3u`，前端里根本见不着它。要它用得上，得让条目的 `files:` 指过去——
-    /// 收敛眼下只写每个变体的主文件，多碟变体那一行是头一张碟（挂单 `Q1647`）。
+    /// **用得上**：同步到卡上时，多碟变体那一条的 `files:` 写它的播放列表（票 `verdict-store-and-sync/18`，
+    /// 拿主意的人 2026-10-04 裁）。Pegasus 拿 `{file.path}` 交给启动命令，条目指什么就交什么，一个文件不弹挑选框
+    /// （官方文档 Metadata files 一页的 `file, files` 与启动命令参数两节）。
+    ///
+    /// 几张碟本身不用写：Pegasus 只列元数据文件里写着的条目，不走目录认游戏（[`Game::hidden_files`] 在这个格式里
+    /// 什么都不写）。另一条路是把几张碟都写进 `files:`（官方：多个文件时启动前挑一个），可那样换碟要退出重开，
+    /// 而且与作品级收敛的几个变体混在同一张挑选单里。
     fn uses_playlists(&self) -> bool {
-        false
+        true
     }
 
     fn file_name(&self) -> &'static str {
@@ -1614,6 +1618,37 @@ mod tests {
             assertion.difference.as_ref().map(|d| &d.found),
         );
         assert_eq!(assertion.asserted, Capability::LosslessRoundTrip);
+    }
+
+    #[test]
+    fn 条目指着播放列表时_几张碟一个字都不写() {
+        // 票 `verdict-store-and-sync/18`：Pegasus 只列元数据里写着的条目，不走目录认游戏——几张碟不写进 `files:`，
+        // 它们在前端里就不各成一条；写进去反倒成了启动前要挑的一张单子。
+        let doc = Document {
+            entries: vec![
+                Entry::new(Body::Collection(Collection {
+                    name: "PS1".to_string(),
+                    ..Collection::default()
+                })),
+                Entry::new(Body::Game(Game {
+                    title: "某游戏".to_string(),
+                    files: vec!["ps/某游戏/游戏.m3u".to_string()],
+                    hidden_files: vec![
+                        "ps/某游戏/游戏 (Disc 1).cue".to_string(),
+                        "ps/某游戏/游戏 (Disc 2).cue".to_string(),
+                    ],
+                    ..Game::default()
+                })),
+            ],
+        };
+        let text = String::from_utf8(Pegasus.write(&doc, None).expect("写得出")).expect("UTF-8");
+        assert_eq!(
+            text,
+            "collection: PS1\n\
+             \n\
+             game: 某游戏\n\
+             files: ps/某游戏/游戏.m3u\n"
+        );
     }
 
     #[test]

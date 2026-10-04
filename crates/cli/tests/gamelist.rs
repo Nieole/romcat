@@ -52,7 +52,8 @@ fn 能力档位对用户可见() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("ES-Gamelist"), "{text}");
     assert!(text.contains("gamelist.xml"), "{text}");
-    // 多碟变体同步到卡上时生不生成 `.m3u`（票 `verdict-store-and-sync/11`）：ES-DE 用得上，Pegasus 用不上。
+    // 多碟变体同步到卡上时生不生成 `.m3u`（票 `verdict-store-and-sync/11`）：两家都用得上——票 18 让条目改指播放列表
+    // 之后，Pegasus 也拿它启动。
     let 行 = |格式: &str| {
         text.lines()
             .find(|line| line.starts_with(格式))
@@ -60,7 +61,7 @@ fn 能力档位对用户可见() {
     };
     assert!(text.contains("多碟播放列表"), "{text}");
     assert!(行("ES-Gamelist").contains("同步时生成"), "{text}");
-    assert!(行("Pegasus").contains("不生成"), "{text}");
+    assert!(行("Pegasus").contains("同步时生成"), "{text}");
     // 档位那四个词说不出「把值交给这个格式存一趟会变成什么样」。ADR-0003 要的
     // 「**导出前**就知道会丢掉什么」得在这里说出口，而不是等用户导完自己发现
     // 两家开发商压成了一条。

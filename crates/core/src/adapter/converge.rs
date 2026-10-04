@@ -14,8 +14,8 @@
 //! 维度，也是 ES 的 system 到 Pegasus 的 collection 那条 1:1 映射（调研 C.6）。
 //!
 //! 平台一切开，收敛就只能是**作品 × 平台**：一部横跨 SFC 与 PSP 的作品在两个平台上
-//! 各是一个条目。真库上 9,226 个作品里有 2,314 个横跨多个平台，所以这不是边角情况
-//! （挂账 D63）。
+//! 各是一个条目。真库上近万个作品里有两千多个横跨多个平台，所以这不是边角情况
+//! （挂账 D63；作品数见台账 `docs/library-facts.md`，横跨多个平台的个数台账没收，挂单 `Q1256`）。
 //!
 //! ## 首选变体：汉化 > 官中 > 日版 > 其他，可被裁决覆盖
 //!
@@ -173,7 +173,8 @@ pub struct Converged {
     /// 状态块「导出」那一行读的就是它（票 `gui-looks-like-the-design/34`）。
     ///
     /// **与 [`Self::entries`] 那个数同一处产出**：那个计数与这份名单在同一个循环里攒，
-    /// 两处分开数迟早会给出「写了 28,529 个条目」而名单里只有 28,528 条的那种账。
+    /// 两处分开数迟早会给出「计数说写了近三万个条目、名单里却少一条」的那种账（条目数见台账
+    /// `docs/library-facts.md`）。
     pub written: Vec<ExportedEntry>,
 }
 
@@ -275,6 +276,20 @@ pub fn attach_assets(
     }
 }
 
+/// 一个变体的条目在**目标上**启动哪一份：多碟变体同步到卡上、旁边生成了**播放列表**时，条目指它
+/// （票 `verdict-store-and-sync/18`）。
+///
+/// 由同步那一侧在播放列表**筛过之后**折出来（[`sync::playlist::Laid::launching`](crate::sync::playlist::Laid::launching)）
+/// ——放不进目标的播放列表不在卡上，条目照旧指头一张碟。**导出到主库那一侧一条都没有**：主库里不生成播放列表
+/// （ADR-0004），条目照旧指每个变体的主文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launch {
+    /// 条目指着的那一份，相对子库根：那个变体的播放列表。
+    pub file: String,
+    /// 那个变体名下、在前端里不该各成一条的那几份，相对子库根：播放列表里列的那几张碟（[`Game::hidden_files`]）。
+    pub hidden: Vec<String>,
+}
+
 /// 把中立库收敛成一份份中立文档。
 ///
 /// **不碰主库、不联网**：要的东西全在中立库里躺着（ADR-0001）。
@@ -286,7 +301,7 @@ pub fn run(
     priorities: &Priorities,
     adapter: &dyn Adapter,
 ) -> Result<Converged, CatalogError> {
-    run_within(catalog, priorities, adapter, None)
+    run_within(catalog, priorities, adapter, None, &BTreeMap::new())
 }
 
 /// 只收敛这几个变体，别的一个都不进来。
@@ -297,6 +312,9 @@ pub fn run(
 /// 收敛的粒度不变（作品 × 平台）：一部作品在卡上只带了汉化版，卡上那个条目就只有
 /// 汉化版这一个文件——而这正是用户挑变体而不是挑条目的理由（`sublibrary` 模块文档）。
 ///
+/// `launch` 是同步那一侧交来的「哪几个变体在卡上启动播放列表」（[`Launch`]，键是变体的键）：点了名的变体，
+/// 条目里那一条写播放列表、几张碟记进 [`Game::hidden_files`]；没点名的照旧写主文件。导出交空表。
+///
 /// # Errors
 /// 读中立库失败时返回错误。
 pub fn run_within(
@@ -304,6 +322,7 @@ pub fn run_within(
     priorities: &Priorities,
     adapter: &dyn Adapter,
     only: Option<&BTreeSet<String>>,
+    launch: &BTreeMap<String, Launch>,
 ) -> Result<Converged, CatalogError> {
     let layout = layout(catalog, only)?;
     // 票 15 挑出来的**显示标题**与**排序标题**。这一层一个字都不改它。
@@ -328,9 +347,10 @@ pub fn run_within(
         // 而这里要的是「这份库里实际用的是哪一个」。散在多个目录里就交白卷——
         // 那时说不出唯一的那一个，路径整条原样写出去。
         //
-        // 真库上 22 个平台各自都只用一个目录，而其中 **12 个的目录名与平台名对不上**
-        // （`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。ES 家族的
-        // `es_systems.xml` 拿它当 `<name>`，拿平台名顶上去的话，那 12 个在 Android 与
+        // 真库上二十来个平台各自都只用一个目录，而其中**一半上下的目录名与平台名对不上**
+        // （`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`；平台数见台账 `docs/library-facts.md`，
+        // 对不上的个数台账没收，出处是挂账 `D140`，挂单 `Q1256`）。ES 家族的
+        // `es_systems.xml` 拿它当 `<name>`，拿平台名顶上去的话，那十来个在 Android 与
         // Linux 上（大小写敏感）一个都指不着。
         let directory = platform_directory(
             planned
@@ -377,6 +397,7 @@ pub fn run_within(
                 chosen.get(one.anchor.name()),
                 priorities,
                 one.why,
+                launch,
             ))));
         }
         out.files.push(CollectionFile {
@@ -661,7 +682,7 @@ fn preference_of(
 /// 面板上排第一的那个，就得是同步到掌机上会默认启动的那个，两处各写一遍必然漂开。
 ///
 /// 输入是**这一个变体自己的**记号与发行版，不是整份库的映射表：详情面板一次只看几个
-/// 变体，为它整读一遍 38,963 条自动通过的候选是几十毫秒的卡顿。
+/// 变体，为它整读一遍全库数以万计的自动通过的候选（见台账 `docs/library-facts.md`）是几十毫秒的卡顿。
 #[must_use]
 pub fn preference_for(
     key: &str,
@@ -763,6 +784,7 @@ fn build_game(
     chosen: Option<&Chosen>,
     priorities: &Priorities,
     why: Preference,
+    launch: &BTreeMap<String, Launch>,
 ) -> Game {
     let head = &members[0];
     // **每个字段写出去的是什么只问 [`shown`]**：换一份优先级表之前算「哪几处显示值会变」
@@ -840,9 +862,22 @@ fn build_game(
         //
         // 机器读的那一半在 `x-romcat-variant` 里，那一格**带着根名**：它要精确对回
         // 中立库里的那个变体，而两块盘上同名的东西只靠相对路径分不开。
+        //
+        // **同步到卡上时，多碟变体那一条写它的播放列表**（[`Launch`]，票 `verdict-store-and-sync/18`）：
+        // 拿播放列表启动，模拟器才换得了碟。几张碟记进 `hidden_files`，由格式决定怎么让它们不各成一条。
         files: members
             .iter()
-            .map(|v| crate::path::relative_of_key(&v.main_key).to_string())
+            .map(|v| {
+                launch.get(&v.key).map_or_else(
+                    || crate::path::relative_of_key(&v.main_key).to_string(),
+                    |launch| launch.file.clone(),
+                )
+            })
+            .collect(),
+        hidden_files: members
+            .iter()
+            .filter_map(|v| launch.get(&v.key))
+            .flat_map(|launch| launch.hidden.iter().cloned())
             .collect(),
         // **开发商、发行商与类型按集合读**：数据源一个键写了几家就是几家，挑一条等于换掉
         // 一家公司（`Priorities::pick_all` 的文档、挂单 Q27）。
