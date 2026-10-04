@@ -18,36 +18,65 @@
 //! 期望里的每一条都要重传」——一份灾难性的预览。所以根目录不在时**直接失败**。
 
 use std::collections::BTreeSet;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::catalog::mtime_ns;
-use crate::fs::{EntryKind, EntryMeta, LibraryFs};
+use crate::fs::{DirEntry, EntryKind, EntryMeta, LibraryFs};
 use crate::path;
 
 use super::{Stamp, TargetFile, TargetState};
 
 /// 目标设备看不成的原因。
-#[derive(Debug, thiserror::Error)]
+///
+/// **种类就是结构化的原因**（挂单 `Q851`）：插着没插、读不读得动，两个壳照种类各补各的去处——命令行补
+/// 命令，界面补屏上那一处（卡上的「目标设置…」）。`Display` 只说事实：**不带命令行命令**；未连接那一种
+/// 也不带系统错误原文——化不开一条路径，各平台交上来的那句原文说的都是「不在」，人从中读不出别的。
+/// 列不开那一种照带原文：没权限与盘出了错，下一步不一样。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ObserveError {
     /// 子库根未连接。**卡没插上就该在这里停止**，而不是排出一份「全删全传」的计划。
-    #[error(
-        "目标未连接：{path}（{source}）\n插上读卡器，或者 `romcat sublibrary set` 改一下目标路径。"
-    )]
+    #[error("目标未连接：{path}——卡没插上，或者这条路径已经不在了。")]
     Absent {
         /// 子库根。
         path: String,
-        /// 底层错误。
-        source: io::Error,
     },
     /// 子库根列不开。
-    #[error("目标根目录列不开：{path}（{source}）")]
+    #[error("目标根目录列不开：{path}（{why}）")]
     Unreadable {
         /// 子库根。
         path: String,
-        /// 底层错误。
-        source: io::Error,
+        /// 系统交上来的那句原文。
+        why: String,
     },
+}
+
+/// 目标此刻**看不看得成**：化开那条路径、列一下顶层——[`observe`] 起手那两下，同一个口径，不往下走。
+///
+/// **「目标在不在位」只在这一处判**（ADR-0024，挂单 `Q851`）：排差量预览、同步按下去之前，子库屏卡头那枚
+/// 「未连接」标签，「目标设置」弹层判路径时那一句「在不在」（`sublibrary::target::vet`）问的都是它；
+/// 谁都不另查一眼 `exists()`——两处各查一次，口径迟早对不上（化得开却列不开的、路径上是一份文件的，
+/// `exists()` 说在，这里说列不开）。
+///
+/// 查盘，什么时候调由调用方定：不在画帧里每帧调。
+///
+/// # Errors
+/// 子库根未连接或列不开时返回 [`ObserveError`]。
+pub fn reach(fs: &dyn LibraryFs, root: &Path) -> Result<(), ObserveError> {
+    open(fs, root).map(|_| ())
+}
+
+/// 化开子库根、列出顶层那一层。[`reach`] 与 [`observe`] 共用这两下，判据只有一份。
+fn open(fs: &dyn LibraryFs, root: &Path) -> Result<(PathBuf, Vec<DirEntry>), ObserveError> {
+    let root = fs.canonicalize(root).map_err(|_| ObserveError::Absent {
+        path: path::display(root),
+    })?;
+    let top = fs
+        .read_dir(&root)
+        .map_err(|source| ObserveError::Unreadable {
+            path: path::display(&root),
+            why: source.to_string(),
+        })?;
+    Ok((root, top))
 }
 
 /// 只读地看一遍目标设备，折出**实际状态**。
@@ -74,18 +103,7 @@ pub enum ObserveError {
 /// # Errors
 /// 子库根未连接或列不开时返回错误。
 pub fn observe(fs: &dyn LibraryFs, root: &Path) -> Result<TargetState, ObserveError> {
-    let root = fs
-        .canonicalize(root)
-        .map_err(|source| ObserveError::Absent {
-            path: path::display(root),
-            source,
-        })?;
-    let top = fs
-        .read_dir(&root)
-        .map_err(|source| ObserveError::Unreadable {
-            path: path::display(&root),
-            source,
-        })?;
+    let (root, top) = open(fs, root)?;
 
     let mut out = TargetState::default();
     let mut stack: Vec<PathBuf> = Vec::new();

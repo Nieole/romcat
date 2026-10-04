@@ -2790,7 +2790,7 @@ impl Screen {
                 self.undone = Some(account);
                 self.after_roll(site);
             }
-            Err(error) => self.refuse(format!("撤不掉：{error}")),
+            Err(error) => self.refuse(format!("撤不掉：{}", refusal_with_place(&error))),
         }
     }
 
@@ -2858,7 +2858,7 @@ impl Screen {
                 self.applied = Some(account);
                 self.after_roll(site);
             }
-            Err(error) => self.refuse(format!("放不回去：{error}")),
+            Err(error) => self.refuse(format!("放不回去：{}", refusal_with_place(&error))),
         }
     }
 
@@ -3072,6 +3072,18 @@ struct Opened {
     /// 不叫 `part_samples`：词表**批**那一条里的**一部分**专指已经整批裁过的那一组，
     /// 而这几条样本是给人看**还没裁**的那一组的。
     drilled_samples: Vec<Sample>,
+}
+
+/// 撤销、放回被核心库拒下时屏上那句话：**核心那句原样**，被盖住的那一种再补**屏上的去处**——裁决记录里
+/// 盖住它的那一行（挂单 `Q622`）。核心那句只说事实与去处的名字、不带命令，盖住它的是哪一批交成字段；
+/// 「去哪一处按」是屏上的位置，核心库不该知道（ADR-0005 修订段）。命令行在它那一层补命令。
+fn refusal_with_place(error: &TriageError) -> String {
+    match error {
+        TriageError::CoveredBy { by, .. } => {
+            format!("{error}在「裁决记录」里，「第 {by} 批裁决」那一行旁边就有撤销。")
+        }
+        _ => error.to_string(),
+    }
 }
 
 /// **一堆来自同一次匹配的字段**：条目号、依据、那几个值，连底下那两颗按钮。

@@ -5569,3 +5569,69 @@ fn 跳到待确认屏之后左边待选列表滚到那一条() {
         画出来的字(&这一帧),
     );
 }
+
+#[test]
+fn 加入子库那一层算不出加入后多大时_照核心交出的原因种类说_不一律说目标不在位() {
+    // 挂单 `Q851`：「装不装得下」算不出的原因由核心库交成结构化的（`Fit::Unknown { why }`），
+    // 屏上照种类挑话——卡不在位说不在位；前端格式这一版没带适配器那一种不是「目标不在位」。
+    use browse::sublibrary::{AddTo, Device, Estimate, Facts};
+    use romcat_core::adapter::NoAdapter;
+    use romcat_core::sublibrary::{Addition, Fit};
+    use romcat_core::sync::{ObserveError, Unplanned};
+
+    let devices = [Device {
+        name: "掌机".to_string(),
+        rules: 1,
+        picked: Some(2),
+        bytes: Some(2048),
+        duplicate: None,
+        capacity: None,
+    }];
+    let rule = romcat_core::sublibrary::Rule::parse("平台=SFC").expect("读得懂");
+    let 画 = |why: Unplanned| {
+        let estimate = Estimate::Done(Box::new(Addition {
+            duplicate: None,
+            added: 1,
+            added_bytes: 1024,
+            overlap: 0,
+            before_bytes: 2048,
+            after: Fit::Unknown { why },
+        }));
+        let facts = Facts {
+            devices: &devices,
+            rule: Some(&rule),
+            unruly: None,
+            unfilled: 0,
+            browse_only: &[],
+            searching: false,
+            picked: 0,
+            picked_variants: None,
+            estimate: &estimate,
+        };
+        let ctx = headless::context();
+        romcat_gui::look::install(&ctx);
+        let mut layer = AddTo::open(&devices, None);
+        let mut out = String::new();
+        for _ in 0..2 {
+            out = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
+                let _ = layer.ui(ui.ctx(), &facts);
+            }));
+        }
+        out
+    };
+
+    let 不在位 = 画(Unplanned::Target(ObserveError::Absent {
+        path: "/卡".to_string(),
+    }));
+    assert!(不在位.contains("目标不在位"), "{不在位}");
+
+    let 没适配器 = 画(Unplanned::NoAdapter(NoAdapter {
+        format: "这一版没带的格式".to_string(),
+        known: vec!["Pegasus".to_string()],
+    }));
+    assert!(没适配器.contains("算不出"), "{没适配器}");
+    assert!(
+        !没适配器.contains("目标不在位"),
+        "原因是前端格式没有适配器，屏上却说目标不在位：\n{没适配器}"
+    );
+}

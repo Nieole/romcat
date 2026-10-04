@@ -169,6 +169,132 @@ fn 目标不在位时停住并说清怎么办() {
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("目标未连接"), "{text}");
     assert!(text.contains("插上读卡器"), "{text}");
+    // 核心那句只说事实；改目标路径的那条命令由命令行补（挂单 `Q851`），点得出是哪个子库。
+    assert!(
+        text.contains("romcat sublibrary set 掌机 --target"),
+        "命令行该补上改目标路径的命令：{text}"
+    );
+}
+
+#[test]
+fn 子库记着这一版没带的前端格式时_说清是哪个格式_补上换一个的命令() {
+    // 挂单 `Q797`：核心库那一问（`Sublibrary::adapter`）只说事实——是哪个格式、眼下带的是哪几个；
+    // 换一个的命令由命令行补。来路只剩一种：旧库里存着这一版没带的格式（`set --format` 当场拦）。
+    let (_library, workspace, _target) = 现场();
+    {
+        let mut catalog =
+            romcat_core::catalog::Catalog::open(&romcat_core::workspace::catalog_path(
+                workspace.path(),
+                romcat_core::workspace::Slug::Named("测试库"),
+            ))
+            .expect("开得出中立库");
+        let mut 旧库里存着的 = catalog.sublibrary("掌机").expect("读得动").expect("在");
+        旧库里存着的.format = "这一版没带的格式".to_string();
+        catalog.put_sublibrary(&旧库里存着的).expect("写得进");
+    }
+    let out = 子库(workspace.path(), &["plan", "掌机"]);
+    let text = 出来的话(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("这一版没带「这一版没带的格式」"), "{text}");
+    assert!(
+        text.contains("romcat sublibrary set 掌机 --format"),
+        "命令行该补上换一个格式的命令：{text}"
+    );
+}
+
+#[test]
+fn 差量预览底下那几件怪事_核心那句只说事实_命令行照种类补上那条命令() {
+    // 挂单 `Q622` 那一族（`Prepared::concerns` 整份交成 `sync::Concern`，挂单 `Q1348`）：读不懂的规则、
+    // 媒体池里找不到的媒体、超过半年没核实的档案声明——核心那几句不带命令，命令行照种类各补一条。
+    let (_library, workspace, _target) = 现场();
+    let ws = workspace.path();
+    // 一份陈旧的名册：内置那份每一条的核实日期都拨回 2020 年。
+    let 底稿 = ws.join("底稿.toml");
+    let out = romcat(
+        ws,
+        &["capability", "--dump-builtin", &底稿.display().to_string()],
+    );
+    assert!(out.status.success(), "{}", 出来的话(&out));
+    let 陈旧的: String = fs::read_to_string(&底稿)
+        .expect("读得出")
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("\"核实日期\"") {
+                "\"核实日期\" = \"2020-01-01\"".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(ws.join("capability.toml"), 陈旧的).expect("写得进");
+    let out = 子库(ws, &["set", "掌机", "--capability", "retroarch-exfat"]);
+    assert!(out.status.success(), "{}", 出来的话(&out));
+    {
+        let mut catalog =
+            romcat_core::catalog::Catalog::open(&romcat_core::workspace::catalog_path(
+                ws,
+                romcat_core::workspace::Slug::Named("测试库"),
+            ))
+            .expect("开得出中立库");
+        // 一条读不懂的规则（换一版程序、或者人手改过这个 SQLite 文件）。
+        catalog
+            .add_rule(
+                "掌机",
+                &romcat_core::sublibrary::Rule {
+                    text: "这不是一条规则".to_string(),
+                    root: romcat_core::sublibrary::Group::new(
+                        romcat_core::sublibrary::Join::All,
+                        Vec::new(),
+                    ),
+                },
+                None,
+            )
+            .expect("写得进");
+        // 库里记着一张封面，媒体池里却没有那个文件。
+        catalog
+            .put_media(
+                &"ab".repeat(32),
+                "png",
+                16,
+                romcat_core::scrape::measure::Measured::default(),
+            )
+            .expect("记得下");
+        catalog
+            .put_scraped(&[romcat_core::catalog::scrape::Harvested {
+                anchor: romcat_core::scrape::AnchorKind::Variant.label().to_string(),
+                subject: "库/FC/魂斗罗.zip".to_string(),
+                source: "本地媒体".to_string(),
+                input: "库/FC/魂斗罗.zip/封面".to_string(),
+                values: Vec::new(),
+                media: vec![romcat_core::catalog::scrape::HarvestedMedia {
+                    kind: romcat_core::scrape::MediaKind::Cover.label().to_string(),
+                    hash: "ab".repeat(32),
+                    evidence: "测试".to_string(),
+                }],
+            }])
+            .expect("引用写得进");
+    }
+
+    let out = 子库(ws, &["plan", "掌机"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    for (该有, 怎么回事) in [
+        ("条规则读不懂", "读不懂的规则那一句"),
+        (
+            "romcat sublibrary show 掌机",
+            "读不懂的规则：看是哪几条的命令",
+        ),
+        ("在媒体池里找不到那个文件", "媒体池里找不到那一句"),
+        ("romcat scrape", "媒体池里找不到：重新刮削的命令"),
+        ("超过半年没核实", "陈旧声明那一句"),
+        (
+            "romcat capability retroarch-exfat",
+            "陈旧声明：看是哪几条的命令，点得出是哪一份档案",
+        ),
+    ] {
+        assert!(text.contains(该有), "{怎么回事}没印出来：{text}");
+    }
 }
 
 #[test]
@@ -178,6 +304,11 @@ fn 子库不在时说得清怎么建() {
     let text = 出来的话(&out);
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("没有叫「备用卡」的子库"), "{text}");
+    // 核心那句只说事实，建一个的命令由命令行补（挂单 `Q622` 那一族）。
+    assert!(
+        text.contains("romcat sublibrary set 备用卡 --target"),
+        "命令行该补上建一个的命令：{text}"
+    );
 }
 
 #[test]
@@ -279,6 +410,23 @@ fn 卡上有什么(dir: &Path) -> Vec<(String, u64)> {
     }
     out.sort();
     out
+}
+
+#[test]
+fn 主库的根未连接时同步停住_命令行补上换位置的旗标() {
+    // 挂单 `Q622` 那一族：「这几个根未连接」那句核心库只说事实（界面也印它），`--library-root` 是命令行
+    // 自己的旗标，由命令行补。
+    let (library, workspace, target) = 现场();
+    drop(library);
+    let out = 子库(workspace.path(), &["sync", "掌机", "--yes"]);
+    let text = 出来的话(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("这几个根未连接：库"), "{text}");
+    assert!(
+        text.contains("--library-root 根名=路径"),
+        "命令行该补上换位置的旗标：{text}"
+    );
+    assert_eq!(卡上有什么(target.path()).len(), 0, "停住了就一个字节都没写");
 }
 
 #[test]

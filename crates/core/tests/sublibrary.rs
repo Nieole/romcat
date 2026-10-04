@@ -576,7 +576,7 @@ fn 读不懂的规则进得了报告_不只写在标准错误上() {
         &facts,
         &selected,
         Fit::Unknown {
-            why: "这份现场没有卡".to_string(),
+            why: romcat_core::sync::Unplanned::Failed("这份现场没有卡".to_string()),
         },
     );
     assert_eq!(report.broken_rules.len(), 1);
@@ -672,7 +672,7 @@ fn 报告数得出选中多少条与多少容量() {
         // 这份现场的变体键是摆出来的，没有真文件、也没有卡：装不装得下由
         // `装得下吗与同步计划器同底_…` 那几条对着真卡验，这里只验选中那几个数。
         Fit::Unknown {
-            why: "这份现场没有卡".to_string(),
+            why: romcat_core::sync::Unplanned::Failed("这份现场没有卡".to_string()),
         },
     );
 
@@ -956,7 +956,19 @@ fn 目标不在位时装不装得下如实说算不出_不给一个数() {
         "选中多少只问中立库，卡不在手边照样算得出"
     );
     match &report.fit {
-        Fit::Unknown { why } => assert!(why.contains("目标未连接"), "{why}"),
+        // **算不出的原因交成结构化的**（挂单 `Q851`）：界面照种类挑话，不再自己查一眼在不在位；
+        // 那句话只说事实，不带命令行命令与系统错误原文。
+        Fit::Unknown {
+            why:
+                why @ romcat_core::sync::Unplanned::Target(romcat_core::sync::ObserveError::Absent {
+                    ..
+                }),
+        } => {
+            assert!(why.to_string().contains("目标未连接"), "{why}");
+            // 临时目录名里也带着 `romcat-`，认的是命令那一截（`romcat ` 后面跟子命令）。
+            assert!(!why.to_string().contains("romcat "), "{why}");
+        }
+        Fit::Unknown { why } => panic!("卡不在手边，原因却不是未连接：{why:?}"),
         Fit::Known(room) => panic!("卡不在手边却给了一个数：{room:?}"),
     }
     let text = report.render_text();
@@ -1005,10 +1017,20 @@ fn 目标落在主库的根里或者把根包在里面_当场拦下并点名是�
             other => panic!("{} 该被拦成落在主库里：{other:?}", 目标.display()),
         }
     }
-    // 同步那一道闸是同一条判断：把根包在里面的目标，点同步时一样拦下。
+    // 同步那一道闸是同一条判断：把根包在里面的目标，点同步时一样拦下。**话也只有一份**：
+    // 与存下来那一刻拦下时是同一句（`TargetRefusal` 的 `Display`），不在同步那一刻另说一句长话。
+    let 那一句 = match target::vet(&catalog, 工作区.path(), None, 盘.path()).expect("读得动")
+    {
+        Err(refusal) => refusal.to_string(),
+        other => panic!("该被拦下：{other:?}"),
+    };
     let 话 = romcat_core::sync::prepare::refuse_target_in_library(&catalog, &[], 盘.path())
         .expect_err("把根包在里面也该被拒");
-    assert!(话.contains("主库只读"), "红线要说出来：{话}");
+    assert!(话.contains("只读的主库"), "红线要说出来：{话}");
+    assert!(
+        话.contains(&那一句),
+        "同步那一刻另说了一句：{话}\n存下时那一句：{那一句}"
+    );
 }
 
 #[test]

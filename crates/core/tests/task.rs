@@ -88,6 +88,7 @@ impl 现场 {
         }
     }
 
+    /// 任务台上那一趟收到的是什么：排计划交回的原因照 `From` 折成 [`Cutoff`]。
     fn 排一次(&self, task: &Handle) -> Result<sync::Prepared, Cutoff> {
         sync::prepare(
             &self.catalog,
@@ -96,6 +97,7 @@ impl 现场 {
             &sync::Request::default(),
             task,
         )
+        .map_err(Cutoff::from)
     }
 
     /// 把那份计划真的落到卡上。

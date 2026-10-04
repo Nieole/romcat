@@ -1557,6 +1557,148 @@ fn 没摊开的卡上按排差量预览_卡不在位时照旧只在屏上说_任
 }
 
 #[test]
+fn 子库记着这一版没带的前端格式时按排差量预览_当场在屏上说_不排也不记失败() {
+    // 挂单 `Q797`：「这个前端格式这一版有没有适配器」由核心库的子库一问答（`Sublibrary::adapter`），
+    // 按下去那一刻就问它——不排、任务台上没有新一趟、历史里不多一条失败；屏上说清是哪个格式、去哪儿换。
+    // 来路只剩一种：旧库里存着这一版没带的格式（界面上的前端格式是分段选择，打不错）。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let mut 旧库里存着的 = site
+            .catalog
+            .sublibrary("掌机")
+            .expect("读得动")
+            .expect("在");
+        旧库里存着的.format = "这一版没带的格式".to_string();
+        site.catalog.put_sublibrary(&旧库里存着的).expect("写得进");
+        screen.reload(site);
+    }
+    let 历史几条 = 场.app.tasks().history().len();
+
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.preview(site, tasks);
+    }
+    assert!(!场.app.tasks().busy(), "没有适配器却往任务台上排了活");
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    let screen = 场.app.sublibrary();
+    let 说的 = screen.error().expect("没有适配器该当场说出口");
+    assert!(
+        说的.contains("这一版没带「这一版没带的格式」"),
+        "没说清是哪个格式：{说的}"
+    );
+    assert!(说的.contains("目标设置"), "没说去屏上哪儿换：{说的}");
+    assert!(!说的.contains("romcat"), "屏上出现了终端命令：{说的}");
+    assert!(
+        屏上.contains(说的),
+        "那句话没画在屏上：{说的}\n屏上：\n{屏上}"
+    );
+    assert!(screen.prepared().is_none(), "没有适配器却排出了一份差量");
+    历史没多一条(&场, 历史几条);
+}
+
+#[test]
+fn 子库记着的能力档案名册里没有时_差量预览底下说清退回了不作声称_去处是目标设置不是终端命令() {
+    // 挂单 `Q622` 那一族：差量预览底下那几句核心库只说事实（`Prepared::concerns`），界面照种类补屏上的去处。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let mut 记着的 = site
+            .catalog
+            .sublibrary("掌机")
+            .expect("读得动")
+            .expect("在");
+        记着的.capability = Some("名册里没有的".to_string());
+        site.catalog.put_sublibrary(&记着的).expect("写得进");
+        screen.reload(site);
+    }
+    场.排预览();
+    assert!(
+        场.app.sublibrary().prepared().is_some(),
+        "前提：差量排出来了：{:?}",
+        场.app.sublibrary().error(),
+    );
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.contains("名册里没有的") && 屏上.contains("不作声称"),
+        "没说清退回了不作声称：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("按卡上「目标设置…」重挑一份"),
+        "没指到屏上的去处：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("`romcat") && !屏上.contains("romcat capability"),
+        "屏上出现了终端命令：\n{屏上}"
+    );
+}
+
+#[test]
+fn 差量预览底下读不懂的规则与陈旧的档案声明_去处是卡上那一处不是终端命令() {
+    // 挂单 `Q622` 那一族（`Prepared::concerns` 整份交成 `sync::Concern`，挂单 `Q1348`）：核心那几句只说事实，
+    // 界面照种类补屏上的去处——读不懂的规则在卡上「选择集」那一块标红，陈旧的声明在「目标设置…」的平台表里。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    // 一份陈旧的名册：内置那份每一条的核实日期都拨回 2020 年。
+    let 陈旧的: String = romcat_core::capability::Roster::builtin_text()
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("\"核实日期\"") {
+                "\"核实日期\" = \"2020-01-01\"".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    写(
+        &场.工作区
+            .path()
+            .join(romcat_core::capability::Roster::IN_WORKSPACE),
+        陈旧的.as_bytes(),
+    );
+    {
+        let (screen, site) = 场.app.sublibrary_and_site();
+        let mut 记着的 = site
+            .catalog
+            .sublibrary("掌机")
+            .expect("读得动")
+            .expect("在");
+        记着的.capability = Some("retroarch-exfat".to_string());
+        site.catalog.put_sublibrary(&记着的).expect("写得进");
+        screen.reload(site);
+    }
+    场.摆一条读不懂的("掌机", "这不是一条规则");
+    场.排预览();
+    assert!(
+        场.app.sublibrary().prepared().is_some(),
+        "前提：差量排出来了：{:?}",
+        场.app.sublibrary().error(),
+    );
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    for (该有, 怎么回事) in [
+        ("条规则读不懂", "读不懂的规则那一句"),
+        ("卡上「选择集」那一块里标红的就是", "读不懂的规则的去处"),
+        ("超过半年没核实", "陈旧声明那一句"),
+        ("平台表里标着「陈旧」的就是", "陈旧声明的去处"),
+    ] {
+        assert!(屏上.contains(该有), "{怎么回事}没画出来：\n{屏上}");
+    }
+    assert!(
+        !屏上.contains("`romcat") && !屏上.contains("romcat capability"),
+        "屏上出现了终端命令：\n{屏上}"
+    );
+}
+
+#[test]
 fn 目标路径上是一份文件时排差量预览照旧排上去_任务历史记失败() {
     // 票 `gui-looks-like-the-design/07` 的另一半：**跑了没成照旧进历史，收场是「失败」。**
     // 那条路径上**有东西**，按下去之前查一眼看不出缺什么；它不是目录，是「看一眼目标」那一下
@@ -1620,6 +1762,39 @@ fn 排过差量预览之后卡拔了再按同步_屏上说清插上读卡器_任
     );
     历史没多一条(&场, 历史几条);
     assert!(!场.卡.path().exists(), "卡不在位，却在原处建出了目录");
+}
+
+#[test]
+fn 主库的根未连接时按同步_屏上说清插上外置盘_不出现命令行的旗标() {
+    // 挂单 `Q622` 那一族：「这几个根未连接」那句界面与命令行都印（`sync::prepare::missing_roots_message`），
+    // 核心那句只说事实——`--library-root` 是命令行的旗标，屏上不该出现。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    assert!(
+        场.app.sublibrary().prepared().is_some(),
+        "前提：差量预览排出来了：{:?}",
+        场.app.sublibrary().error(),
+    );
+    let 主库 = 场.库.path().to_path_buf();
+    let 挪走 = 主库.with_extension("挪走了");
+    fs::rename(&主库, &挪走).expect("挪得动");
+    let 历史几条 = 场.app.tasks().history().len();
+
+    场.同步到底();
+    let 屏上 = 画两帧(&ctx, &mut 场);
+    fs::rename(&挪走, &主库).expect("挪得回来");
+    let 说的 = 场.app.sublibrary().error().expect("根未连接该说出口");
+    assert!(说的.contains("未连接"), "没说清为什么不行：{说的}");
+    assert!(说的.contains("插上外置盘"), "没说去哪儿办：{说的}");
+    assert!(
+        !说的.contains("--library-root") && !说的.contains("romcat "),
+        "屏上出现了命令行的旗标：{说的}"
+    );
+    assert!(屏上.contains("插上外置盘"), "那句话没画在屏上：\n{屏上}");
+    历史没多一条(&场, 历史几条);
 }
 
 #[test]
@@ -1987,9 +2162,18 @@ fn 卡不在手边算得出选中多少_装不装得下如实说算不出() {
     // 4KB 比 12KiB 小——可那只是选中容量；卡不在手边，现占算不出。
     match &report.fit {
         romcat_core::sublibrary::Fit::Unknown { why } => {
-            // 这句话是**核心库那一层**说的（`sync::observe`），词与核心自己那条断言同一个
+            // 原因是**核心库那一层**交出来的、结构化的（`sync::observe`，挂单 `Q851`）：界面照它的种类挑话，
+            // 不再自己查一眼在不在位。种类与核心自己那条断言同一个
             // （`crates/core/tests/sublibrary.rs` 的 `目标不在位时装不装得下如实说算不出_不给一个数`）。
-            assert!(why.contains("目标未连接"), "{why}");
+            assert!(
+                matches!(
+                    why,
+                    romcat_core::sync::Unplanned::Target(
+                        romcat_core::sync::ObserveError::Absent { .. }
+                    )
+                ),
+                "{why:?}"
+            );
         }
         romcat_core::sublibrary::Fit::Known(room) => {
             panic!("卡不在手边却给了一个数：{room:?}");
@@ -3247,6 +3431,24 @@ fn 卡不在位时卡底只写请先连接设备_路径与怎么办在悬停里(
     assert!(
         悬停.contains("插上读卡器") && 悬停.contains(&目标),
         "悬停里没写目标路径与怎么办：\n{悬停}"
+    );
+
+    // **算过一遍容量之后也一样**（挂单 `Q851`）：算不出的原因由核心库交成结构化的，这一层照种类挑话——
+    // 悬停里不出现终端命令，也不出现系统错误原文。
+    场.求值();
+    画两帧(&ctx, &mut 场);
+    let 悬停 = 悬停在(&ctx, "请先连接设备", |ui| 场.app.ui(ui));
+    assert!(
+        悬停.contains("插上读卡器") && 悬停.contains(&目标),
+        "悬停里没写目标路径与怎么办：\n{悬停}"
+    );
+    assert!(
+        !悬停.contains("romcat ") && !悬停.contains("`romcat"),
+        "悬停里出现了终端命令：\n{悬停}"
+    );
+    assert!(
+        !悬停.contains("os error"),
+        "悬停里出现了系统错误原文：\n{悬停}"
     );
 }
 

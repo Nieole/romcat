@@ -158,6 +158,48 @@ fn 导出写得出文件_再导一次检测到外部改动就以失败收场() {
 }
 
 #[test]
+fn 落点上有一份工具从没见过的文件时_命令行照旧叫人先导入() {
+    // 票 `core-answers-once/06`（挂单 `Q643`）：「先导入」那半句只由命令行说（导入明文留在命令行，ADR-0023）。
+    // 核心那句只说事实（界面原样画它），从没见过的那一种交成字段，命令行照它补那条命令。
+    let (dir, workspace) = 现场();
+    let out_dir = temp_dir("pegasus-cli-原件");
+    let 原件 = out_dir.path().join("FC.metadata.pegasus.txt");
+    写(&原件, "# 维护者自己手写的\n".as_bytes());
+    let out = romcat(&[
+        "export",
+        "--out",
+        &out_dir.path().to_string_lossy(),
+        "--library",
+        "测试库",
+        "--workspace",
+        &workspace.path().to_string_lossy(),
+    ]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "撞上了要以失败收场：{err}");
+    assert!(
+        err.contains("romcat import"),
+        "从没见过的那份，命令行该叫人先导入：{err}"
+    );
+    let 全部 = format!("{}{err}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(
+        全部.matches("romcat import").count(),
+        1,
+        "那条命令只说一次——报告里不再另说一遍：{全部}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("从没见过"),
+        "那一份底下核心那句照印：{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        fs::read_to_string(&原件).expect("读得出"),
+        "# 维护者自己手写的\n",
+        "没有静默覆盖"
+    );
+    let _ = dir;
+}
+
+#[test]
 fn 干跑不写盘() {
     let (dir, workspace) = 现场();
     let out_dir = temp_dir("pegasus-cli-out");

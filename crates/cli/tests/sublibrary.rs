@@ -312,6 +312,12 @@ fn 主库不在位照样看得了选择集_卡不在手边时装不装得下说�
     // 不拿选中容量去比上限（挂账 D76）。
     assert!(text.contains("算不出"), "{text}");
     assert!(text.contains("目标未连接"), "{text}");
+    // 核心那句只说事实；怎么办由命令行照原因的种类补（挂单 `Q851`）。
+    assert!(text.contains("插上读卡器"), "{text}");
+    assert!(
+        text.contains("romcat sublibrary set 掌机 --target"),
+        "命令行该补上改目标路径的命令：{text}"
+    );
     assert!(!text.contains("装得下："), "{text}");
     assert!(!text.contains("装不下"), "{text}");
 

@@ -1235,3 +1235,73 @@ fn 裁决记录的时刻是核心库那一处折的() {
     let 那一行 = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(那一行.contains(&format!("落于 {该印}。")), "{那一行}");
 }
+
+#[test]
+fn 撤批放回被拒时命令行在核心库那句话后面补上那条命令() {
+    // 票 `core-answers-once/06`（挂单 `Q622`）：核心库那句只说事实与去处的名字（「先撤第 2 批」），
+    // 命令由命令行自己补——界面原样画核心那句，屏上就不出现一句终端命令。
+    let (library, workspace) = 现场();
+    // 两份一模一样的内容钉在同一条内容锚上：后一批盖住前一批。
+    for name in ["FC/丁 重复拷贝.zip", "FC/戊 重复拷贝.zip"] {
+        写(
+            &library.path().join(name),
+            &zip_container(&[ZipEntrySpec::stored("rom.nes", 卡带(0xC7))]),
+        );
+    }
+    扫并识别(library.path(), workspace.path());
+    let 工作目录 = workspace.path().to_string_lossy().into_owned();
+    let 选库 = ["--library", "小库", "--workspace", 工作目录.as_str()];
+    let 跑这条 = |命令: &[&str]| {
+        let mut args = 命令.to_vec();
+        args.extend(选库);
+        let out = 跑(&args);
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    for 谁 in ["丁 重复拷贝", "戊 重复拷贝"] {
+        let (成, 话) = 跑这条(&[
+            "triage",
+            "decide",
+            "--name",
+            谁,
+            "--work",
+            "某部作品",
+            "--yes",
+        ]);
+        assert!(成, "{话}");
+    }
+
+    // 被后来还在册的那一批盖住。
+    let (成, 话) = 跑这条(&["triage", "undo", "--batch", "1", "--yes"]);
+    assert!(!成, "被盖住了不该撤得动：{话}");
+    assert!(话.contains("先撤第 2 批"), "核心那句话照印：{话}");
+    assert!(
+        话.contains("romcat triage undo --batch 2"),
+        "命令行该补上撤那一批的命令：{话}"
+    );
+
+    // 撤过了再撤。
+    let (成, 话) = 跑这条(&["triage", "undo", "--batch", "2", "--yes"]);
+    assert!(成, "{话}");
+    let (成, 话) = 跑这条(&["triage", "undo", "--batch", "2", "--yes"]);
+    assert!(!成, "撤过的不该再撤一次：{话}");
+    assert!(
+        话.contains("romcat triage redo --batch 2"),
+        "命令行该补上放回去的命令：{话}"
+    );
+
+    // 点了一批不在的。
+    let (成, 话) = 跑这条(&["triage", "redo", "--batch", "99"]);
+    assert!(!成, "{话}");
+    assert!(话.contains("没有第 99 批"), "{话}");
+    assert!(
+        话.contains("romcat triage batches"),
+        "命令行该补上列出有哪几批的命令：{话}"
+    );
+}

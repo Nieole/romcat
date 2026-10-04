@@ -51,8 +51,8 @@ use crate::task::{Cutoff, Halted, Handle};
 
 use super::converge::{self, Converged, NotAnEntry, Preference, VARIANT_KEY};
 use super::report::{
-    Conflict, EXAMPLES, ExportReport, ExportedFile, ImportReport, ImportedFile, MediaReport,
-    NotLaid,
+    Conflict, ConflictKind, EXAMPLES, ExportReport, ExportedFile, ImportReport, ImportedFile,
+    MediaReport, NotLaid,
 };
 use super::{Adapter, AdapterError, Body, Document, Entry, Lossy, Parsed, assert_capability};
 
@@ -99,7 +99,7 @@ pub fn import(
             roots.set(&only, normalize(given));
         }
     }
-    // 一次读齐。逐个条目查一遍等于把 9,226 行的作品表读上几千遍。
+    // 一次读齐。逐个条目查一遍等于把近万行的作品表（见台账 `docs/library-facts.md`）读上几千遍。
     let works = catalog.work_names()?;
     let mut report = ImportReport {
         catalog: catalog.location().to_string(),
@@ -380,7 +380,8 @@ fn landed(
     // 于是下一趟重新落库；文件没变就整条跳过（`scrape_probe` 的用法）。
     //
     // **不拿 `format!("{game:?}")` 当指纹**：`Debug` 的输出不是稳定契约——换个编译器、
-    // 给 `Game` 加个字段，全库的指纹一起变，28,529 条缓存当场全失效；而且它本身
+    // 给 `Game` 加个字段，全库的指纹一起变，近三万条缓存（一个前端条目一条，见台账
+    // `docs/library-facts.md`）当场全失效；而且它本身
     // 就是一整个结构体摊成的长字符串，逐条存进 `scrape_probe` 是白花的空间。
     let input = format!("{fingerprint}#{variant_key}");
     let mut out = Vec::new();
@@ -412,7 +413,8 @@ fn landed(
         //
         // `put_scraped` 是按「锚点 + 主体 + 源」整组替换的：同一组写两次，第二次会把
         // 第一次删掉。分成两条推进去，标题（第一条）当场被简介开发商那一条抹掉——
-        // 真库上 16.3% 的变体还没认出作品，那就是每六条手工维护的标题丢掉一条，
+        // 真库上六分之一上下的变体还没认出作品（票 `rom-metadata-automation/17` 那一趟量的，台账没收），
+        // 那就是每六条手工维护的标题丢掉一条，
         // 而「无损导入维护者多年手工维护的成果」正是这条路的全部意义（ADR-0001）。
         None => {
             variant_values.extend(work_values);
@@ -670,14 +672,19 @@ pub fn export_task(
         //
         // `--force` 压得过这一停，但**压不过「说出来」**：照写了哪几份、丢掉的是什么，
         // 照样逐条列进报告。「不静默」说的是不许悄悄发生，不是不许发生。
-        if let Some(why) = external_change(catalog, adapter.name(), &target, &stored)? {
+        if let Some((kind, why)) = external_change(catalog, adapter.name(), &target, &stored)? {
             if options.force {
                 report.forced.push(Conflict {
                     path: stored.clone(),
+                    kind,
                     why,
                 });
             } else {
-                report.conflicts.push(Conflict { path: stored, why });
+                report.conflicts.push(Conflict {
+                    path: stored,
+                    kind,
+                    why,
+                });
                 continue;
             }
         }
@@ -921,12 +928,15 @@ fn fill_counts(report: &mut ExportReport, converged: &Converged) {
 }
 
 /// 落点上那份文件与我们上次对齐的样子还一致吗；一致（或者根本没有那份文件）是 `None`。
+///
+/// 对不上时交回是哪一种与一句只说事实的话。**「先导入」那半句不在这里**（挂单 `Q643`）：
+/// 导入明文留在命令行（ADR-0023），那半句由命令行照 [`ConflictKind::Unseen`] 自己补。
 fn external_change(
     catalog: &Catalog,
     format: &str,
     target: &Path,
     stored: &str,
-) -> Result<Option<String>, TransferError> {
+) -> Result<Option<(ConflictKind, String)>, TransferError> {
     if !target.exists() {
         return Ok(None);
     }
@@ -941,16 +951,22 @@ fn external_change(
         return Ok(None);
     }
     match catalog.snapshot(format, stored)? {
-        Some(snapshot) => Ok(Some(format!(
-            "落点上那份是 {} 字节，与上次{}时存下的对不上——有人在工具外面改过它。\
-             覆盖等于把那次手改静默吞掉。",
-            disk.len(),
-            snapshot.origin.label()
+        Some(snapshot) => Ok(Some((
+            ConflictKind::Edited,
+            format!(
+                "落点上那份是 {} 字节，与上次{}时存下的对不上——有人在工具外面改过它。\
+                 覆盖等于把那次手改静默吞掉。",
+                disk.len(),
+                snapshot.origin.label()
+            ),
         ))),
-        None => Ok(Some(format!(
-            "落点上已经有一份 {} 字节的文件，而工具从没见过它——它可能就是维护者的原件。\
-             先 `romcat import` 把它读进来（原文会一字不差地留下），再导出。",
-            disk.len()
+        None => Ok(Some((
+            ConflictKind::Unseen,
+            format!(
+                "落点上已经有一份 {} 字节的文件，而工具从没见过它——它可能就是维护者的原件。\
+                 覆盖等于把它抹掉。",
+                disk.len()
+            ),
         ))),
     }
 }
@@ -976,8 +992,9 @@ fn rebase(doc: &Document, baseline: Option<&Parsed>) -> Document {
     let Some(baseline) = baseline else {
         return doc.clone();
     };
-    // 先把基线索引起来。逐个段扫一遍全表是 O(n²)：真机上 FC 一个平台 7,739 个段，
-    // 那是六千万次比较，而且每次还要问一遍「这个段被占了没有」。
+    // 先把基线索引起来。逐个段扫一遍全表是 O(n²)：真机上 FC 一个平台就有七千多个段
+    // （票 `rom-metadata-automation/16` 那一趟量的，台账没收），那是几千万次比较，
+    // 而且每次还要问一遍「这个段被占了没有」。
     let mut by_variant: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     let mut by_file: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     let mut by_title: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
@@ -1011,8 +1028,9 @@ fn rebase(doc: &Document, baseline: Option<&Parsed>) -> Document {
     // 那个目录的（`魂斗罗.zip`）。对回基线时两种都试，否则同一个文件会被当成两条，
     // 基线那一段永远对不上、一趟比一趟长。
     //
-    // **平台目录与合集名都要试**：真库 22 个平台里有 12 个两者对不上（`WII` 的目录叫
-    // `Wii`），只试合集名的话，那 12 个平台这条判据一次都不命中——于是 `origin` 退到
+    // **平台目录与合集名都要试**：真库二十来个平台（见台账 `docs/library-facts.md`）里有一半上下两者对不上
+    // （`WII` 的目录叫 `Wii`；对不上的个数是票 `rom-metadata-automation/17` 那一趟数的，台账没收），只试合集名的话，那一半平台
+    // 这条判据一次都不命中——于是 `origin` 退到
     // 「标题一字不差」那一档，而标题在这个库里大量重名（见上面那段注释）。
     let prefixes: Vec<String> = doc
         .entries
@@ -1076,7 +1094,7 @@ fn rebase(doc: &Document, baseline: Option<&Parsed>) -> Document {
 
 /// 快照那一列记的是 NFC 形式的键，盘上那份的名字未必是同一种形式——把它找回来。
 ///
-/// ⚠️ 这一步不能省（ADR-0020：真机上 1.99% 的路径两种形式不同）。拿 NFC 键直接去
+/// ⚠️ 这一步不能省（ADR-0020：真机上约百分之二的路径两种形式不同）。拿 NFC 键直接去
 /// `fs::write`，macOS 上会在维护者的原件**旁边**新建一个同名不同形式的文件，
 /// 原件一个字没改地躺着——从此两份各走各的，外部改动检测再也认不出那一份。
 ///
@@ -1164,8 +1182,8 @@ mod tests {
 
     #[test]
     fn 平台目录与合集名对不上时也对得回基线() {
-        // 真库 22 个平台里有 12 个两者对不上（`WII` 的目录叫 `Wii`）。基线那一侧写的是
-        // 相对平台目录的路径，新文档这一侧是中立库的键——只试合集名的话，那 12 个平台
+        // 真库二十来个平台（见台账 `docs/library-facts.md`）里有一半上下两者对不上（`WII` 的目录叫 `Wii`；
+        // 对不上的个数是票 `rom-metadata-automation/17` 那一趟数的，台账没收）。基线那一侧写的是相对平台目录的路径，新文档这一侧是中立库的键——只试合集名的话，那一半平台
         // 「有一条 file 相同」这条判据一次都不命中，`origin` 退到「标题一字不差」，
         // 而标题在这个库里大量重名。
         let 基线 = Parsed {

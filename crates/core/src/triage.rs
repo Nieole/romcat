@@ -82,6 +82,9 @@ use crate::path::{file_name_of_key, fold};
 use crate::verdict::{self, Anchor, Decision, Facts, Store, Verdict, VerdictError};
 
 /// 队列这一层跑不下去的原因。
+///
+/// **撤批、放回那几句只说事实与去处的名字，不带命令**（挂单 `Q622`）：是哪一批交成字段，
+/// 命令行在印之前补自己那条命令，界面补屏上的那一处（裁决记录里那一行）。
 #[derive(Debug, thiserror::Error)]
 pub enum TriageError {
     /// 中立库读写失败。
@@ -91,10 +94,10 @@ pub enum TriageError {
     #[error(transparent)]
     Verdict(#[from] VerdictError),
     /// 点名要撤的那一**批**根本不在。
-    #[error("沉淀库里没有第 {0} 批。`romcat triage batches` 列得出有哪几批")]
+    #[error("沉淀库里没有第 {0} 批。")]
     NoBatch(i64),
     /// 那一批已经撤过了。
-    #[error("第 {0} 批已经撤过了。要放回去用 `romcat triage redo --batch {0}`")]
+    #[error("第 {0} 批已经撤过了，要的话把它放回去。")]
     AlreadyUndone(i64),
     /// 那一批还没撤过，没什么可放回去的。
     #[error("第 {0} 批还没撤过，没什么可放回去的")]
@@ -117,7 +120,7 @@ pub enum TriageError {
     /// 那一批被后来的、眼下还在册的一批盖住了，撤不动也放不回去。
     #[error(
         "第 {batch} 批里有 {rows} 条被第 {by} 批盖住了，那一批还在册——\
-         这一批在那几条锚上回不去。先撤第 {by} 批（`romcat triage undo --batch {by}`）"
+         这一批在那几条锚上回不去。先撤第 {by} 批。"
     )]
     CoveredBy {
         /// 点名的那一批。

@@ -607,6 +607,135 @@ fn 卡不在位时停住_而不是排出一份全删全传的计划() {
     let 不在了 = 目标.path().join("没插上");
     let error = sync::observe(&RealFs::new(), &不在了).expect_err("停住");
     assert!(format!("{error}").contains("目标未连接"), "{error}");
+    // **只说事实**（挂单 `Q851`）：不带系统错误原文、不带命令行命令——插着没插由种类说，去处由两个壳各补。
+    assert!(
+        matches!(error, sync::ObserveError::Absent { .. }),
+        "{error:?}"
+    );
+    assert!(!format!("{error}").contains("romcat "), "{error}");
+    assert!(!format!("{error}").contains("os error"), "{error}");
+    // 「在不在位」只在核心库这一处判：界面按下去之前问的也是它（ADR-0024）。
+    assert_eq!(
+        sync::observe::reach(&RealFs::new(), &不在了).expect_err("不在位"),
+        error,
+    );
+    sync::observe::reach(&RealFs::new(), 目标.path()).expect("在位");
+}
+
+#[test]
+fn 排不出计划时交出结构化的原因_那句话只说事实不带命令() {
+    // 挂单 `Q851` `Q622`：没有这个子库、目标未连接——命令行照种类补命令，界面照种类补屏上的去处。
+    let dir = 建库();
+    let 工作区 = temp_dir("sync-unplanned-ws");
+    let 目标 = temp_dir("sync-unplanned-card");
+    let mut catalog = 扫成库(dir.path());
+    catalog
+        .put_sublibrary(&子库(&目标.path().join("没插上"), None))
+        .expect("子库写得进");
+    let 排 = |name: &str| {
+        sync::prepare(
+            &catalog,
+            工作区.path(),
+            name,
+            &sync::Request::default(),
+            &Handle::new(),
+        )
+        .expect_err("排不出")
+    };
+    for (拒, 该是) in [
+        (排("还没建的"), "没有叫「还没建的」的子库"),
+        (排("掌机"), "目标未连接"),
+    ] {
+        let sync::PlanCutoff::Unplanned(why) = 拒 else {
+            panic!("没人按停下，却交回了「停了」：{拒:?}");
+        };
+        let 话 = why.to_string();
+        assert!(话.contains(该是), "{话}");
+        assert!(!话.contains("romcat "), "核心那句带着命令行命令：{话}");
+        match why {
+            sync::Unplanned::NoSublibrary { name } => assert_eq!(name, "还没建的"),
+            sync::Unplanned::Target(sync::ObserveError::Absent { .. }) => {}
+            other => panic!("原因的种类不对：{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn 子库记着这一版没带的前端格式时_子库自己答得出_排计划交出这一种原因() {
+    // 挂单 `Q797`：「这个前端格式这一版有没有适配器」由子库一处答（与导出配置那一问同形），
+    // 界面按下「差量预览」那一刻就问它、不排；排计划撞上时交的也是这同一种原因。
+    let dir = 建库();
+    let 工作区 = temp_dir("sync-no-adapter-ws");
+    let 目标 = temp_dir("sync-no-adapter-card");
+    let mut catalog = 扫成库(dir.path());
+    let 旧库里存着的 = Sublibrary::at("掌机", 目标.path(), "这一版没带的格式", None);
+    catalog.put_sublibrary(&旧库里存着的).expect("子库写得进");
+
+    let 拒 = 旧库里存着的.adapter().err().expect("这一版没带它");
+    assert_eq!(拒.format, "这一版没带的格式");
+    assert!(拒.known.iter().any(|name| name == "Pegasus"), "{拒:?}");
+    let 话 = 拒.to_string();
+    assert!(话.contains("这一版没带的格式"), "{话}");
+    assert!(话.contains("Pegasus"), "说得出眼下带的是哪几个：{话}");
+    assert!(!话.contains("romcat "), "核心那句不带命令：{话}");
+    assert_eq!(
+        子库(目标.path(), None)
+            .adapter()
+            .expect("Pegasus 这一版带着")
+            .name(),
+        "Pegasus",
+    );
+
+    let 排不出 = sync::prepare(
+        &catalog,
+        工作区.path(),
+        "掌机",
+        &sync::Request::default(),
+        &Handle::new(),
+    )
+    .expect_err("没有适配器排不出");
+    assert_eq!(
+        排不出,
+        sync::PlanCutoff::Unplanned(sync::Unplanned::NoAdapter(拒)),
+        "排计划撞上时交的是子库那一问的同一个答案",
+    );
+}
+
+#[test]
+fn 差量预览那几件怪事只说事实与去处的名字_是哪一种交成结构化的() {
+    // 挂单 `Q622` 那一族：差量预览底下那几句命令行与界面印同一份（`Prepared::concerns`）。
+    // 核心那句不带命令——命令行照种类补自己那条，界面照种类补屏上的去处。
+    let dir = 建库();
+    let 工作区 = temp_dir("sync-concerns-ws");
+    let 目标 = temp_dir("sync-concerns-card");
+    let mut catalog = 扫成库(dir.path());
+    catalog
+        .put_sublibrary(&子库(目标.path(), None))
+        .expect("子库写得进");
+    let mut prepared = 排计划(&catalog, 工作区.path());
+    prepared.broken = 2;
+    prepared.media_not_in_pool = 3;
+    prepared.missing_capability = Some("名册里没有的".to_string());
+    prepared.stale_claims = 4;
+    let concerns = prepared.concerns();
+    assert_eq!(
+        concerns,
+        vec![
+            sync::Concern::BrokenRules(2),
+            sync::Concern::MediaNotInPool(3),
+            sync::Concern::MissingCapability("名册里没有的".to_string()),
+            sync::Concern::StaleClaims(4),
+        ],
+    );
+    for concern in &concerns {
+        let 话 = concern.to_string();
+        assert!(!话.contains("romcat "), "核心那句带着命令行命令：{话}");
+    }
+    assert!(
+        concerns[2].to_string().contains("名册里没有的"),
+        "说得出是哪一份档案：{}",
+        concerns[2]
+    );
 }
 
 #[test]
@@ -719,6 +848,18 @@ fn 带等号的相对路径不会被切成一个不存在的根() {
 }
 
 #[test]
+fn 主库的根未连接那句只说事实_命令行旗标由命令行补() {
+    // 同步按下去那一刻拦下的那一句，界面与命令行都印它（挂单 `Q622` 那一族）：核心那句不带命令行旗标。
+    let 话 = sync::prepare::missing_roots_message(&["甲盘".to_string(), "乙盘".to_string()]);
+    assert!(话.contains("甲盘") && 话.contains("乙盘"), "{话}");
+    assert!(话.contains("插上外置盘"), "{话}");
+    assert!(
+        !话.contains("--library-root") && !话.contains("romcat "),
+        "核心那句带着命令行的旗标：{话}"
+    );
+}
+
+#[test]
 fn 多于一个根时不点名照旧要求点名() {
     let catalog = 两个根的库();
     let 不点名 = vec![(None, PathBuf::from("/盘甲搬走了/Game"))];
@@ -764,8 +905,12 @@ fn 扩展长度形式的目标落在主库里照样拦得住() {
     roots::add_root(&catalog, None, "主库", Path::new(r"D:\Game")).expect("加得上");
     let 话 = sync::prepare::refuse_target_in_library(&catalog, &[], Path::new(r"D:\Game\子库"))
         .expect_err("该被拒");
-    assert!(话.contains("主库"), "哪个根拦下的要说出来：{话}");
-    assert!(话.contains("主库只读"), "红线要说出来：{话}");
+    // 话与存下来那一刻拦下时同一句（`TargetRefusal::sentence`），点名的是这条目标，不另点名根（挂单 `Q1351`）。
+    assert!(
+        话.contains(r"D:\Game\子库"),
+        "拦下的是哪条目标要说出来：{话}"
+    );
+    assert!(话.contains("只读的主库"), "红线要说出来：{话}");
 }
 
 #[test]

@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::adapter;
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
 use crate::sync::Plan;
@@ -175,6 +176,19 @@ impl Sublibrary {
     #[must_use]
     pub fn read_path(&self) -> PathBuf {
         PathBuf::from(self.target_raw.as_ref().unwrap_or(&self.target))
+    }
+
+    /// 这个子库记着的**前端格式**在这一版里的那个**适配器**（挂单 `Q797`）。
+    ///
+    /// 与导出配置那一问同形（`ExportSetup::adapter`），判据与没有时那句话都在 [`adapter::for_format`] 一处：
+    /// **界面那一层不自己去 [`adapter::find`]**。界面按下「差量预览」那一刻就问它，没有就在屏上说、不排；
+    /// 排计划撞上时交的也是它（[`Unplanned::NoAdapter`](crate::sync::Unplanned::NoAdapter)）。库里记着的格式
+    /// **读回来时不判**：换一版程序就把人选过的格式悄悄抹掉，他会以为自己从没选过。
+    ///
+    /// # Errors
+    /// 这一版没带这个格式的适配器时返回 [`adapter::NoAdapter`]。
+    pub fn adapter(&self) -> Result<Box<dyn adapter::Adapter>, adapter::NoAdapter> {
+        adapter::for_format(&self.format)
     }
 }
 
@@ -612,8 +626,9 @@ pub enum Fit {
     Known(Room),
     /// 现占算不出——目标不在位、看不成，或者计划排不出来。**不给数。**
     Unknown {
-        /// 为什么算不出，一句给人看的话。
-        why: String,
+        /// 为什么算不出：**结构化的原因**（挂单 `Q851`）。界面照种类挑话（未连接写「请先连接设备」），
+        /// 不再自己查一眼目标在不在位；它的 `Display` 只说事实，不带命令行命令。
+        why: crate::sync::Unplanned,
     },
 }
 
@@ -729,8 +744,8 @@ pub fn fit(
         step,
     ) {
         Ok(prepared) => Ok(Fit::Known(Room::of(&prepared.plan))),
-        Err(Cutoff::Halted) => Err(Halted),
-        Err(Cutoff::Failed(why)) => Ok(Fit::Unknown { why }),
+        Err(crate::sync::PlanCutoff::Halted) => Err(Halted),
+        Err(crate::sync::PlanCutoff::Unplanned(why)) => Ok(Fit::Unknown { why }),
     }
 }
 
@@ -1210,7 +1225,7 @@ fn fold_one<'a>(
 
 /// 把**指名的这几个变体**折成事实，一条全库扫描都不走。
 ///
-/// [`facts`] 那一趟读的是几张整表（真库四万多个变体、七万多条刮削值，见台账 `docs/library-facts.md`；实测 343 毫秒，
+/// [`facts`] 那一趟读的是几张整表（真库四万多个变体、七万多条刮削值，见台账 `docs/library-facts.md`；实测三百多毫秒，
 /// 挂账 D156）。**作品详情页问的是三五个变体**，而那一页是画帧那条线程上开的——
 /// 一帧的预算是 16 毫秒，为三个变体扫一遍全库差着两个数量级。这一条因此逐样走**按键的
 /// 查询**（`variants_of` / `release` / `collections_of` / `candidates_of` /
@@ -1313,7 +1328,7 @@ pub fn holding(catalog: &Catalog, keys: &[&str]) -> Result<Vec<String>, CatalogE
 ///
 /// ## 折一趟事实，全部设备共用
 ///
-/// 大头是 [`facts`] 走一遍全库（真机量级上 343 毫秒，挂账 D156），而按选择集求值是
+/// 大头是 [`facts`] 走一遍全库（真机量级上三百多毫秒，挂账 D156），而按选择集求值是
 /// 内存里的事。一台一折的话，五张卡就是五趟全库。
 ///
 /// ## 装得下吗：看一眼目标
@@ -1421,7 +1436,7 @@ pub struct Addition {
 ///
 /// ## 为什么不便宜
 ///
-/// 大头是 [`facts`] 走一遍全库（真机 **343 毫秒**，挂账 D156），再加**一趟**
+/// 大头是 [`facts`] 走一遍全库（真机上**三百多毫秒**，挂账 D156），再加**一趟**
 /// [`fit`]（走一遍排计划那半条线；「加之前」那一份只在内存里求值，不排计划）。
 /// **摆不上画帧线**——调用方得排任务台
 /// （票 23 的界面就是这么做的，挂单 `Q1181`）。
