@@ -79,6 +79,13 @@ use std::collections::BTreeMap;
 use crate::classify::is_cjk;
 use crate::path::nfc;
 
+/// 这份数据的**许可**：设置屏「关于」那张名单印它（[`sources::licenses`](crate::sources::licenses)）。
+///
+/// Bangumi 的版权页原话：条目信息「遵循 Creative Commons BY-SA License 协议」，没注版本；
+/// 离线 dump 那个仓库（`bangumi/Archive`）自己没有 LICENSE 文件，回落到站点这一句
+/// （调研 `docs/research/scraper-sources.md` §9.1）。封面不在 dump 里，与这一句无关。
+pub const LICENSE: &str = "CC BY-SA（Bangumi 站点声明）";
+
 /// 一条**叫法**是哪一种。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NameKind {

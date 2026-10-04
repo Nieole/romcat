@@ -6121,6 +6121,9 @@ fn run_dat_sources(args: &DatSourcesArgs) -> ExitCode {
             source.convention.label()
         );
         println!("    取自 {}", source.origin.describe());
+        // 许可那一句取自眼下生效的那份清单（没给 `--sources`、工作目录里也没有时就是内置那一份，
+        // 与设置屏「关于」同一句）；自己改的清单没写，照实印「清单里没写」。
+        println!("    许可 {}", source.license_or_unnoted());
         for line in source.note.trim().lines() {
             println!("    {line}");
         }

@@ -38,6 +38,15 @@ fn 数据源清单看得见也导得出() {
     // 两条取数纪律要在用户看得见的地方说出来，不能只写在代码注释里。
     assert!(text.contains("datomatic"), "{text}");
     assert!(text.contains("redump.info"), "{text}");
+    // 每一家的许可也印出来（票 `core-answers-once/10`）：名册里写着的那一句，与设置屏「关于」同一句。
+    for source in romcat_core::dat::registry::Registry::builtin().sources() {
+        let license = source
+            .license
+            .as_deref()
+            .expect("内置那一份每一家都写着许可");
+        assert!(text.contains(&format!("许可 {license}")), "{text}");
+    }
+    assert!(text.contains("CC0-1.0"), "MAME 的 hash 目录是 CC0：{text}");
 
     let draft = temp.path().join("我的源.toml");
     let out = 跑(

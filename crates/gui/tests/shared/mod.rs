@@ -150,6 +150,14 @@ pub fn 干净工作目录(名字: &str) -> std::path::PathBuf {
     at
 }
 
+/// 在这个工作目录里摆一份**读不动**的 DAT 库：文件在，却不是一份库——开它就读不动，
+/// 不是「还没下载」（ADR-0021）。数据源那一格「读不动」那几条测试用它。
+pub fn 摆一份读不动的dat库(工作目录: &std::path::Path) {
+    let dat = romcat_core::workspace::dat_repo_path(工作目录);
+    std::fs::create_dir_all(dat.parent().expect("有上一级")).expect("建得出目录");
+    std::fs::write(&dat, b"this is not a database").expect("写得进去");
+}
+
 #[must_use]
 pub fn 小库(
     手上的: &[(&str, &str, 档)], workspace: std::path::PathBuf

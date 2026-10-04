@@ -905,6 +905,47 @@ fn 还没取回的数据源被明确标出来() {
     }
 }
 
+/// 一个数据源**读不动**时，库屏那张表记录数那一格写核心库给的那个词、说明那一格照印原话——
+/// 设置屏印的是同一个词（挂单 `Q1074`，`tests/settings.rs` 那一条）。
+#[test]
+fn 读不动的数据源那一格写核心库给的词_说明照印原话() {
+    let 工作区 = temp_dir("gui-roots-数据源读不动");
+    shared::摆一份读不动的dat库(工作区.path());
+    let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
+    drop(Catalog::create(&库文件, "fixture").expect("能开中立库"));
+    let site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");
+    let mut app = App::new(site, 工作区.path().to_path_buf());
+    app.show_view(View::Library);
+    let ctx = headless::context();
+    跑一帧(&ctx, &mut app);
+
+    let status = app
+        .roots()
+        .sources()
+        .iter()
+        .find(|status| status.name == Source::Dat.label())
+        .expect("DAT 仓库那一行在")
+        .clone();
+    let SourceState::Broken { why } = &status.state else {
+        panic!("DAT 库那份文件不是一份库，该是读不动：{:?}", status.state);
+    };
+    let 词 = status.state.label().expect("读不动那一档有词");
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 名格 = shared::画着的每一处(&out, &|字| 字 == status.name);
+    let 词格 = shared::画着的每一处(&out, &|字| 字 == 词);
+    let 同一行 = 名格.iter().any(|名| {
+        词格
+            .iter()
+            .any(|在| 在.min.x > 名.max.x && 在.min.y < 名.max.y && 在.max.y > 名.min.y)
+    });
+    assert!(同一行, "DAT 仓库那一行没写「{词}」：\n{}", 画出来的字(&out));
+    assert!(
+        画出来的字(&out).contains(why.as_str()),
+        "说明那一格没照印读不动的原话「{why}」：\n{}",
+        画出来的字(&out)
+    );
+}
+
 #[test]
 fn 库屏与别的屏切得动而且台上有活时别的屏照常画() {
     let 库 = 建库("gui-roots-切屏");

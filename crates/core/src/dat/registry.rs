@@ -147,6 +147,25 @@ pub struct Source {
     pub convention: Convention,
     /// 为什么是这么取的。会打给用户看。
     pub note: String,
+    /// 这一家的数据按什么许可给出来：给人看的一句，设置屏「关于」与 `dat sources` 都印它。
+    ///
+    /// **可以不写**（`None`）：照旧版底稿改出来的清单没有这一项，读清单不为它失败。
+    /// 内置那一份每一家都写着（测试钉着）。
+    pub license: Option<String>,
+}
+
+/// 清单里哪一家没写许可时，给人看的那一句。
+const UNNOTED: &str = "清单里没写";
+
+impl Source {
+    /// 许可那一句**照屏上、命令行上印的样子**：没写就说「清单里没写」，不留一格空的。
+    ///
+    /// 设置屏「关于」那张名单（`sources::licenses`）与 `romcat dat sources` 都印它，
+    /// 「没写」那一句只在这里写一次。
+    #[must_use]
+    pub fn license_or_unnoted(&self) -> &str {
+        self.license.as_deref().unwrap_or(UNNOTED)
+    }
 }
 
 /// 一条 DAT → 平台的映射。
@@ -261,6 +280,8 @@ struct RawSource {
     convention: String,
     #[serde(rename = "说明", default)]
     note: String,
+    #[serde(rename = "许可", default)]
+    license: Option<String>,
     #[serde(rename = "仓库", default)]
     repo: Option<String>,
     #[serde(rename = "资产", default)]
@@ -379,6 +400,8 @@ impl Registry {
                 shape: source.shape,
                 convention,
                 note: source.note,
+                // 写了一串空白等于没写：屏上不摆一格空的许可。
+                license: source.license.filter(|license| !license.trim().is_empty()),
             });
         }
 
@@ -520,6 +543,37 @@ mod tests {
             .map(|source| source.name.as_str())
             .collect();
         assert_eq!(names, ["No-Intro", "Redump", "TOSEC", "MAME", "GoodNES"]);
+    }
+
+    #[test]
+    fn 内置清单里每个源都写着许可() {
+        // 设置屏「关于」逐个印它（票 `core-answers-once/10`）。缺一家，屏上那一格就空着。
+        let registry = Registry::builtin();
+        for source in registry.sources() {
+            let license = source.license.as_deref().unwrap_or_default();
+            assert!(!license.trim().is_empty(), "{} 没写许可", source.name);
+        }
+        // MAME 的 hash 目录献给了公有领域，每个 XML 自带 `license:CC0-1.0`（调研 §8.4）。
+        let mame = registry.source("MAME").expect("MAME 在名册里");
+        assert!(
+            mame.license
+                .as_deref()
+                .is_some_and(|l| l.contains("CC0-1.0")),
+            "{:?}",
+            mame.license
+        );
+    }
+
+    #[test]
+    fn 自己改的清单不写许可也读得动() {
+        // 照旧版底稿改出来的那一份没有这一项：读清单不为它失败，那一家的许可照实是「没写」。
+        let text = "\"版本\" = 1\n\
+[[\"数据源\"]]\n\"名\" = \"X\"\n\"取法\" = \"Redump 站点\"\n\"站点\" = \"https://redump.info\"\n\"格式\" = \"Logiqx\"\n\"口径\" = \"含头\"\n";
+        let registry = Registry::parse(text, "测试").expect("不写许可也读得动");
+        let source = registry.source("X").expect("在");
+        assert_eq!(source.license, None);
+        // 印出来照实说没写，不留一格空的。
+        assert_eq!(source.license_or_unnoted(), "清单里没写");
     }
 
     #[test]

@@ -147,6 +147,7 @@
 核查（2026-09-23）：crates/core/src/dat/registry.rs:139-149 Source 只有 name/origin/shape/convention/note，无 license；许可散在 crates/core/src/dat/sources.toml:68、:111-112 等注释
 依赖／可并：Q1074（同为「关于/设置」那一屏由核心库出词）
 （大小 S，来自票 `gui-looks-like-the-design/31`）
+**收于票 `core-answers-once/10`（2026-10-04）：settled。** 名册的源带上 `license`（数据在 `sources.toml` 的「许可」，五家都写了，内置那一份缺一家就红）；「关于」那一行改成一家一行摆名与许可，名单由核心库 `sources::licenses()` 给一次——清单里五家 DAT 源，加上中文离线源、Switch 数据库、ScreenScraper（这三家的许可是各自模块里的常量，挂单 `Q1388`）。「以它们自己的说明为准」那句删掉。`romcat dat sources` 也逐家印许可。清单里不写许可照旧读得动（挂单 `Q1387`）。
 
 ### `Q1074` — 「未下载 / 读不动」那两个词两处各写一份
 
@@ -154,6 +155,7 @@
 核查（2026-09-23）：crates/gui/src/settings.rs:861-866 与 crates/gui/src/roots.rs:1374-1375、:1453 各自 match crates/core/src/sources.rs:30 SourceState 写「未下载/读不动」
 依赖／可并：Q1067
 （大小 S，来自票 `gui-looks-like-the-design/31`）
+**收于票 `core-answers-once/10`（2026-10-04）：settled。** 核心库立 `SourceState::label`（没下载「未下载」、读不动「读不动」、下载了的那一档没有词）与量列宽用的 `SourceState::LABELS`；设置屏 `条数` 与库屏数据源那张表都改读它，两屏不再各 `match` 一遍写词（库屏那一格的颜色照旧跟竖条走）。
 
 ### `Q949` — `Accepts::takes` 眼下一个调用方都没有，而且多段扩展名会判错
 
