@@ -1448,6 +1448,48 @@ pub fn choice_card<R>(
     egui::InnerResponse::new(shown.inner, response)
 }
 
+/// 一张**带名字与一句说明的选择卡**（设计稿 `.asmode`）：[`choice_card`] 那一张，圆点对着头一行，右边粗体名字（`size-body`、`ink`；
+/// 拉丁与数字粗、中文常规，字体预算），底下一行帮助字说明；圆点与字隔 `mode-card-gap`。「移出此作品」那两档、「加入合集」那几档用它。
+///
+/// 交回整张卡的点击；选中哪一张由调用方记。
+pub fn mode_card(ui: &mut egui::Ui, selected: bool, title: &str, note: &str) -> egui::Response {
+    let tokens = Tokens::builtin();
+    choice_card(
+        ui,
+        selected,
+        title,
+        tokens.layout.mode_card_gap,
+        DotAt::FirstLine,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(
+                    crate::font::strong(title)
+                        .size(font_size(ui.ctx(), tokens.font.size_body))
+                        .color(palette(ui).ink),
+                );
+                help(ui, note);
+            });
+        },
+    )
+    .response
+}
+
+/// 选着的那张选择卡**底下**要填的那一块：左边缩进 `mode-indent`（设计稿 `.field` 行内写的 `padding-left:28px`）。
+/// 「移出此作品」新建那一档的名字框、「加入合集」新建那一档的名字框摆在里头。
+pub fn under_mode_card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let 缩进 = Tokens::builtin().layout.mode_indent;
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 缩进 as i8,
+            ..egui::Margin::ZERO
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
+}
+
 /// 一框**搜索结果**（设计稿 `.srch`）：`line` 描边、`radius.medium` 圆角的一个框，最高 `search-list-max`，再多就在框里滚；
 /// 一行就是一颗按钮（`.srch button`）——内边距 `search-row-padding`、几样之间 `search-row-gap`、竖直居中，行间一条分隔线，
 /// 指针在那一行上时底换 `panel-2`，选中的那一行（`row` 交回真）底是 `accent-soft`（`DLG.split` 里挑中的那个作品）。
@@ -1850,6 +1892,12 @@ pub fn cover_check(
 /// **`head` 给空串就只画正文**：警示只有一句、而那一句另有出处时走这条（设置屏那一段配额提醒摆的是
 /// `crate::scrape::QUOTA_WARNING`——把它拆成「粗体一句 + 正文」，就是在第二处再写一遍同一件事）。
 pub fn warn_box(ui: &mut egui::Ui, head: &str, body: &str) {
+    warn_box_then(ui, head, body, |_| {});
+}
+
+/// 同 [`warn_box`]，那几句底下再摆 `add` 交的东西（还在框里）：「管理合集」删除确认那两颗按钮照稿摆在警示框里头
+/// （设计稿 `DLG.coll` 那个 `.warnbox` 里的 `.row`）。
+pub fn warn_box_then(ui: &mut egui::Ui, head: &str, body: &str, add: impl FnOnce(&mut egui::Ui)) {
     let tokens = Tokens::builtin();
     let palette = tokens
         .color
@@ -1888,6 +1936,7 @@ pub fn warn_box(ui: &mut egui::Ui, head: &str, body: &str) {
                 );
             job.wrap.max_width = ui.available_width();
             ui.label(job);
+            add(ui);
         });
 }
 
@@ -3216,6 +3265,41 @@ pub fn list_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut ListBox<'_>) -> R) -
             add(&mut ListBox { ui, rows: 0 })
         })
         .inner
+}
+
+/// 一行**左边几个字、右头一排小号按钮**（设计稿 `.lst>div` 的 `grid-template-columns:minmax(0,1fr) auto`）：`左` 占满剩下的宽，
+/// `右` 在 [`small_buttons`] 里摆那一排、贴着右沿。`按钮上的字` 是右头那几颗的字，先量出它们多宽，左边才知道还剩多少——
+/// 调用方在 `右` 里按下标取这几个字，不另写一遍。
+///
+/// **按钮照从左到右的次序摆**（不走 `right_to_left`）：那样 Tab 走到的次序就是屏上看到的次序。左边那一块至少与按钮一样高、
+/// 里头竖直居中，那几个字才对着按钮的中线。「管理合集」那一层每一行用它。
+pub fn text_and_buttons<R>(
+    ui: &mut egui::Ui,
+    按钮上的字: &[&str],
+    左: impl FnOnce(&mut egui::Ui),
+    右: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        let 按钮高 = Tokens::builtin().layout.button_small_height;
+        let 缝 = ui.spacing().item_spacing.x;
+        let 右宽 = 按钮上的字
+            .iter()
+            .map(|字| small_button_width(ui, 字))
+            .sum::<f32>()
+            + 缝 * 按钮上的字.len().saturating_sub(1) as f32;
+        let 左宽 = (ui.available_width() - 右宽 - 缝).max(0.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(左宽, 按钮高),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_height(按钮高);
+                左(ui);
+            },
+        );
+        ui.add_space((ui.available_width() - 右宽).max(0.0));
+        small_buttons(ui, 右)
+    })
+    .inner
 }
 
 /// [`list_box`] 里头：一行一行往下摆。

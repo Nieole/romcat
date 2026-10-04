@@ -1871,11 +1871,10 @@ impl Split {
         });
     }
 
-    /// 「移到」那两档（设计稿 `.asmode`，差距清单 `M-18`）：每档一张整张按得动的卡（[`look::choice_card`]），粗体名、底下一句说明；
-    /// 选着的那一档底下缩进 `mode-indent` 挂它要填的那一格——新建那一档是名字框与一句说明，已有那一档是搜索框与搜出来的那一框。
+    /// 「移到」那两档（设计稿 `.asmode`，差距清单 `M-18`）：每档一张整张按得动的卡（[`look::mode_card`]），粗体名、底下一句说明；
+    /// 选着的那一档底下缩进 `mode-indent` 挂它要填的那一格（[`look::under_mode_card`]）——新建那一档是名字框与一句说明，
+    /// 已有那一档是搜索框与搜出来的那一框。
     fn destination_ui(&mut self, ui: &mut egui::Ui, site: &Site, priorities: &Priorities) {
-        let tokens = Tokens::builtin();
-        let 卡距 = tokens.layout.mode_card_gap;
         look::section(ui, "移到");
         for (新建, 名, 说明) in [
             (
@@ -1886,22 +1885,11 @@ impl Split {
             (false, "移入另一个作品", "这个变体属于库里已有的另一个作品"),
         ] {
             let 选着 = self.fresh == 新建;
-            let 卡 = look::choice_card(ui, 选着, 名, 卡距, look::DotAt::FirstLine, |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(
-                        font::strong(名)
-                            .size(look::font_size(ui.ctx(), tokens.font.size_body))
-                            .color(look::palette(ui).ink),
-                    );
-                    look::help(ui, 说明);
-                });
-            });
-            if 卡.response.clicked() {
+            if look::mode_card(ui, 选着, 名, 说明).clicked() {
                 self.fresh = 新建;
             }
             if 选着 {
-                缩进一格(ui, |ui| {
+                look::under_mode_card(ui, |ui| {
                     if 新建 {
                         self.fresh_ui(ui);
                     } else {
@@ -2079,20 +2067,6 @@ impl Split {
             Err(failed) => self.error = Some(format!("中立库读不动：{failed}")),
         }
     }
-}
-
-/// 「移到」那一档底下缩进 `mode-indent` 的那一块（设计稿 `.field` 的 `padding-left:28px`）。
-fn 缩进一格(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    let 缩进 = Tokens::builtin().layout.mode_indent;
-    egui::Frame::new()
-        .inner_margin(egui::Margin {
-            left: 缩进 as i8,
-            ..egui::Margin::ZERO
-        })
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add(ui);
-        });
 }
 
 /// 两处搜索框共用的那一趟：照 `query` 一页一页往下翻，把**认出了作品**、`留` 说要的那几行的身份接到 `次序` 后头，

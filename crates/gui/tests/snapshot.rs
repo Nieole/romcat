@@ -36,6 +36,10 @@
 //! 两对都把**「看得全」写成断言**（[`拍超限`]、[`拍下钻`]）：该在画面里的每一样都得整个在视口内，
 //! 哪天那一屏长高把它们挤出去，这里当场红，不会悄悄拍一张截掉半截的基线。
 //!
+//! **另有一对更高**：浏览屏条件组「套一个组、一条写错、一条没填」那两张（`browse/filter-pending-*`）开 1280×1080
+//! （[`条件组那一对的画面`]）——条件组连框底下那一行计数与规则原文要拍全，960 高时那一行计数正卡在左栏下沿
+//! （票 `gui-draws-the-rest-of-the-design/23`）。同样写成断言（[`拍条件组没生效`]）。
+//!
 //! **第三对反过来是矮的**：作品详情页吸顶那两张（`work/sticky-*`）开 1280×600（[`吸顶那一态的画面`]）——
 //! 合成夹具里那部作品哪一面都不够长，800 高的窗滚不过头上那一块，拍不出吸顶（票
 //! `gui-draws-the-rest-of-the-design/04`）。同样写成断言（[`拍详情页滚过`]）：头上那一块真滚出去了、六个面那一排还在。
@@ -1789,6 +1793,168 @@ fn 浏览_加入合集_浅色() {
 #[test]
 fn 浏览_加入合集_暗色() {
     拍加入合集("browse/join-collection-dark", Theme::Dark);
+}
+
+// ——— 条件组照稿、合集两层照稿（票 `gui-draws-the-rest-of-the-design/23`） ———
+
+/// 条件组没生效那一对的画面（点）：宽照旧，高 1080——套一个组、一条写错、一条没填，条件组连框底下那一行计数与
+/// 规则原文要拍全（照 [`超限那一对的画面`] 的先例，模块文档「视口定死」那一节记着）。
+const 条件组那一对的画面: [f32; 2] = [1280.0, 1080.0];
+
+/// **左栏条件组：套一个组、一条写错、一条没填完**（票 `gui-draws-the-rest-of-the-design/23`，收挂单 `Q1477`）。
+///
+/// 规则先预填「年份>=2008」，再走人手那条路：把 2008 删成 200（写错：三格描 `lo`、底下贴核心库那一句）、按顶层「+ 组」
+/// （新组「任一满足」带两条空子句，焦点在头一条）、打「RPG」、按 Esc 放下焦点——第二条「作品 ^」空着，值框描虚线。
+/// 框底下一行「1 个子句未填写，不会生效；1 个子句写错了，改正前不会生效」，再下面是规则原文。
+///
+/// **「看得全」写成断言**：那一行计数与规则原文整个在左栏露出来的那一截里——哪天左栏长高把它们挤出去，这里当场红。
+#[track_caller]
+fn 拍条件组没生效(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    let rule = Rule::parse("年份>=2008").expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule));
+    let mut harness = 开一扇(主题, 条件组那一对的画面, move |ui| app.ui(ui));
+    按(&mut harness, "2008");
+    harness.key_press(egui::Key::End);
+    harness.key_press(egui::Key::Backspace);
+    harness.run();
+    按(&mut harness, "+ 组");
+    harness.event(egui::Event::Text("RPG".to_string()));
+    harness.run();
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    for 那几个字 in [
+        "1 个子句未填写，不会生效；1 个子句写错了，改正前不会生效",
+        "存成子库规则：类型~RPG",
+    ] {
+        let 在 = shared::画着的每一处连裁剪(harness.output(), &|text| text == 那几个字);
+        assert!(
+            在.len() == 1 && 在[0].1.contains_rect(在[0].0),
+            "「{那几个字}」没整个露在左栏里：{在:?}"
+        );
+    }
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 浏览_条件组没生效_浅色() {
+    拍条件组没生效("browse/filter-pending-light", Theme::Light);
+}
+
+#[test]
+fn 浏览_条件组没生效_暗色() {
+    拍条件组没生效("browse/filter-pending-dark", Theme::Dark);
+}
+
+/// 往浏览屏那份库里记三个合集（设计稿 `DLG.coll` 里那三个名字）：走核心库那一条路铺现场，再让浏览屏重读。
+fn 记三个合集(app: &mut App) {
+    let (browse, site) = app.browse_and_site();
+    let keys: Vec<String> = site
+        .catalog
+        .variant_page(&romcat_core::catalog::browse::VariantQuery::default(), 0, 6)
+        .expect("取得出变体")
+        .into_iter()
+        .map(|row| row.key)
+        .collect();
+    for (名, 几个) in [("通关过的", 3), ("送朋友的", 2), ("双人同乐", 1)] {
+        romcat_core::collection::add(site, 名, &keys[..几个]).expect("加得进");
+    }
+    browse.invalidate(site);
+}
+
+/// **「加入合集」那一层，库里已经有合集**（票 `gui-draws-the-rest-of-the-design/23`，差距 `J-01`…`J-04`）：
+/// 勾一行、按「加入合集…」，默认选中头一个合集。每一档是一张选择卡（选中那张描强调色边、外头一圈浅强调色），
+/// 「新建合集」也是一张；页脚「取消」是幽灵按钮。
+#[track_caller]
+fn 拍加入合集已有合集(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    记三个合集(&mut app);
+    {
+        let (browse, site) = app.browse_and_site();
+        let anchor = site
+            .catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一行")
+            .remove(0)
+            .anchor;
+        browse.picked_mut().toggle(&anchor);
+    }
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    按(&mut harness, "加入合集…");
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 浏览_加入合集已有合集_浅色() {
+    拍加入合集已有合集("browse/join-collection-existing-light", Theme::Light);
+}
+
+#[test]
+fn 浏览_加入合集已有合集_暗色() {
+    拍加入合集已有合集("browse/join-collection-existing-dark", Theme::Dark);
+}
+
+/// **「管理合集」那一层**（票 `gui-draws-the-rest-of-the-design/23`，差距清单 `F-8` 裁 A）：收藏那一行与三个合集装在一个
+/// 列表框里，行间一道线；每一行右头「按它筛选」「改名」（幽灵）「删除…」（警示）贴着右沿。`改名擦空` 时再按头一个合集那一行的
+/// 「改名」、把框里的名字删光：输入框占满左边，右头「取消」（幽灵）「保存」（主按钮，灰着），框底下常驻弱色「请输入名称。」
+/// （收挂单 `Q1478`）。
+#[track_caller]
+fn 拍管理合集(名字: &str, 主题: Theme, 改名擦空: bool) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 浏览现场(false);
+    记三个合集(&mut app);
+    let mut harness = 开一个(主题, move |ui| app.ui(ui));
+    按(&mut harness, "管理合集…");
+    if 改名擦空 {
+        // 名单照成员多少排（沉淀库那本账），头一行是成员最多的「通关过的」。
+        const 头一个: &str = "通关过的";
+        按头一处(&mut harness, "改名");
+        // 改名框里预填着原名：点进去（弹层在最上层，取最后画的那一处）、挪到末尾、一个字一个字删光。
+        按(&mut harness, 头一个);
+        harness.key_press(egui::Key::End);
+        for _ in 0..头一个.chars().count() {
+            harness.key_press(egui::Key::Backspace);
+        }
+        harness.run();
+        let 那一句 = romcat_core::collection::BadName::Empty.advice();
+        assert_eq!(
+            正好画着的每一处(harness.output(), &那一句).len(),
+            1,
+            "改名框擦空了，屏上该常驻一句「{那一句}」"
+        );
+    }
+    拍下(harness, 名字);
+    drop(目录);
+}
+
+#[test]
+fn 浏览_管理合集_浅色() {
+    拍管理合集("browse/manage-collections-light", Theme::Light, false);
+}
+
+#[test]
+fn 浏览_管理合集_暗色() {
+    拍管理合集("browse/manage-collections-dark", Theme::Dark, false);
+}
+
+#[test]
+fn 浏览_管理合集改名擦空_浅色() {
+    拍管理合集("browse/manage-collections-rename-light", Theme::Light, true);
+}
+
+#[test]
+fn 浏览_管理合集改名擦空_暗色() {
+    拍管理合集("browse/manage-collections-rename-dark", Theme::Dark, true);
 }
 
 // ——— 作品详情页（票 `gui-looks-like-the-design/15`） ———

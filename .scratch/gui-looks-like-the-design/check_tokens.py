@@ -737,6 +737,20 @@ merge_literals = [
 ]
 literals += check_literals(merge_literals)
 
+# 浏览屏左栏条件组与「加入合集」那一层（票 gui-draws-the-rest-of-the-design/23）：每个组左边那道竖线与组里的留白（.tg）、
+# 组头那一行与组合方式那颗下拉（.tgh）、一条子句的两栏与三格（.tc / .tci）、组底下那两颗加号那一排、合集那几张选择卡之间。
+filter_literals = [
+    (r"(?m)^\.tg\{border-left:(\d+)px solid var\(--accent\);padding:(\d+)px 0 (\d+)px (\d+)px;[^}]*?gap:(\d+)px", [(1, "layout", "rule-group-bar", None), (2, "space", "rule-group-padding", 0), (3, "space", "rule-group-padding", 0), (4, "space", "rule-group-padding", 1), (5, "space", "rule-group-gap", None)]),
+    (r"\.tg \.tgh\{[^}]*?gap:(\d+)px", [(1, "space", "rule-gap", None)]),
+    (r"\.tg \.tgh select\{height:(\d+)px;font-size:([\d.]+)px;padding:0 (\d+)px", [(1, "layout", "rule-join-height", None), (2, "font", "size-caption-plus", None), (3, "layout", "rule-join-padding", None)]),
+    (r"(?m)^\.tc\{display:grid;grid-template-columns:minmax\(0,1fr\) auto;gap:(\d+)px", [(1, "space", "rule-gap", None)]),
+    (r"\.tc \.tci\{display:grid;grid-template-columns:minmax\(0,([\d.]+)fr\) minmax\(0,([\d.]+)fr\);gap:(\d+)px", [(1, "layout", "rule-clause-columns", 0), (2, "layout", "rule-clause-columns", 1), (3, "space", "rule-gap", None)]),
+    (r"\.tc select,\.tc input\{height:(\d+)px;font-size:([\d.]+)px;padding:0 (\d+)px", [(1, "layout", "input-small-height", None), (2, "font", "size-caption-plus", None), (3, "layout", "rule-control-padding", None)]),
+    (r'<div class="row" style="gap:(\d+)px"><button type="button" class="btn ghost sm" data-tr="addc', [(1, "space", "rule-gap", None)]),
+    (r'body:`<div class="col" style="gap:(\d+)px">\$\{S\.colls\.map', [(1, "layout", "choice-card-gap", None)]),
+]
+literals += check_literals(filter_literals)
+
 # 刮削弹层（票 gui-draws-the-rest-of-the-design/17）：三栏 .sgrid、弹层内容区里块与块之间 .mbody、预估框 .est（格间、内边距、
 # 那三个数的字号、右边那句的最宽）。
 scrape_literals = [

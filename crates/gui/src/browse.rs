@@ -990,7 +990,7 @@ impl Screen {
     /// - **改名**与**删除**是**当场落库**：成员关系量级几百到几千（人一条条点出来的），
     ///   走 `collection::rename` / `drop_all` 就地做完；
     /// - **加入合集**走的是**任务台**那条老路（[`Self::join_collection`]）：
-    ///   它作用于勾中的那一批，全选那一档在真库上要为四万多个变体各折一次内容判据，
+    ///   它作用于勾中的那一批，全选那一档在真库上要为四万多个变体（见台账 `docs/library-facts.md`）各折一次内容判据，
     ///   那是秒级的读，不能摆在画帧线上。
     fn collection_dialogs(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
         // **库里有哪几个合集，问沉淀库、不问分面**（拿主意的人 2026-09-22 裁，挂单 `Q1109`）。
@@ -1112,7 +1112,7 @@ impl Screen {
             devices: &self.sublibrary_devices,
             rule,
             unruly: unruly.as_deref(),
-            unfilled: self.filter.pending().len(),
+            unfilled: self.filter.not_in_effect(),
             browse_only: &browse_only,
             searching: !self.query.search.trim().is_empty(),
             picked: self.picked.count(self.window.total()),
@@ -4689,12 +4689,17 @@ impl Screen {
                     // 会把窗口作废重取，选中也跟着清掉。
                     self.query.rule = self.filter.rule().cloned();
                 }
+                // 框底下那一行计数（设计稿 `#unset`）：几条没填完、几条写错了。
+                self.filter.not_in_effect_ui(ui);
                 // **折出来的那条规则当场写出来**（设计稿 `.ruletext`）：按「存成子库」之前心里有数。
                 // 正在改子库的那一趟，底下「更新到子库」那一块自己说规则会变成什么。
                 if self.editing.is_none() {
                     match self.query.to_rule() {
-                        Ok(Some(rule)) => rule_text(ui, &rule.text),
-                        Ok(None) => {}
+                        Ok(Some(rule)) => rule_text(ui, Some(&rule.text)),
+                        // 一样都没筛时照稿写「（没有条件：全部作品）」（差距清单 `G-06`，[`NO_RULE`]）：这时存成子库就是整个主库。
+                        // 「条件」在这儿说的是分面加子句合起来一样都没有，落在挂单 `Q1094` 认过的那条界线里
+                        // （拿主意的人 2026-10-04 裁 `F-1` 选 B：组头与说明句换词，这一句照稿）。
+                        Ok(None) => rule_text(ui, None),
                         Err(unruly) => {
                             ui.colored_label(ui.visuals().error_fg_color, unruly.advice());
                         }
@@ -6121,9 +6126,13 @@ fn platform_chips(
     });
 }
 
+/// 一样都没筛时规则原文那一块写的（设计稿 `currentRule` 的 `'（没有条件：全部作品）'`）。
+const NO_RULE: &str = "（没有条件：全部作品）";
+
 /// 条件组底下那一条**规则原文**（设计稿 `.ruletext`）：凹陷底、小圆角，前头一句弱字色的「存成子库规则：」，
-/// 后头是核心库折出来的那条规则，等宽，哪儿都能折行。
-fn rule_text(ui: &mut egui::Ui, rule: &str) {
+/// 后头是核心库折出来的那条规则，等宽，哪儿都能折行。`None` 是一样都没筛：那一句 [`NO_RULE`] **另起一行**——
+/// 稿上它正落在第二行；逐字折的话会折成「…全部作」与「品）」两截。
+fn rule_text(ui: &mut egui::Ui, rule: Option<&str>) {
     let tokens = Tokens::builtin();
     let [上下, 左右] = tokens.space.rule_text_padding;
     let (弱, 次) = (ui.visuals().weak_text_color(), ui.visuals().text_color());
@@ -6139,11 +6148,19 @@ fn rule_text(ui: &mut egui::Ui, rule: &str) {
                 0.0,
                 egui::TextFormat::simple(egui::FontId::proportional(tokens.font.size_path), 弱),
             );
-            job.append(
-                rule,
-                0.0,
-                egui::TextFormat::simple(egui::FontId::monospace(tokens.font.size_path), 次),
-            );
+            // 规则原文用等宽；一样都没筛时那一句是话、不是规则，用常规体——等宽族里没有全角括号，
+            // 回退过去两头各空出一截（稿上 `--mono` 排头是中文字体，那一句照常规体的样子画）。
+            let (后半, 字体) = match rule {
+                Some(rule) => (
+                    rule.to_string(),
+                    egui::FontId::monospace(tokens.font.size_path),
+                ),
+                None => (
+                    format!("\n{NO_RULE}"),
+                    egui::FontId::proportional(tokens.font.size_path),
+                ),
+            };
+            job.append(&后半, 0.0, egui::TextFormat::simple(字体, 次));
             job.wrap.max_width = ui.available_width();
             job.wrap.break_anywhere = true;
             let galley = ui.painter().layout_job(job);
