@@ -1283,12 +1283,21 @@ fn 后一批盖住了前一批时先撤前一批被拒绝并说清是哪一批�
         "两份重复拷贝钉的是同一条锚，后一批盖住了前一批"
     );
 
-    let 话 = triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 批一.batch)
-        .expect_err("被后来的批盖住了就不该撤得动")
-        .to_string();
+    let 拒 = triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 批一.batch)
+        .expect_err("被后来的批盖住了就不该撤得动");
+    // **是哪一批盖的交成结构化的字段**：两个壳各补各的去处——命令行补命令，界面补屏上那一处（挂单 `Q622`）。
+    assert!(
+        matches!(拒, triage::TriageError::CoveredBy { by, .. } if by == 批二.batch),
+        "{拒:?}",
+    );
+    let 话 = 拒.to_string();
     assert!(
         话.contains(&format!("第 {} 批", 批二.batch)),
         "错误要说清是哪一批盖的，好让人先撤那一批：{话}",
+    );
+    assert!(
+        !话.contains("romcat"),
+        "核心库那句只说事实与去处的名字，命令由命令行自己补：{话}",
     );
     // 拒绝了就一个字都不动：批一照旧在册，沉淀库照旧是批二那条。
     assert!(
@@ -1307,6 +1316,36 @@ fn 后一批盖住了前一批时先撤前一批被拒绝并说清是哪一批�
     triage::undo_batch(&mut 现场.catalog, &mut 现场.store, 批一.batch).expect("撤得掉");
     assert_eq!(对拍快照(&现场, &那两条), 原样, "两批都撤完就该回到原样");
     assert_eq!(队列(&现场, &两份).len(), 2);
+}
+
+#[test]
+fn 撤批放回那一族拒绝的话只说事实_不带命令行命令_是哪一批交成字段() {
+    // 挂单 `Q622` 那一族：撤过了再撤、点了一批不在的——界面原样画「撤不掉：…」，命令行在自己那层补命令。
+    let mut 现场 = 建现场();
+    跑识别(&mut 现场);
+    let filter = Filter {
+        name_contains: vec!["外星科技".to_string()],
+        ..Filter::default()
+    };
+    let applied = 裁(&mut 现场, &filter, &手工("外星科技的某作"));
+    triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch).expect("撤得掉");
+
+    let 撤过了 = triage::undo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch)
+        .expect_err("撤过的不该再撤一次");
+    assert!(
+        matches!(撤过了, triage::TriageError::AlreadyUndone(batch) if batch == applied.batch),
+        "{撤过了:?}",
+    );
+    let 不在 = triage::redo_batch(&mut 现场.catalog, &mut 现场.store, applied.batch + 99)
+        .expect_err("不在的那一批放不回去");
+    assert!(
+        matches!(不在, triage::TriageError::NoBatch(batch) if batch == applied.batch + 99),
+        "{不在:?}",
+    );
+    for 话 in [撤过了.to_string(), 不在.to_string()] {
+        assert!(话.contains("批"), "说不清是哪一批：{话}");
+        assert!(!话.contains("romcat"), "核心库那句不带命令：{话}");
+    }
 }
 
 #[test]

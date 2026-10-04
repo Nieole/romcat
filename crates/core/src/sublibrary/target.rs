@@ -11,15 +11,15 @@
 //!
 //! 「套在一起」**两个方向都算**，与加根那道 [`check_placement`](crate::catalog::roots::check_placement) 同一个口径。
 //!
-//! 过了这三道再看**在不在**（[`Presence`]）：在的话报出那个卷的文件系统与可用空间；**不在也照样建得出**——子库是
-//! 持久实体，不是「插上卡才存在的东西」（ADR-0015）。
+//! 过了这三道再看**在不在**（[`Presence`]，判据在 `sync::observe::reach` 那一处）：在的话报出那个卷的文件系统与
+//! 可用空间；**不在也照样建得出**——子库是持久实体，不是「插上卡才存在的东西」（ADR-0015）。
 //!
 //! ## 为什么在核心里
 //!
 //! 界面上的弹层、命令行 `sublibrary set`、点同步时那道闸问的是同一件事（ADR-0024）；拦下时那句话也只有一份
 //! （[`TargetRefusal`] 与 [`NameRefusal`] 的 `Display`）。「落在主库里」那一条与
 //! [`refuse_target_in_library`](crate::sync::prepare::refuse_target_in_library) 共用 [`library_overlap`]，
-//! 两边不各判一遍。
+//! 两边不各判一遍；点同步那一刻拦下时说的也是 [`TargetRefusal::InLibrary`] 那一句，不另说一句。
 //!
 //! ## 每调一次都查盘
 //!
@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use crate::catalog::roots::Roots;
 use crate::catalog::{Catalog, CatalogError};
 use crate::path;
+use crate::sync::ObserveError;
 
 /// 一条目标路径**不能用**的理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +103,17 @@ impl std::fmt::Display for TargetRefusal {
             Self::Taken { by } => write!(f, "已被子库「{by}」使用。"),
             Self::NotADirectory => f.write_str("这条路径是一份文件，不是目录。"),
         }
+    }
+}
+
+impl TargetRefusal {
+    /// 连着那条路径一起说的那一句：「目标 <路径> 不能用：<理由>」。
+    ///
+    /// 命令行 `sublibrary set` 拦下时、点同步那一刻目标落在主库里时（`refuse_target_in_library`）印的都是它——
+    /// 界面路径底下那一句不带前缀（路径就在框里）。
+    #[must_use]
+    pub fn sentence(&self, target: &Path) -> String {
+        format!("目标 {} 不能用：{self}", path::display(target))
     }
 }
 
@@ -200,13 +212,19 @@ pub fn vet(
             return Ok(Err(TargetRefusal::Taken { by: other.name }));
         }
     }
-    Ok(if target.is_dir() {
-        Ok(Presence::Present(volume(target)))
-    } else if target.exists() {
-        Err(TargetRefusal::NotADirectory)
-    } else {
-        Ok(Presence::Absent)
-    })
+    // **在不在位只在核心库一处判**（`sync::observe::reach`，ADR-0024，挂单 `Q851`）：与排计划「看一眼目标」、
+    // 子库屏卡头那枚「未连接」同一个口径。在、却列不开的：是一份文件就拦成「不是目录」；是个目录（没权限、
+    // 盘出了错）照「在」报——那是同步那一趟真去列时撞上、照实记失败的事。
+    Ok(
+        match crate::sync::observe::reach(&crate::fs::RealFs, target) {
+            Ok(()) => Ok(Presence::Present(volume(target))),
+            Err(ObserveError::Absent { .. }) => Ok(Presence::Absent),
+            Err(ObserveError::Unreadable { .. }) if target.is_dir() => {
+                Ok(Presence::Present(volume(target)))
+            }
+            Err(ObserveError::Unreadable { .. }) => Err(TargetRefusal::NotADirectory),
+        },
+    )
 }
 
 /// 判一个子库名字：空着、或者已被别的子库用了就拦下。

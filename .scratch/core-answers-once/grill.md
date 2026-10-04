@@ -65,6 +65,7 @@
 核查（2026-09-23）：crates/core/src/triage.rs:120 TriageError::CoveredBy 的措辞仍带「（`romcat triage undo --batch {by}`）」，界面原样画；同形的还有 crates/core/src/sync/prepare.rs:133、:275（`romcat capability` / `romcat sublibrary set …`）与 Q643 的 transfer.rs:952
 依赖／可并：Q643、Q851、Q615（同一族核心措辞，一票收）
 （大小 M，来自票 `gui-answers-all-six/06`）
+**收于票 `core-answers-once/06`（2026-10-04）：settled。** `TriageError` 撤批那一族（被盖住、已撤过、没有这一批）只说事实与去处的名字（「先撤第 2 批。」），是哪一批交成字段；命令行在印之前补 `romcat triage undo --batch` / `redo` / `batches`（`triage_refusal`），界面补屏上去处「在「裁决记录」里，「第 N 批裁决」那一行旁边就有撤销。」（`queue::refusal_with_place`）。同形的差量预览那几句（`Prepared::concerns` 整份改交 `sync::Concern`）、「没有叫某某的子库」、同步时「主库这几个根未连接」一起收（挂单 `Q1348`）。
 
 ### `Q643` — 撞上时每一份底下画的「为什么」，有一种把人支回终端：先 `romcat import`
 
@@ -72,6 +73,7 @@
 核查（2026-09-23）：crates/core/src/adapter/transfer.rs:952 仍写「先 `romcat import` 把它读进来…再导出」；界面 crates/gui/src 里没有一处调导入
 依赖／可并：Q622 的题（核心库拒绝的话里带命令行指路，怎么拆）
 （大小 S，来自票 `gui-answers-all-six/05`）
+**收于票 `core-answers-once/06`（2026-10-04）：settled。** 外部改动那一份交出种类（`adapter::report::ConflictKind`：改过 ／ 从没见过），那句只说事实（「…它可能就是维护者的原件。覆盖等于把它抹掉。」），界面原样画、去处是「我看过了，照写」那一颗；「先 `romcat import` 把它读进来（原文会一字不差地留下），再导出」只由命令行照 `Unseen` 补。
 
 ### `Q851` — 核心库「目标不在位」那句带着命令行命令与系统错误原文，界面该不该一律用自己的话
 
@@ -79,6 +81,7 @@
 核查（2026-09-23）：crates/core/src/sublibrary.rs:610-618 Fit::Unknown 只有 `why: String`；:733 Cutoff::Failed(why) 直接塞进去；界面 crates/gui/src/sublibrary.rs:5599 target_absent 自己再查一眼「在不在位」来挑措辞（:795、:1256、:1614）
 依赖／可并：核心库措辞去命令行指路那一族（Q622 的题）、Q797
 （大小 M，来自票 `gui-looks-like-the-design/20`）
+**收于票 `core-answers-once/06`（2026-10-04）：settled。** `Fit::Unknown { why }` 带结构化原因 `sync::Unplanned`（没有这个子库 ／ 目标 `ObserveError::Absent`、`Unreadable` ／ 前端格式没有适配器 ／ 别的）；「目标在不在位」只在核心库 `sync::observe::reach` 一处判（`observe` 起手那两下），界面 `target_absent` 删掉、改问它，卡头标签、排差量预览与同步按下时、「装不装得下」的悬停都照原因种类挑话。未连接那句不带系统错误原文与命令；命令行照种类补「`romcat sublibrary set <子库> --target …`」。`--json` 里那一格照旧是一句话（挂单 `Q1347`）。
 
 ### `Q615` — 向导第一步拦下时说的是核心库原话，「换个名字，或者去开那一份」那半句没了
 
@@ -100,6 +103,7 @@
 核查（2026-09-23）：crates/core/src/sync/prepare.rs:338 仍在排差量预览里才 adapter::find 失败；Sublibrary 没有 adapter()（只有 crates/core/src/catalog/export.rs:161 ExportSetup::adapter）。但条目前提已变：界面「前端格式」现在是 adapter::names() 摆的分段选择（crates/gui/src/sublibrary.rs:3705-3726），不再手打；命令行 sublibrary set 在 crates/cli/src/main.rs:4342 已当场拦错格式——只剩「旧库里存着这版没带的格式」一种来路
 依赖／可并：Q851（同在 prepare_selected 一带）
 （大小 S，来自票 `gui-looks-like-the-design/07`）
+**收于票 `core-answers-once/06`（2026-10-04）：settled。** 核心库给子库长 `Sublibrary::adapter()`（与 `ExportSetup::adapter` 同形，没有时交 `sublibrary::NoAdapter`，只说是哪个格式、眼下带哪几个）；界面按下「生成差量预览」那一刻问它，没有就在屏上说、补「按卡上「目标设置…」换一个前端格式。」、不排——任务台上没有新一趟、历史里不多一条失败；界面「目标设置」弹层里那两处（前端格式说明、设备上的位置）改问 `sublibrary::format_adapter`；排计划撞上时交的也是同一种原因（`Unplanned::NoAdapter`），命令行补 `--format`；命令行 `sublibrary set --format` 也走它。
 
 ### `Q944` — 命令行 `romcat sublibrary set` 没走新的目标路径判断：只拦主库，工作目录与别的子库占着都放行
 

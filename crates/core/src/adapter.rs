@@ -706,6 +706,35 @@ pub fn find(name: &str) -> Option<Box<dyn Adapter>> {
         .find(|adapter| adapter.name().eq_ignore_ascii_case(name))
 }
 
+/// 一个**前端格式**名在这一版里的那个适配器（两头空白不算、大小写不敏感）；这一版没带时交回 [`NoAdapter`]。
+///
+/// **「这个前端格式这一版带没带」只在这一处判，没带时也只说这一句**（ADR-0024，挂单 `Q797`）：
+/// 导出配置（`ExportSetup::check` / `ExportSetup::adapter`）、子库（`Sublibrary::adapter`）、
+/// 「目标设置」弹层里还没存下的那一格草稿、命令行的 `--format`，问的都是它。界面那一层不自己去 [`find`]。
+///
+/// # Errors
+/// 这一版没带这个格式的适配器时返回 [`NoAdapter`]。
+pub fn for_format(format: &str) -> Result<Box<dyn Adapter>, NoAdapter> {
+    let format = format.trim();
+    find(format).ok_or_else(|| NoAdapter {
+        format: format.to_string(),
+        known: names().into_iter().map(ToString::to_string).collect(),
+    })
+}
+
+/// 这一版**没带**这个前端格式的适配器（[`for_format`]）。
+///
+/// 只说事实与眼下带的是哪几个，**不带命令**：命令行补它那条 `--format`，界面补屏上那一处
+/// （子库卡上的「目标设置…」、库屏的「导出设置」）。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("这一版没带「{format}」这个前端格式。眼下带的是：{}。", known.join("、"))]
+pub struct NoAdapter {
+    /// 给的、或者库里记着的那个格式名。
+    pub format: String,
+    /// 这一版带的那几个。
+    pub known: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

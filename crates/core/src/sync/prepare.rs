@@ -22,19 +22,121 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::adapter;
+use serde::Serialize;
+
+use crate::adapter::NoAdapter;
 use crate::capability::{Roster, today};
 use crate::catalog::{Catalog, Roots};
 use crate::fs::RealFs;
 use crate::path;
 use crate::scrape::Priorities;
 use crate::scrape::pool::MediaPool;
-use crate::sublibrary::target::library_overlap;
+use crate::sublibrary::target::{TargetRefusal, library_overlap};
 use crate::sublibrary::{self, Selected, Sublibrary};
 use crate::task::{Cutoff, Halted, Handle};
 use crate::workspace;
 
-use super::{Desired, Manifest, Options, Plan, TargetState};
+use super::{Desired, Manifest, ObserveError, Options, Plan, TargetState};
+
+/// **排不出计划的原因**，结构化地交出去（挂单 `Q851` `Q622`）。
+///
+/// 两个壳照种类各补各的去处：命令行在印之前补自己那条命令，界面补屏上的那一处（卡上的「目标设置…」）。
+/// **`Display` 只说事实与去处的名字，不带命令行命令**——界面原样画它时，屏上就不出现一句终端命令。
+///
+/// 「装得下吗」算不出时，[`Fit::Unknown`](crate::sublibrary::Fit::Unknown) 带的就是它：
+/// 界面照种类挑话，不再自己查一眼目标在不在位（ADR-0024）。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Unplanned {
+    /// 没有这个名字的子库。
+    #[error("没有叫「{name}」的子库。")]
+    NoSublibrary {
+        /// 点的那个名字。
+        name: String,
+    },
+    /// 看一眼目标没看成：未连接，或者列不开（[`ObserveError`]）。
+    #[error(transparent)]
+    Target(#[from] ObserveError),
+    /// 子库记着的前端格式这一版没带适配器（[`Sublibrary::adapter`]，挂单 `Q797`）。
+    #[error(transparent)]
+    NoAdapter(#[from] NoAdapter),
+    /// 别的原因：中立库读不动、能力档案名册或优先级表读不动……一句给人看的话。
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl Unplanned {
+    /// 原因是**目标未连接**时，那条目标路径；别的原因是 `None`。
+    ///
+    /// 两个壳都要按「是不是未连接」挑话（界面写「请先连接设备」、命令行补改目标路径的命令），
+    /// 给这一问一个名字，调用方就不必一层层拆 [`ObserveError`]。
+    #[must_use]
+    pub fn absent(&self) -> Option<&str> {
+        match self {
+            Self::Target(ObserveError::Absent { path }) => Some(path),
+            _ => None,
+        }
+    }
+}
+
+/// `--json` 里照旧是**那一句话**：报告里 `why` 那一格从来是给人读的一句（只说事实、不带命令），
+/// 种类留给两个壳在内存里分支用。
+impl Serialize for Unplanned {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+/// 排计划交不出一份 [`Prepared`] 时交上来的：被叫停了，或者排不出（[`Unplanned`]）。
+///
+/// 与 [`Cutoff`] 是同一道两选一，只是「排不出」那一支带着结构化的原因而不是一句话——命令行要照种类补命令，
+/// 「装得下吗」要把原因原样交给界面。任务台上那一趟收的是 [`Cutoff`]：`From` 折过去（折的是支，不是话）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanCutoff {
+    /// 被叫停了，停在两步之间，什么都没留下。
+    Halted,
+    /// 排不出：为什么。
+    Unplanned(Unplanned),
+}
+
+impl From<Halted> for PlanCutoff {
+    fn from(_: Halted) -> Self {
+        Self::Halted
+    }
+}
+
+impl From<Unplanned> for PlanCutoff {
+    fn from(why: Unplanned) -> Self {
+        Self::Unplanned(why)
+    }
+}
+
+impl From<ObserveError> for PlanCutoff {
+    fn from(why: ObserveError) -> Self {
+        Self::Unplanned(Unplanned::Target(why))
+    }
+}
+
+impl From<NoAdapter> for PlanCutoff {
+    fn from(why: NoAdapter) -> Self {
+        Self::Unplanned(Unplanned::NoAdapter(why))
+    }
+}
+
+impl From<String> for PlanCutoff {
+    fn from(why: String) -> Self {
+        Self::Unplanned(Unplanned::Failed(why))
+    }
+}
+
+impl From<PlanCutoff> for Cutoff {
+    /// **被叫停不折成一句「失败」**：折的是支，不是话。
+    fn from(cut: PlanCutoff) -> Self {
+        match cut {
+            PlanCutoff::Halted => Self::Halted,
+            PlanCutoff::Unplanned(why) => Self::Failed(why.to_string()),
+        }
+    }
+}
 
 /// 排一次计划要说清的几件事。
 #[derive(Debug, Clone, Default)]
@@ -91,56 +193,95 @@ pub struct Prepared {
 }
 
 impl Prepared {
-    /// 折期望状态时那几件**要说出口**的怪事，每条一段话。
+    /// 折期望状态时那几件**要说出口**的怪事，一件一条（[`Concern`]，它的 `Display` 是那一段话）。
     ///
     /// **命令行与界面印同一份。** 各写一遍的话，界面上会少掉其中一两条——而这几条正是
     /// 「为什么这一趟少选出来这么多」的答案，少印一条就等于让人对着一个说不通的数字发呆。
+    /// 那段话只说事实与去处的名字、**不带命令**（挂单 `Q622` 那一族）：命令行照种类补自己那条命令，
+    /// 界面照种类补屏上的去处。
     #[must_use]
-    pub fn concerns(&self) -> Vec<String> {
-        let name = &self.sublibrary.name;
+    pub fn concerns(&self) -> Vec<Concern> {
         let mut out = Vec::new();
         if self.broken > 0 {
-            out.push(format!(
-                "⚠️ 有 {} 条规则读不懂、这一趟没参与求值——少选出来的东西全在它们里面。\n\
-                 `romcat sublibrary show {name}` 看是哪几条。",
-                crate::report::thousands(self.broken as u64),
-            ));
+            out.push(Concern::BrokenRules(self.broken));
         }
         if self.media_not_in_pool > 0 {
-            out.push(format!(
-                "⚠️ 有 {} 条媒体引用在媒体池里找不到那个文件，这一趟一张都不铺。\n\
-                 重新跑一次 `romcat scrape` 把它们收回池里。",
-                crate::report::thousands(self.media_not_in_pool),
-            ));
+            out.push(Concern::MediaNotInPool(self.media_not_in_pool));
         }
         if self.media_unknown_kind > 0 {
-            out.push(format!(
-                "认不出是什么的图有 {} 张，一张都没铺——猜错了就是把说明书当封面。",
-                crate::report::thousands(self.media_unknown_kind),
-            ));
+            out.push(Concern::MediaUnknownKind(self.media_unknown_kind));
         }
         if self.media_crowded_out > 0 {
-            out.push(format!(
-                "有 {} 张图被同类挤掉、没铺出去：这个格式靠文件名找媒体，\n\
-                 一个游戏的一个类型只放得下一张。挤掉的是同一个游戏的第二张起。",
-                crate::report::thousands(self.media_crowded_out),
-            ));
+            out.push(Concern::MediaCrowdedOut(self.media_crowded_out));
         }
         if let Some(missing) = &self.missing_capability {
-            out.push(format!(
-                "⚠️ 子库记着的能力档案「{missing}」在眼下这份名册里找不到，这一趟退回了\n\
-                 「不作声称」：不转换、也不检查。别以为它替你查过了。\n\
-                 `romcat capability` 看还有哪些，`romcat sublibrary set {name} --capability <名字>` 重挑一份。",
-            ));
+            out.push(Concern::MissingCapability(missing.clone()));
         }
         if self.stale_claims > 0 {
-            out.push(format!(
-                "⚠️ 这份能力档案里有 {} 条声明超过半年没核实。模拟器一年发好几版，\n\
-                 而矩阵错了比不转换更糟——`romcat capability <档案名>` 看是哪几条。",
-                crate::report::thousands(self.stale_claims as u64),
-            ));
+            out.push(Concern::StaleClaims(self.stale_claims));
         }
         out
+    }
+}
+
+/// 折期望状态时一件**要说出口**的怪事（[`Prepared::concerns`]）。
+///
+/// **是哪一种交成结构化的，那段话只说事实与去处的名字**（挂单 `Q622` 那一族）：命令行照种类在印之前补自己那条
+/// 命令，界面照种类补屏上的那一处——核心库不知道屏上的位置，也不该把终端命令画到屏上。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Concern {
+    /// 有几条规则读不懂、这一趟没参与求值。
+    BrokenRules(usize),
+    /// 库里记着、媒体池里却没有那个文件的媒体引用有几条。
+    MediaNotInPool(u64),
+    /// 认不出是什么、因此一张都没铺的图有几张。
+    MediaUnknownKind(u64),
+    /// 靠文件名找媒体的格式里，被同类挤掉、没铺出去的图有几张。
+    MediaCrowdedOut(u64),
+    /// 子库记着的能力档案在眼下这份名册里找不到——退回了「不作声称」。带着记着的那个名字。
+    MissingCapability(String),
+    /// 这份能力档案里有几条声明超过半年没核实。
+    StaleClaims(usize),
+}
+
+impl std::fmt::Display for Concern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::report::thousands;
+        match self {
+            Self::BrokenRules(count) => write!(
+                f,
+                "⚠️ 有 {} 条规则读不懂、这一趟没参与求值——少选出来的东西全在它们里面。",
+                thousands(*count as u64),
+            ),
+            Self::MediaNotInPool(count) => write!(
+                f,
+                "⚠️ 有 {} 条媒体引用在媒体池里找不到那个文件，这一趟一张都不铺。\n\
+                 重新刮削一次把它们收回池里。",
+                thousands(*count),
+            ),
+            Self::MediaUnknownKind(count) => write!(
+                f,
+                "认不出是什么的图有 {} 张，一张都没铺——猜错了就是把说明书当封面。",
+                thousands(*count),
+            ),
+            Self::MediaCrowdedOut(count) => write!(
+                f,
+                "有 {} 张图被同类挤掉、没铺出去：这个格式靠文件名找媒体，\n\
+                 一个游戏的一个类型只放得下一张。挤掉的是同一个游戏的第二张起。",
+                thousands(*count),
+            ),
+            Self::MissingCapability(missing) => write!(
+                f,
+                "⚠️ 子库记着的能力档案「{missing}」在眼下这份名册里找不到，这一趟退回了\n\
+                 「不作声称」：不转换、也不检查。别以为它替你查过了。重挑一份能力档案。",
+            ),
+            Self::StaleClaims(count) => write!(
+                f,
+                "⚠️ 这份能力档案里有 {} 条声明超过半年没核实。模拟器一年发好几版，\n\
+                 而矩阵错了比不转换更糟。",
+                thousands(*count as u64),
+            ),
+        }
     }
 }
 
@@ -254,8 +395,8 @@ pub const PLAN_STEPS: u32 = 8;
 ///
 /// # Errors
 /// 子库不在、前端格式没有适配器、中立库读不动、目标看不了时返回
-/// [`Cutoff::Failed`]；被叫停时返回
-/// [`Cutoff::Halted`]——**那是两个不同的支，不是两句
+/// [`PlanCutoff::Unplanned`]（带着结构化的原因）；被叫停时返回
+/// [`PlanCutoff::Halted`]——**那是两个不同的支，不是两句
 /// 不同的话**，任务台按它分「停了」与「失败」。
 pub fn prepare(
     catalog: &Catalog,
@@ -263,17 +404,14 @@ pub fn prepare(
     name: &str,
     request: &Request<'_>,
     task: &Handle,
-) -> Result<Prepared, Cutoff> {
+) -> Result<Prepared, PlanCutoff> {
     task.steps(STEPS);
     task.step("读子库")?;
     let sublibrary = catalog
         .sublibrary(name)
         .map_err(|error| format!("中立库读不动：{error}"))?
-        .ok_or_else(|| {
-            format!(
-                "没有叫「{name}」的子库。\n\
-                 建一个：`romcat sublibrary set {name} --target <目标设备上的目录>`"
-            )
+        .ok_or_else(|| Unplanned::NoSublibrary {
+            name: name.to_string(),
         })?;
     task.step("读选择集")?;
     let loaded = catalog
@@ -312,8 +450,8 @@ pub fn prepare(
 /// 是因为调用方要在步名前面加上是哪一台设备——把手自己不知道。
 ///
 /// # Errors
-/// 目标看不了、前端格式没有适配器、中立库读不动时返回 [`Cutoff::Failed`]；
-/// `step` 说停下时返回 [`Cutoff::Halted`]。
+/// 目标看不了、前端格式没有适配器、中立库读不动时返回 [`PlanCutoff::Unplanned`]；
+/// `step` 说停下时返回 [`PlanCutoff::Halted`]。
 pub fn prepare_selected(
     catalog: &Catalog,
     workspace: &Path,
@@ -321,7 +459,7 @@ pub fn prepare_selected(
     selected: &Selected,
     request: &Request<'_>,
     step: &dyn Fn(&str) -> Result<(), Halted>,
-) -> Result<Prepared, Cutoff> {
+) -> Result<Prepared, PlanCutoff> {
     // **读盘用的路径与入库比较用的键分开**（ADR-0020）：`--target` 给的是系统给的
     // 原始形式，就拿它原样去读；子库自己那条走 `read_path`，它取的正是存进库的
     // 那一份原始形式。混用会让带假名或带音标的目标目录 `canonicalize` 失败，
@@ -334,13 +472,8 @@ pub fn prepare_selected(
         sublibrary.target = path::nfc(&path::display(&root)).into_owned();
     }
     step("看一眼目标")?;
-    let actual = super::observe(&RealFs, &root).map_err(|error| format!("{error}"))?;
-    let adapter = adapter::find(&sublibrary.format).ok_or_else(|| {
-        format!(
-            "子库「{}」的前端格式是「{}」，可这一版没带这个适配器。",
-            sublibrary.name, sublibrary.format
-        )
-    })?;
+    let actual = super::observe(&RealFs, &root)?;
+    let adapter = sublibrary.adapter()?;
     // **能力档案**：目标吃得下什么、这张卡放得下什么（票 21、ADR-0017）。
     // 子库记的是名字，档案本身是一份可以整份换掉的数据。
     step("读能力档案")?;
@@ -512,11 +645,13 @@ pub fn missing_roots(prepared: &Prepared, roots: &Roots) -> Vec<String> {
 }
 
 /// 这几个根未连接时该对人说的那句话。
+///
+/// 界面与命令行都印它，所以**只说事实，不带命令行的旗标**（挂单 `Q622` 那一族）：
+/// 「或者给 `--library-root`」是命令行自己的去处，由命令行补。
 #[must_use]
 pub fn missing_roots_message(missing: &[String]) -> String {
     format!(
-        "主库这几个根未连接：{}。\n\
-         搬 ROM 要真的去读它们。插上外置盘，或者给 `--library-root 根名=路径`。",
+        "主库这几个根未连接：{}。\n搬 ROM 要真的去读它们，插上外置盘再来。",
         missing.join("、")
     )
 }
@@ -551,22 +686,12 @@ pub fn refuse_target_in_library(
     let Some(overlap) = library_overlap(&roots, &target) else {
         return Ok(());
     };
-    let how = if overlap.around {
-        "把主库的根"
-    } else {
-        "落在主库的根"
+    // **话也只有一份**：与存下来那一刻拦下时同一句（[`TargetRefusal`] 的 `Display`，设计稿 `probePath`），
+    // 不在同步那一刻另说一句长话；连着路径说的那一句与命令行 `sublibrary set` 拦下时同一处（[`TargetRefusal::sentence`]）。
+    let refusal = TargetRefusal::InLibrary {
+        root: overlap.root,
+        place: path::display(&overlap.place),
+        around: overlap.around,
     };
-    let tail = if overlap.around {
-        "包在里面"
-    } else {
-        "里"
-    };
-    Err(format!(
-        "目标 {} {how}「{}」（{}）{tail}。主库只读：\n\
-         同步会往目标上写文件、删文件，绝不能指着那块盘。\n\
-         子库要导到别处去——一律走读卡器。",
-        path::display(&target),
-        overlap.root,
-        path::display(&overlap.place),
-    ))
+    Err(refusal.sentence(&target))
 }

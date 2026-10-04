@@ -280,8 +280,25 @@ pub struct ExportedFile {
 pub struct Conflict {
     /// 哪份文件。
     pub path: String,
-    /// 怎么回事。
+    /// 是哪一种。两种要人去看的东西不一样，下一步也不一样（[`ConflictKind`]）。
+    pub kind: ConflictKind,
+    /// 怎么回事：一句只说事实的话，**不带命令**（挂单 `Q643`）。界面原样画在那一份底下，
+    /// 命令行照 [`Self::kind`] 补它自己的去处。
     pub why: String,
+}
+
+/// 落点上那份为什么不能照写：**两种，各有各的下一步**。
+///
+/// 分成字段而不是写进那句话里，是因为「下一步」只有命令行说得出口：工具从没见过的那份，
+/// 命令行叫人先导入——**导入是一次性迁移，明文留在命令行**（ADR-0023），界面上没有它，
+/// 那半句画到屏上就是把人支回终端。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub enum ConflictKind {
+    /// 工具对齐过的那一份，后来有人在工具外面改过它。
+    #[default]
+    Edited,
+    /// 落点上那份工具**从没见过**——它可能就是维护者的原件。
+    Unseen,
 }
 
 /// 一次导出的报告。
@@ -544,10 +561,8 @@ impl ExportReport {
             for conflict in &self.conflicts {
                 let _ = writeln!(out, "  {}\n    {}", conflict.path, conflict.why);
             }
-            let _ = writeln!(
-                out,
-                "先把要留的内容 `romcat import` 进来，或者确认可以丢弃之后加 `--force`。"
-            );
+            // **下一步不在这儿说**（挂单 `Q643`）：先导入、或者确认之后照写，是命令行的去处（导入明文留在命令行，
+            // ADR-0023），由命令行照 [`ConflictKind`] 补一次；这里再说一遍，命令行就印两遍。
         }
         out
     }

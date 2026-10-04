@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use clap::{Args, Parser, Subcommand};
+use romcat_core::adapter::report::ConflictKind;
 use romcat_core::adapter::{self, Adapter, transfer};
 use romcat_core::capability::{Roster, today};
 use romcat_core::catalog::{Catalog, CatalogError, Roots};
@@ -832,15 +833,9 @@ struct FormatArgs {
 }
 
 impl FormatArgs {
+    /// 判据与没带时那句话都在核心库一处（`adapter::for_format`，ADR-0024）。
     fn load(&self) -> Result<Box<dyn Adapter>, String> {
-        adapter::find(&self.format).ok_or_else(|| {
-            let names: Vec<&str> = adapter::all().iter().map(|a| a.name()).collect();
-            format!(
-                "没有叫「{}」的适配器。眼下带的是：{}。",
-                self.format,
-                names.join("、")
-            )
-        })
+        adapter::for_format(&self.format).map_err(|refusal| refusal.to_string())
     }
 }
 
@@ -2971,6 +2966,24 @@ fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
             "有 {} 份没写——外面有人动过。**没有静默覆盖**，详见报告。",
             thousands(report.conflicts.len() as u64)
         );
+        // **下一步是命令行自己的去处**（挂单 `Q643`）：导入明文留在命令行（ADR-0023），核心那几句只说事实
+        // （界面原样画它们），工具从没见过的那一种交成字段，这儿照它补一次。
+        let unseen = report
+            .conflicts
+            .iter()
+            .filter(|conflict| conflict.kind == ConflictKind::Unseen)
+            .count();
+        let 原件 = if unseen > 0 {
+            format!(
+                "（其中 {} 份工具从没见过，可能就是维护者的原件；导进来原文会一字不差地留下）",
+                thousands(unseen as u64)
+            )
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "先把要留的内容 `romcat import` 进来{原件}，再导出；或者确认可以丢弃之后加 `--force`。"
+        );
         if !write_json(args.json.as_deref(), &report) {
             return ExitCode::FAILURE;
         }
@@ -4049,7 +4062,25 @@ fn run_triage_redo(args: &TriageRedoArgs) -> ExitCode {
             println!("再撤一次：`romcat triage undo --batch {batch}`。");
             ExitCode::SUCCESS
         }
-        Err(error) => fail(format!("放不回去：{error}")),
+        Err(error) => fail(format!("放不回去：{}", triage_refusal(&error))),
+    }
+}
+
+/// 撤批、放回被核心库拒下时印的那句话。
+///
+/// **核心库那句只说事实与去处的名字**（「先撤第 2 批」，挂单 `Q622`）——界面原样画它，屏上就不出现终端命令；
+/// 命令是命令行自己的去处，在这儿补。
+fn triage_refusal(error: &triage::TriageError) -> String {
+    use triage::TriageError;
+    match error {
+        TriageError::CoveredBy { by, .. } => {
+            format!("{error}\n撤它：`romcat triage undo --batch {by}`。")
+        }
+        TriageError::AlreadyUndone(batch) => {
+            format!("{error}\n放回去：`romcat triage redo --batch {batch}`。")
+        }
+        TriageError::NoBatch(_) => format!("{error}\n`romcat triage batches` 列得出有哪几批。"),
+        _ => error.to_string(),
     }
 }
 
@@ -4118,7 +4149,7 @@ fn run_triage_undo_batch(args: &TriageUndoArgs) -> ExitCode {
     }
     let account = match triage::undo_batch(&mut site.catalog, &mut site.store, batch) {
         Ok(account) => account,
-        Err(error) => return fail(format!("撤不掉：{error}")),
+        Err(error) => return fail(format!("撤不掉：{}", triage_refusal(&error))),
     };
     println!(
         "已撤 {} 条（其中 {} 条把它盖掉的那条旧裁决放了回去）。",
@@ -4335,7 +4366,7 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
     match sublibrary::target::vet(&catalog, &workspace, editing, &place) {
         Ok(Ok(_)) => {}
         Ok(Err(refusal)) => {
-            return fail(format!("目标 {} 不能用：{refusal}", path::display(&place)));
+            return fail(refusal.sentence(&place));
         }
         Err(error) => return fail(format!("中立库读不动：{error}")),
     }
@@ -4346,16 +4377,11 @@ fn run_sublibrary_set(args: &SubSetArgs) -> ExitCode {
              又挂在分解敏感的文件系统上，可能会打不开。"
         );
     }
+    // 这个格式这一版带没带、没带时说哪句，问核心库那一处（`adapter::for_format`，挂单 `Q797`）。
     let format = match &args.format {
-        Some(format) => match adapter::find(format) {
-            Some(adapter) => adapter.name().to_string(),
-            None => {
-                let names: Vec<&str> = adapter::all().iter().map(|a| a.name()).collect();
-                return fail(format!(
-                    "没有叫「{format}」的适配器。眼下带的是：{}。",
-                    names.join("、")
-                ));
-            }
+        Some(format) => match adapter::for_format(format) {
+            Ok(adapter) => adapter.name().to_string(),
+            Err(refusal) => return fail(refusal.to_string()),
         },
         None => existing
             .as_ref()
@@ -4714,6 +4740,12 @@ fn run_sublibrary_show(args: &SubShowArgs) -> ExitCode {
         let _ = stdout.write_all(text.as_bytes());
         let _ = stdout.flush();
     }
+    // 装不装得下算不出时，报告里那句是核心的话、只说事实；怎么办照原因的种类在这儿补（挂单 `Q851`）。
+    if let sublibrary::Fit::Unknown { why } = &report.fit
+        && let Some(hint) = unplanned_hint(&args.name, why)
+    {
+        eprintln!("{hint}");
+    }
     eprintln!(
         "算了 {:.1} 秒，一个字节都没读主库；目标设备只读地看了一眼。选中 {} 个变体、{}。",
         started.elapsed().as_secs_f64(),
@@ -4757,13 +4789,38 @@ fn prepare(
         // 就是干净的（整条只读）。把手在这儿只是白记几行进度——**界面那一侧才用得上它**。
         &romcat_core::task::Handle::new(),
     )
-    // 没人按停下，所以这儿只可能是「真出错了」那一支。**得摊开写**：`Cutoff` 没有
-    // `Display`，想拿那句话就得先说清自己收到的是哪一档——把「停了」折成一句错话
-    // 这件事，在源码上永远看得见（`task::Cutoff` 那一段注释）。
+    // 没人按停下，所以这儿只可能是「排不出」那一支。**得摊开写**：想拿那句话就得先说清自己收到的是
+    // 哪一档——把「停了」折成一句错话这件事，在源码上永远看得见（`task::Cutoff` 那一段注释）。
     .map_err(|why| match why {
-        romcat_core::task::Cutoff::Failed(said) => said,
-        romcat_core::task::Cutoff::Halted => romcat_core::task::Halted.to_string(),
+        sync::PlanCutoff::Unplanned(why) => unplanned_text(name, &why),
+        sync::PlanCutoff::Halted => romcat_core::task::Halted.to_string(),
     })
+}
+
+/// 排不出计划时印的那句话：**核心那句只说事实**（挂单 `Q851` `Q622`），命令是命令行自己的去处，
+/// 照原因的种类在这儿补——界面照同一个种类补屏上那一处。
+fn unplanned_text(name: &str, why: &sync::Unplanned) -> String {
+    match unplanned_hint(name, why) {
+        Some(hint) => format!("{why}\n{hint}"),
+        None => why.to_string(),
+    }
+}
+
+/// [`unplanned_text`] 补的那半句；这一种没什么可补时是 `None`。
+fn unplanned_hint(name: &str, why: &sync::Unplanned) -> Option<String> {
+    match why {
+        sync::Unplanned::NoSublibrary { .. } => Some(format!(
+            "建一个：`romcat sublibrary set {name} --target <目标设备上的目录>`"
+        )),
+        sync::Unplanned::Target(sync::ObserveError::Absent { .. }) => Some(format!(
+            "插上读卡器，或者 `romcat sublibrary set {name} --target <目标设备上的目录>` 改一下目标路径。"
+        )),
+        sync::Unplanned::NoAdapter(_) => Some(format!(
+            "换一个：`romcat sublibrary set {name} --format <格式>`（`romcat adapters` 列得出有哪些）。"
+        )),
+        sync::Unplanned::Target(sync::ObserveError::Unreadable { .. })
+        | sync::Unplanned::Failed(_) => None,
+    }
 }
 
 /// 排一次同步计划，也就是**差量预览**。
@@ -4817,9 +4874,29 @@ fn run_sublibrary_plan(args: &SubPlanArgs) -> ExitCode {
 
 /// 折期望状态时那几件要说出口的怪事。**`plan` 与 `sync` 印同一份**，
 /// 而且**与界面印同一份**——那几句话在核心里（[`sync::Prepared::concerns`]）。
+///
+/// 核心那几句只说事实与去处的名字（挂单 `Q622` 那一族）；命令是命令行自己的去处，照种类在这儿补。
 fn warn_about(ready: &sync::Prepared) {
+    let name = &ready.sublibrary.name;
     for concern in ready.concerns() {
         eprintln!("{concern}");
+        let hint = match &concern {
+            sync::Concern::BrokenRules(_) => {
+                Some(format!("`romcat sublibrary show {name}` 看是哪几条。"))
+            }
+            sync::Concern::MediaNotInPool(_) => Some("命令：`romcat scrape`。".to_string()),
+            sync::Concern::MissingCapability(_) => Some(format!(
+                "`romcat capability` 看还有哪些，`romcat sublibrary set {name} --capability <名字>` 重挑一份。"
+            )),
+            sync::Concern::StaleClaims(_) => Some(format!(
+                "`romcat capability {}` 看是哪几条。",
+                ready.sublibrary.capability.as_deref().unwrap_or("<档案名>")
+            )),
+            sync::Concern::MediaUnknownKind(_) | sync::Concern::MediaCrowdedOut(_) => None,
+        };
+        if let Some(hint) = hint {
+            eprintln!("{hint}");
+        }
     }
 }
 
@@ -4903,7 +4980,11 @@ fn run_sublibrary_sync(args: &SubSyncArgs, cancel: &CancelToken) -> ExitCode {
                 // 只看这一趟真要搬的那几个根在不在位——**别的盘挂没挂上与这趟无关**。
                 let missing = sync::prepare::missing_roots(&ready, &roots);
                 if !missing.is_empty() {
-                    return fail(sync::prepare::missing_roots_message(&missing));
+                    // 核心那句只说事实（界面也印它）；`--library-root` 是命令行自己的旗标，在这儿补。
+                    return fail(format!(
+                        "{}\n盘挪了地方的话，给 `--library-root 根名=路径`。",
+                        sync::prepare::missing_roots_message(&missing)
+                    ));
                 }
                 Some(roots)
             }

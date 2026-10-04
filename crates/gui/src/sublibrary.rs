@@ -97,6 +97,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use egui::{Align, Layout};
+use romcat_core::adapter::{NoAdapter, for_format};
 use romcat_core::capability::{
     DEFAULT_PROFILE, Entry, Override, Profile, Recipe, RejectReason, Roster,
 };
@@ -113,7 +114,7 @@ use romcat_core::sublibrary::{
     BrokenRule, Exception, ExceptionDetail, ExceptionRow, Fit, Gauge, Room, Rule, StoredRule,
     Sublibrary, rule,
 };
-use romcat_core::sync::{self, Act, Outcome, Prepared, SurpriseKind};
+use romcat_core::sync::{self, Act, ObserveError, Outcome, Prepared, SurpriseKind, Unplanned};
 use romcat_core::task::{Cutoff, Ending, Finished, Handle};
 
 use crate::clock::{Clock, RecordClock};
@@ -561,8 +562,8 @@ pub struct Screen {
     profiled: BTreeMap<String, Profiled>,
     /// 能力档案名册读不动时那句话。**那时卡头不编一份档案出来。**
     roster_error: Option<String>,
-    /// 上一回看的时候，**目标不在位**的那几台（[`target_absent`] 那一个口径）。卡头那枚标签与「装不装得下
-    /// 算不出」那一行照它说话。**不在画帧里查盘**：随 [`Self::reload`] 与任务台交回一趟活时各查一遍
+    /// 上一回看的时候，**目标未连接**的那几台（[`absent_path`]：问的是核心库那一处，`sync::observe::reach`）。
+    /// 卡头那枚标签与「装不装得下算不出」那一行照它说话。**不在画帧里查盘**：随 [`Self::reload`] 与任务台交回一趟活时各查一遍
     /// （[`Self::look_at_targets`]），于是插上卡之后要等下一回才换过来（挂单 `Q855`）。
     absent: std::collections::BTreeSet<String>,
     /// 眼下摊开的是哪一张卡。
@@ -868,15 +869,15 @@ impl Screen {
         }
     }
 
-    /// 查一眼每台设备的目标**此刻在不在位**，记进 [`Self::absent`]。
+    /// 问核心库每台设备的目标**此刻在不在位**，记进 [`Self::absent`]。
     ///
-    /// 口径与排差量预览、同步按下去那一刻拦的是同一个（[`target_absent`]：查一眼那个目录有没有），
+    /// 口径与排差量预览、同步按下去那一刻拦的是同一个（[`absent_refusal`]，判据在核心库 `sync::observe::reach`），
     /// 查的是子库自己那条读盘路径（`Sublibrary::read_path`，ADR-0020）。
     fn look_at_targets(&mut self) {
         self.absent = self
             .list
             .iter()
-            .filter(|sublibrary| target_absent(&sublibrary.read_path()).is_some())
+            .filter(|sublibrary| absent_path(&sublibrary.read_path()).is_some())
             .map(|sublibrary| sublibrary.name.clone())
             .collect();
     }
@@ -1331,17 +1332,24 @@ impl Screen {
         // **卡不在位是按下去之前就判得出的**（票 `gui-looks-like-the-design/07`）：不排，只在屏上
         // 说为什么不行、去哪儿办。排上去的话那一趟在「看一眼目标」那一下撞上、记一条失败——任务
         // 历史里就多一条压根没开跑的「失败」。查的是子库自己那条读盘路径（`Sublibrary::read_path`，
-        // ADR-0020），与那一趟看的是同一个目录。
+        // ADR-0020），与那一趟看的是同一个目录；在不在位问核心库（[`absent_refusal`]）。
         //
-        // **记着的前端格式这一版没有适配器，不在这里拦**：找不到时该说哪句话是核心库的事，而核心库
-        // 对子库没有对外的那一问（`ExportSetup::adapter` 的文档：界面那一层不自己去
-        // `adapter::find`）。它照旧排上去，在那一趟里记失败（挂单 `Q797`）。
-        if let Some(why) = self
+        // **记着的前端格式这一版没有适配器，同样按下去之前就判得出**（挂单 `Q797`）：问核心库子库那一问
+        // （`Sublibrary::adapter`，界面不自己去 `adapter::find`），没有就在屏上说、不排——任务台上没有新一趟，
+        // 历史里不多一条失败。核心那句只说事实，屏上的去处（卡上的「目标设置…」）由这一层补。
+        let refusal = self
             .list
             .iter()
             .find(|sublibrary| sublibrary.name == name)
-            .and_then(|sublibrary| target_absent(&sublibrary.read_path()))
-        {
+            .and_then(|sublibrary| {
+                absent_refusal(&sublibrary.read_path()).or_else(|| {
+                    sublibrary
+                        .adapter()
+                        .err()
+                        .map(|refusal| no_adapter_line(&refusal))
+                })
+            });
+        if let Some(why) = refusal {
             self.error = Some(why);
             return;
         }
@@ -1365,6 +1373,7 @@ impl Screen {
                     task,
                 )
                 .map(|prepared| Product::Preview(Box::new(prepared)))
+                .map_err(Cutoff::from)
             }),
             // **只活在内存里的库分不出第二份连接**（合成数据走这条），那是意料之中的：
             // 这一趟就地跑完，几毫秒的事。
@@ -1380,6 +1389,7 @@ impl Screen {
                     task,
                 )
                 .map(|prepared| Product::Preview(Box::new(prepared)))
+                .map_err(Cutoff::from)
             }),
             // 别的原因是**意外**——开这份库的时候它还好好的，文件却没了、或者结构版本
             // 对不上。这时**直说，不要退到画帧这条线程上偷偷跑一趟**：那既会僵住窗口，
@@ -1707,7 +1717,7 @@ impl Screen {
         // 指着的是本机的盘——一份子库会被悄悄写进本机一个新建的空目录里。这是按下去之前就判得出
         // 的，只在屏上说（票 `gui-looks-like-the-design/07`）。**写到一半写不进**（卡满了、中途
         // 被拔）是跑起来才撞上的，照旧记失败（[`run_sync`]）。
-        if let Some(why) = target_absent(&prepared.root) {
+        if let Some(why) = absent_refusal(&prepared.root) {
             self.error = Some(why);
             return;
         }
@@ -2373,11 +2383,14 @@ impl Screen {
                     "未连接：{}。插上读卡器，或者按卡上「目标设置…」换一个目录。",
                     sublibrary.target
                 );
+                // 算过容量、而算不出的原因**不是**未连接（中立库读不动……）：那句也摆进来。是未连接的话上面那句
+                // 已经说全了——原因的种类由核心库交出来，这一层照种类挑话（挂单 `Q851`）。
                 if let Some(Fit::Unknown { why }) =
                     self.evaluated.get(name).map(|report| &report.fit)
+                    && why.absent().is_none()
                 {
                     悬停.push_str("\n\n");
-                    悬停.push_str(why);
+                    悬停.push_str(&unknown_line(why));
                 }
                 look::help(ui, "请先连接设备").on_hover_text(悬停);
             } else if matches!(账, Some((0, _))) {
@@ -2953,14 +2966,15 @@ impl Screen {
         let excluded = room.as_ref().and_then(|room| trim_ui(ui, room));
         // 算过容量却算不出装不装得下：**不给数**，不拿选中容量去冒充「装得下」。
         //
-        // **卡上说这一层自己的话，核心那句原话放进悬停**：原话带着系统错误的原文（各平台不一样）与
-        // 命令行命令，屏上不该出现（票 `gui-looks-like-the-design/03`；挂单 `Q851`）。卡不在位那一种不在这儿说：
-        // 卡底按钮旁边照稿写「请先连接设备」，路径、怎么办与这句原话都在它的悬停里（[`Self::actions_ui`]）。
+        // **卡上说这一层自己的话，为什么放进悬停**：悬停里那句照核心库交出的原因种类挑（[`unknown_line`]，
+        // 挂单 `Q851`）——核心那句只说事实、不带命令，屏上要指的那一处由这一层补。卡不在位那一种不在这儿说：
+        // 卡底按钮旁边照稿写「请先连接设备」，路径与怎么办都在它的悬停里（[`Self::actions_ui`]）。
         if room.is_none()
             && !self.absent.contains(name)
             && let Some(Fit::Unknown { why }) = self.evaluated.get(name).map(|report| &report.fit)
         {
-            look::help(ui, "装不装得下算不出（指针停在这儿看为什么）").on_hover_text(why.as_str());
+            look::help(ui, "装不装得下算不出（指针停在这儿看为什么）")
+                .on_hover_text(unknown_line(why));
         }
         excluded
     }
@@ -3705,7 +3719,7 @@ fn list_path(ui: &mut egui::Ui, path: &str, landing: Option<&str>) -> egui::Resp
 fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
     let plan = &prepared.plan;
     for concern in prepared.concerns() {
-        ui.colored_label(ui.visuals().warn_fg_color, concern);
+        ui.colored_label(ui.visuals().warn_fg_color, concern_line(&concern));
     }
     if !plan.unsupported.is_empty() {
         // **照搬，但点名说出口**（ADR-0017：矩阵错了比不转换更糟）。不说的话，
@@ -3813,22 +3827,25 @@ impl Screen {
         } else {
             self.form.format.trim().to_string()
         };
-        let landing = romcat_core::adapter::find(&format_name).and_then(|adapter| match &which {
-            TargetDialog::Of(name) => {
-                let overridden = profile.as_ref().map_or_else(Profile::unclaimed, |profile| {
-                    profile.with_overrides(&self.form.overrides)
-                });
-                self.footprint
-                    .as_ref()
-                    .filter(|(of, _)| of == name)
-                    .and_then(|(_, footprint)| footprint.landing(&overridden, adapter.as_ref()))
-            }
-            TargetDialog::New => Some(romcat_core::sync::Landing::example(
-                adapter.as_ref(),
-                EXAMPLE_DIRECTORY,
-                EXAMPLE_FILE,
-            )),
-        });
+        // 前端格式对应哪个适配器问核心库那一处（`adapter::for_format`，`Sublibrary::adapter` 也走它；挂单 `Q797`）。
+        let landing = for_format(&format_name)
+            .ok()
+            .and_then(|adapter| match &which {
+                TargetDialog::Of(name) => {
+                    let overridden = profile.as_ref().map_or_else(Profile::unclaimed, |profile| {
+                        profile.with_overrides(&self.form.overrides)
+                    });
+                    self.footprint
+                        .as_ref()
+                        .filter(|(of, _)| of == name)
+                        .and_then(|(_, footprint)| footprint.landing(&overridden, adapter.as_ref()))
+                }
+                TargetDialog::New => Some(romcat_core::sync::Landing::example(
+                    adapter.as_ref(),
+                    EXAMPLE_DIRECTORY,
+                    EXAMPLE_FILE,
+                )),
+            });
         // 前端格式那句说明拿哪个平台目录举例：改一台时是它头一个变体真实落在的目录，读选择集之前与新建时是库里头一个有平台的
         // 变体住的目录（`Catalog::sample_platform_directory`，弹层打开时读一次）。都说不出就不举例。
         if self.sample_directory.is_none() {
@@ -5816,7 +5833,7 @@ fn sync_receipt(name: &str, 收场: &Ending<()>, outcome: Option<&Outcome>) -> (
     (line, !outcome.clean())
 }
 
-/// Pegasus 适配器的标识（`romcat_core::adapter::find` 认的那个名字）。
+/// Pegasus 适配器的标识（`adapter::for_format` 认的那个名字）。
 const PEGASUS: &str = "Pegasus";
 
 /// ES 家族那个适配器的标识。**界面上写「ES-DE」**（[`format_label`]），库里存的、命令行认的照旧是它。
@@ -5842,8 +5859,10 @@ fn format_help(adapter: &str, example_directory: Option<&str>) -> String {
     } else {
         adapter.trim()
     };
-    let Some(found) = romcat_core::adapter::find(name) else {
-        return format!("这一版没带「{name}」这个前端格式。");
+    // 这一版带没带这个格式、没带时说哪句，都问核心库那一处（`adapter::for_format`，挂单 `Q797`）。
+    let found = match for_format(name) {
+        Ok(found) => found,
+        Err(refusal) => return refusal.to_string(),
     };
     // 举例的那一份由适配器按那个平台目录折出来（`Adapter::metadata_path`）；说不出平台目录时只说文件名。
     let example = example_directory.map(|directory| found.metadata_path(directory));
@@ -6154,22 +6173,62 @@ fn convert_text(entry: Option<&Entry>) -> &'static str {
     }
 }
 
-/// 目标设备那个目录不在时那句话：为什么不行、去哪儿办；在就是 `None`。
+/// 目标设备那个目录**未连接**时屏上那句话：为什么不行、去哪儿办；在位就是 `None`。
 ///
-/// **不是判断，是查一眼有没有**（ADR-0005 修订段「原料还没备齐」：盘上缺一样东西）。「在不在」
-/// 照核心那一趟看目标时的口径（`sync::observe` 化不开这条路径就报目标不在位），话却是这一层
-/// 自己说的：它要指向屏上的哪一处——卡上的「目标设置…」——而那是核心库不该知道的。
+/// **在不在位由核心库一处判**（`sync::observe::reach`，与排计划「看一眼目标」那一步同一个口径；挂单 `Q851`、
+/// ADR-0024）——这一层不另查一眼 `exists()`。**话是这一层自己的**：核心那句只说事实，种类交成结构化的
+/// （[`ObserveError::Absent`]）；屏上要指向的那一处——卡上的「目标设置…」——是核心库不该知道的（ADR-0005 修订段）。
 /// 排差量预览与同步两颗按钮说的是同一句。
 ///
-/// **在、却不是目录**（那条路径上是一份文件）不归这里：那不是缺一样东西，是一件该去查的事
-/// ——那一趟在「看一眼目标」真去列它时撞上（`sync::observe` 报「列不开」），照实记失败。
-fn target_absent(root: &std::path::Path) -> Option<String> {
-    (!root.exists()).then(|| {
-        format!(
-            "未连接：{}。插上读卡器再按；目标路径不对的话，按卡上「目标设置…」改。",
-            romcat_core::path::display(root)
-        )
-    })
+/// **在、却列不开**（那条路径上是一份文件、没有权限）不归这里：那不是缺一样东西，是一件该去查的事
+/// ——那一趟在「看一眼目标」真去列它时撞上，照实记失败。
+fn absent_refusal(root: &std::path::Path) -> Option<String> {
+    absent_path(root).map(|path| absent_line(&path))
+}
+
+/// 问核心库这条读盘路径此刻**未连接**吗（`sync::observe::reach`）：未连接是那条路径，在位、或者在却列不开是 `None`。
+fn absent_path(root: &std::path::Path) -> Option<String> {
+    match sync::observe::reach(&romcat_core::fs::RealFs, root) {
+        Err(ObserveError::Absent { path }) => Some(path),
+        Ok(()) | Err(ObserveError::Unreadable { .. }) => None,
+    }
+}
+
+/// 未连接那一种屏上说的话：路径、插上读卡器、目标路径不对去卡上「目标设置…」改。
+fn absent_line(path: &str) -> String {
+    format!("未连接：{path}。插上读卡器再按；目标路径不对的话，按卡上「目标设置…」改。")
+}
+
+/// 差量预览底下那一件怪事屏上说的话：**核心那句原样**（只说事实与去处的名字，挂单 `Q622` 那一族），
+/// 照种类补屏上的去处——那是核心库不该知道的（ADR-0005 修订段）。命令行在它那一层补命令。
+fn concern_line(concern: &sync::Concern) -> String {
+    let place = match concern {
+        sync::Concern::BrokenRules(_) => Some("卡上「选择集」那一块里标红的就是。"),
+        sync::Concern::MissingCapability(_) => Some("按卡上「目标设置…」重挑一份。"),
+        sync::Concern::StaleClaims(_) => Some("按卡上「目标设置…」，平台表里标着「陈旧」的就是。"),
+        sync::Concern::MediaNotInPool(_)
+        | sync::Concern::MediaUnknownKind(_)
+        | sync::Concern::MediaCrowdedOut(_) => None,
+    };
+    match place {
+        Some(place) => format!("{concern}\n{place}"),
+        None => concern.to_string(),
+    }
+}
+
+/// 前端格式这一版没带适配器时屏上说的话：核心那句（是哪个格式、眼下带的是哪几个），补上屏上的去处。
+fn no_adapter_line(refusal: &NoAdapter) -> String {
+    format!("{refusal}按卡上「目标设置…」换一个前端格式。")
+}
+
+/// 「装不装得下」算不出时屏上说的为什么：**照核心库交出的原因种类挑**（挂单 `Q851`），不再自己查一眼在不在位。
+/// 未连接、前端格式没有适配器说这一层的话（指到卡上的「目标设置…」）；别的种类核心那句只说事实、不带命令，原样摆。
+fn unknown_line(why: &Unplanned) -> String {
+    match (why.absent(), why) {
+        (Some(path), _) => absent_line(path),
+        (None, Unplanned::NoAdapter(refusal)) => no_adapter_line(refusal),
+        (None, _) => why.to_string(),
+    }
 }
 
 /// 任务台上那趟同步干的活：把计划落到目标上。

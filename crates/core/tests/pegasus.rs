@@ -1253,6 +1253,11 @@ fn 外部改动不被静默覆盖() {
     let report = 导出(&mut 现场, false);
     assert_eq!(report.conflicts.len(), 1, "该检测到外部改动：{report:#?}");
     assert_eq!(
+        report.conflicts[0].kind,
+        romcat_core::adapter::report::ConflictKind::Edited,
+        "对齐过、后来在外面被改过的那一种：{report:#?}"
+    );
+    assert_eq!(
         fs::read_to_string(&target).expect("读得出"),
         text,
         "**没有静默覆盖**：手改的那一段还在"
@@ -1275,6 +1280,19 @@ fn 落点上有一份从没见过的文件时先停下来() {
         report.conflicts[0].why.contains("从没见过"),
         "{:#?}",
         report.conflicts
+    );
+    // **「先导入」那半句只由命令行说**（ADR-0023：导入是一次性迁移，明文留在命令行；挂单 `Q643`）：
+    // 核心那句只说事实，是哪一种交成字段，命令行照它补那条命令。
+    assert_eq!(
+        report.conflicts[0].kind,
+        romcat_core::adapter::report::ConflictKind::Unseen,
+        "{:#?}",
+        report.conflicts
+    );
+    assert!(
+        !report.conflicts[0].why.contains("romcat"),
+        "核心那句带着命令行命令：{}",
+        report.conflicts[0].why
     );
     assert_eq!(
         fs::read_to_string(现场.out().join("FC.metadata.pegasus.txt")).expect("读得出"),

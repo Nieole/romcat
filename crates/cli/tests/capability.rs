@@ -314,6 +314,11 @@ fn 子库记着的档案在名册里没有时不静默当没事_明说退回了�
     let text = 出来的话(&out);
     assert!(text.contains("找不到"), "{text}");
     assert!(text.contains("别以为它替你查过了"), "{text}");
+    // 核心那句只说事实；重挑一份的命令由命令行照种类补（挂单 `Q622` 那一族）。
+    assert!(
+        text.contains("romcat sublibrary set 掌机 --capability"),
+        "命令行该补上重挑一份的命令：{text}"
+    );
     // ⭐ **预览头上印的必须是真正生效的那一份**，不是子库上记着的那个名字。
     // 印着 `retroarch-exfat` 而实际一条都没查，正是「用户以为工具已经处理妥当」。
     assert!(text.contains("能力档案        不作声称"), "{text}");

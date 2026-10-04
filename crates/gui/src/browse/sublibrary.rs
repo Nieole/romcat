@@ -15,13 +15,13 @@
 //!
 //! ## 算不出就写算不出
 //!
-//! 那一趟不便宜（`facts()` 走一遍全库，真机 343 毫秒），**摆不上画帧线**——
+//! 那一趟不便宜（`facts()` 走一遍全库，真机上三百多毫秒，挂账 D156），**摆不上画帧线**——
 //! 所以它排任务台，算着的时候屏上写「正在算…」（[`Estimate::Working`]）。
 //! 卡不在手边那一档核心库交回 `Fit::Unknown`，屏上照实写**「算不出」而不是 0**
 //! （挂单 `Q591`、`Q1103` 同一条规矩）。
 
 use romcat_core::report::{human_bytes, thousands};
-use romcat_core::sublibrary::{Addition, Rule};
+use romcat_core::sublibrary::{Addition, Fit, Rule};
 
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
@@ -42,7 +42,7 @@ pub struct Device {
     ///
     /// 判据 `Rule::same_one_in`（比树不比原文，`Q1180`），**由外头一次查库答**
     /// ——它只要读一遍这台的规则，不用折事实，所以不跟预估那一趟排队：
-    /// 「按不动」的理由不该等一趟 343 毫秒的活。
+    /// 「按不动」的理由不该等一趟三百多毫秒的活。
     pub duplicate: Option<i64>,
     /// 容量上限；没设上限就是 `None`。
     pub capacity: Option<u64>,
@@ -303,7 +303,7 @@ impl AddTo {
                     );
                 }
                 // **这一条不等预估那一趟**：判重只要读一遍这台的规则（`Q1180`），
-                // 而预估要折一遍事实（343 毫秒）。让「按不动」等那么久，
+                // 而预估要折一遍事实（真机上三百多毫秒）。让「按不动」等那么久，
                 // 人会在它还亮着的时候按下去。
                 if self
                     .chosen(facts)
@@ -474,8 +474,8 @@ impl AddTo {
                             format!("新增变体 · {}", human_bytes(账.added_bytes)),
                         ),
                         (thousands(账.overlap), 重复那句.to_string()),
-                        match 账.after.known() {
-                            Some(room) => (
+                        match &账.after {
+                            Fit::Known(room) => (
                                 human_bytes(room.after_bytes),
                                 room.capacity.map_or_else(
                                     || "加入后 / 不限".to_string(),
@@ -484,7 +484,13 @@ impl AddTo {
                             ),
                             // **`Fit::Unknown` 是答案的一种，不是零**（`Q591`）：
                             // 卡不在手边时照实写，不拿选中容量去冒充「加入后多大」。
-                            None => ("算不出".to_string(), "加入后 · 目标不在位".to_string()),
+                            // **为什么算不出照核心交出的原因种类说**（挂单 `Q851`）：别的种类不是「目标不在位」。
+                            Fit::Unknown { why } if why.absent().is_some() => {
+                                ("算不出".to_string(), "加入后 · 目标不在位".to_string())
+                            }
+                            Fit::Unknown { .. } => {
+                                ("算不出".to_string(), "加入后 · 排不出计划".to_string())
+                            }
                         },
                     ],
                 );

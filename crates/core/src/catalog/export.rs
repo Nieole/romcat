@@ -106,14 +106,9 @@ pub struct ExportSetup {
 /// ——散一份判断出去，命令行与界面迟早会对同一个字给出两种答复。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ExportSetupError {
-    /// 没有这个名字的适配器。
-    #[error("没有叫「{given}」的前端格式。眼下带的是：{}。", known.join("、"))]
-    NoSuchFormat {
-        /// 人给的那个名字。
-        given: String,
-        /// 眼下带的那几个。
-        known: Vec<String>,
-    },
+    /// 这一版没带这个前端格式的适配器——判据与那一句话都在 [`adapter::for_format`] 一处（ADR-0024）。
+    #[error(transparent)]
+    NoSuchFormat(#[from] adapter::NoAdapter),
     /// 目录那一格是空的。
     #[error("还没说导到哪个目录。那个目录是主库根的替身——写进主库根，前端直接就读得到。")]
     NoOutDir,
@@ -130,15 +125,7 @@ impl ExportSetup {
     /// # Errors
     /// 没有这个格式、或者目录那一格是空的时返回 [`ExportSetupError`]。
     pub fn check(format: &str, out: &str) -> Result<Self, ExportSetupError> {
-        let Some(adapter) = adapter::find(format.trim()) else {
-            return Err(ExportSetupError::NoSuchFormat {
-                given: format.trim().to_string(),
-                known: adapter::names()
-                    .into_iter()
-                    .map(ToString::to_string)
-                    .collect(),
-            });
-        };
+        let adapter = adapter::for_format(format)?;
         let out = out.trim();
         if out.is_empty() {
             return Err(ExportSetupError::NoOutDir);
@@ -159,13 +146,7 @@ impl ExportSetup {
     /// # Errors
     /// 眼下没有这个格式的适配器时返回 [`ExportSetupError::NoSuchFormat`]。
     pub fn adapter(&self) -> Result<Box<dyn adapter::Adapter>, ExportSetupError> {
-        adapter::find(&self.format).ok_or_else(|| ExportSetupError::NoSuchFormat {
-            given: self.format.clone(),
-            known: adapter::names()
-                .into_iter()
-                .map(ToString::to_string)
-                .collect(),
-        })
+        Ok(adapter::for_format(&self.format)?)
     }
 }
 
