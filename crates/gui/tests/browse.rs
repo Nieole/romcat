@@ -3549,26 +3549,9 @@ fn 正好这一段的外框(
     output: &egui::FullOutput,
     那一段: &str,
 ) -> Option<(egui::Rect, egui::Rect)> {
-    fn 找(
-        shape: &egui::epaint::Shape,
-        clip: egui::Rect,
-        那一段: &str,
-    ) -> Option<(egui::Rect, egui::Rect)> {
-        match shape {
-            egui::epaint::Shape::Text(text) if text.galley.text() == 那一段 => Some((
-                egui::Rect::from_min_size(text.pos, text.galley.size()),
-                clip,
-            )),
-            egui::epaint::Shape::Vec(shapes) => {
-                shapes.iter().find_map(|one| 找(one, clip, 那一段))
-            }
-            _ => None,
-        }
-    }
-    output
-        .shapes
-        .iter()
-        .find_map(|clipped| 找(&clipped.shape, clipped.clip_rect, 那一段))
+    shared::画着的每一处连裁剪(output, &|text| text == 那一段)
+        .first()
+        .copied()
 }
 
 /// 两个**认不出作品**的变体各自成一行：一个路径长到一格画不下，一个短得一眼画得完。
@@ -4945,7 +4928,9 @@ fn 收起后的窄条与筛空时的空态印的是同一个条件数() {
 ///
 /// 于是这儿把窗口放高。**这条测试要钉的是屏上说了什么，不是默认窗口恰好差几个像素**
 /// ——拿 800 去钉，等于让下一个往左栏加东西的人替这条 12 票的测试背账。
-/// 「默认窗口下那句警告在不在折线以下」是另一件事，记在挂单 `Q1104` 里。
+/// 「默认窗口下那句警告在不在折线以下」是另一件事（挂单 `Q1104`）：票 `gui-draws-the-rest-of-the-design/07`
+/// 把提示挪到了出问题的那一条子句底下，`筛不出东西的提示贴在那一条子句底下_默认窗口不滚就整句看得见` 在默认窗口上钉着；
+/// 三条子句那一条照旧用这一帧——第三条子句连同它那句提示本来就在折线以下，那是滚一下的事。
 fn 够高的一帧() -> egui::RawInput {
     egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -4983,16 +4968,24 @@ fn 筛不出东西的子句屏上逐条点名但不拦着() {
     跑(&ctx, &mut app, 2);
     let 屏上 = shared::画出来的字(&headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui)));
 
-    // 一、三条都点到名，而且数目写出来。
-    assert!(
-        屏上.contains("有 3 条筛不出东西："),
-        "屏上没说有几条筛不出东西：\n{屏上}"
-    );
-    for 该说的 in ["没这个平台", "还没建的", "评分"] {
-        assert!(
-            屏上.contains(该说的),
-            "「{该说的}」那一条没被点名：\n{屏上}"
-        );
+    // 一、三条各有一句、都说出是哪一条为什么筛不出东西。**断的是核心库交回来的那一句**，不是
+    // 「没这个平台」那几个字——那几个字在值那一格与底下那行规则原文里本来就有，提示一句不印也照样绿。
+    // 贴在哪一条底下，由 `筛不出东西的提示贴在那一条子句底下_默认窗口不滚就整句看得见` 钉着（票
+    // `gui-draws-the-rest-of-the-design/07` 拿掉了框底那句「有 N 条筛不出东西：」的汇总）。
+    {
+        use romcat_core::sublibrary::{Dimension, ThinClause};
+        for 那一句 in [
+            ThinClause::UnknownPlatform("没这个平台".to_string()),
+            ThinClause::NoCollection("还没建的".to_string()),
+            ThinClause::NoSource(Dimension::Rating),
+        ]
+        .map(|thin| thin.advice())
+        {
+            assert!(
+                屏上.contains(&那一句),
+                "这一条没被点名：「{那一句}」\n{屏上}"
+            );
+        }
     }
 
     // 二、**一条都没被拦**：三条照样进了规则，屏上那行规则原文一字不少。
@@ -5010,6 +5003,70 @@ fn 筛不出东西的子句屏上逐条点名但不拦着() {
     assert!(
         !屏上.contains("还有 1 条没生效") && !屏上.contains("还有 3 条没生效"),
         "把「筛不出东西」说成了「没生效」，两件事混了：\n{屏上}"
+    );
+}
+
+/// **筛不出东西的那一条，提示就贴在它自己底下，默认窗口里不滚就整句看得见**
+/// （票 `gui-draws-the-rest-of-the-design/07`，收挂单 `Q1104`：拿主意的人裁「提示贴着条件组框里出问题的那一条子句」）。
+///
+/// 从前那几句汇总在条件组框最底下（「有 N 条筛不出东西：」再逐条列），默认 1280×800 的窗口里正好落在折线以下
+/// ——[`够高的一帧`] 那段文档记着那笔账。照稿（`prototype.html` 的 `clauseHTML`：`.tnote` 是那一条子句 `.tc` 里的最后一格）
+/// 它住在出问题的那一条底下。
+///
+/// 两件事各在一帧上断：
+///
+/// 1. **默认那扇窗**（[`headless::input`]）：提示整句落在左栏滚动区露出来的那一截里，不是只露半截；
+/// 2. **够高的一帧**：提示夹在**它那一条**与**下一条**之间——出问题的是头一条、后面还跟着一条筛得出东西的，
+///    汇总摆在框底下的那种实现在这儿当场红（它在第二条底下）。
+#[test]
+fn 筛不出东西的提示贴在那一条子句底下_默认窗口不滚就整句看得见() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-筛不出东西-贴着子句"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    // 头一条筛不出东西（库里没有这个合集），第二条筛得出（简介那一维照常有源）。
+    let rule =
+        romcat_core::sublibrary::Rule::parse("合集=还没建的 且 简介~勇者冒险").expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule));
+    跑(&ctx, &mut app, 2);
+    // **那句话由核心库出**（`sublibrary::thin_clause`），界面照印——测试拿核心库那一句去找。
+    let 提示 = romcat_core::sublibrary::ThinClause::NoCollection("还没建的".to_string()).advice();
+
+    // 一、默认那扇窗：整句在左栏露出来的那一截里。
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 画在 = shared::画着的每一处连裁剪(&帧, &|text| text.contains(提示.as_str()));
+    assert_eq!(
+        画在.len(),
+        1,
+        "默认窗口里那句提示该画一处，画了 {} 处（一处都没有就是落在折线以下）：\n{}",
+        画在.len(),
+        画出来的字(&帧),
+    );
+    let (提示框, 露出来的) = 画在[0];
+    assert!(
+        露出来的.contains_rect(提示框),
+        "那句提示只露出半截：画在 {提示框:?}，左栏露出来的只有 {露出来的:?}"
+    );
+
+    // 二、够高的一帧：提示夹在它那一条与下一条之间。
+    let 帧 = headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui));
+    let 值框 = |值: &str| -> egui::Rect {
+        let 几处 = shared::画着的每一处(&帧, &|text| text == 值);
+        assert_eq!(几处.len(), 1, "值那一格「{值}」该画一处：{几处:?}");
+        几处[0]
+    };
+    let (头一条, 下一条) = (值框("还没建的"), 值框("勇者冒险"));
+    let 提示框 = shared::画着的每一处(&帧, &|text| text.contains(提示.as_str()))
+        .first()
+        .copied()
+        .expect("够高的一帧里那句提示该画出来");
+    assert!(
+        提示框.min.y >= 头一条.max.y && 提示框.max.y <= 下一条.min.y,
+        "那句提示没贴在它那一条底下：头一条的值画在 {头一条:?}，提示画在 {提示框:?}，下一条的值画在 {下一条:?}"
     );
 }
 
@@ -5642,6 +5699,14 @@ fn 加入合集那一层建得出新合集_名字写不得时加不进() {
         屏上.contains("只钉得住本机路径"),
         "没说清无判据那一档会怎样：\n{屏上}"
     );
+    // **名字还空着，「加入」为什么按不动，屏上常驻着说**（ADR-0005 再修订：画灰的条件之一是理由常驻在屏上，
+    // 不只挂在那颗按不动的按钮的悬停里；票 `gui-draws-the-rest-of-the-design/07`，收挂单 `Q798`）。
+    // 那一句与排活入口拒下时说的是同一句（`合集名空着直接调排活入口_不排上任务台_屏上说为什么`）。
+    let 空名的理由 = romcat_core::collection::BadName::Empty.advice();
+    assert!(
+        屏上.contains(&空名的理由),
+        "名字空着，屏上没常驻「{空名的理由}」：\n{屏上}"
+    );
 
     // 二、**名字写不得时「加入」按不动，而且屏上说得出为什么**（ADR-0005）。
     //
@@ -5689,7 +5754,7 @@ fn 加入合集那一层建得出新合集_名字写不得时加不进() {
     );
     let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
     assert!(
-        !屏上.contains("名称里不能有逗号"),
+        !屏上.contains("名称里不能有逗号") && !屏上.contains(&空名的理由),
         "名字改好了那句错还挂着：\n{屏上}"
     );
 
@@ -5710,6 +5775,131 @@ fn 加入合集那一层建得出新合集_名字写不得时加不进() {
         分面.iter().any(|(名, 几个)| 名 == "送朋友的" && *几个 > 0),
         "建出来的那个合集没进分面：{分面:?}"
     );
+}
+
+/// **「加入合集」那块「只钉得住本机路径」的说明是中性底，不是警示色**
+/// （票 `gui-draws-the-rest-of-the-design/07`，收挂单 `Q1110`：拿主意的人裁「换中性色，认下常驻」）。
+///
+/// 那一块**每次都画**——这一批里有没有无判据的，画一帧弹层时数不起（挂单 `Q1103`）。常驻的话就不能是警示色：
+/// 一批全是认出作品的加进合集，屏上照样跳一块红底，久了就没人看了。
+///
+/// **断的是令牌**：那句话底下那一块填的是 `panel-2`（设计稿 `.note` 的底，`look::note_box`），
+/// 而不是 `lo-soft`（`.warnbox`）或 `mid-soft`（`.midbox`）。
+#[test]
+fn 加入合集那块路径锚说明是中性底_不是警示色() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-加入合集-中性底"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    {
+        let (browse, site) = app.browse_and_site();
+        let anchor = site
+            .catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一行")
+            .remove(0)
+            .anchor;
+        browse.picked_mut().toggle(&anchor);
+    }
+    跑(&ctx, &mut app, 2);
+    shared::点正好(&ctx, "加入合集…", |ui| app.ui(ui));
+    // **先跑完淡入再看颜色**：弹层从透明淡进来，淡到一半时每一格颜色都只有一半的不透明度
+    // （`tests/dialog.rs` 主按钮那一条记着这笔账）。按帧推，不等挂钟。
+    跑(&ctx, &mut app, 30);
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+
+    let 色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme());
+    let 说明在 = shared::那一段画在哪儿(&帧, "只钉得住本机路径")
+        .unwrap_or_else(|| panic!("那一块说明没画出来：\n{}", 画出来的字(&帧)));
+    let 垫在底下 = |颜色: egui::Color32| {
+        shared::填着这个颜色的框(&帧, 颜色)
+            .iter()
+            .any(|框| 框.contains(说明在))
+    };
+    assert!(
+        垫在底下(色.panel_2),
+        "那块说明底下不是中性的 `panel-2`（设计稿 `.note`）"
+    );
+    for (哪一档, 颜色) in [("lo-soft", 色.lo_soft), ("mid-soft", 色.mid_soft)] {
+        assert!(!垫在底下(颜色), "那块说明底下还垫着警示色 `{哪一档}`");
+    }
+}
+
+/// **合集名空着、直接调排活那个入口：不排上任务台，屏上说为什么**
+/// （票 `gui-draws-the-rest-of-the-design/07`，收挂单 `Q798`）。
+///
+/// 弹层上那颗「加入」灰着，挡得住人，挡不住绕过弹层直接调入口的那一下——从前它照样排上任务台，
+/// 到核心库 `collection::plan` 门口才记一条失败（`CollectionError::Nameless`）。ADR-0005 修订段：
+/// **拒绝写在排活那一个入口里**；再修订段：拒绝要带着理由，而那句理由与弹层上常驻的那句是**同一句**
+/// （都是 `collection::check_name` 交回的 `BadName::Empty`）。
+///
+/// 加与移出两支各走一遍，空白也算空（全角空格那一档：中文输入法下按出来的就是它）。
+///
+/// **四趟交替着来**（加、移出、加、移出）：屏上那句错一直留到下一句顶掉它，相邻两趟说的话不一样，
+/// 才断得出**这一趟**真说了话——两趟连着说同一句，后一趟一个字不说也照样绿。
+#[test]
+fn 合集名空着直接调排活入口_不排上任务台_屏上说为什么() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-合集空名"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    // 勾一行：「一行都没勾」那道闸不先把这一下挡掉。
+    {
+        let (browse, site) = app.browse_and_site();
+        let anchor = site
+            .catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一行")
+            .remove(0)
+            .anchor;
+        browse.picked_mut().toggle(&anchor);
+    }
+    跑(&ctx, &mut app, 2);
+    let 那句理由 = romcat_core::collection::BadName::Empty.advice();
+
+    for (名字, 加进去) in [("", true), ("", false), ("　 ", true), ("　 ", false)] {
+        let 排过几趟 = app.tasks().history().len();
+        {
+            let (browse, site, board) = app.browse_site_and_tasks();
+            名字.clone_into(browse.collection_draft_mut());
+            if 加进去 {
+                browse.join_collection(site, board);
+            } else {
+                browse.leave_collection(site, board);
+            }
+        }
+        shared::等任务台空了(&mut app);
+        assert_eq!(
+            app.tasks().history().len(),
+            排过几趟,
+            "合集名空着（「{名字}」）也排上了任务台：{:?}",
+            app.tasks().history(),
+        );
+        // 那句话里嵌着按的是哪一下（与旁边「没开跑」那几句同一个说法），不印一对空的「」。
+        let 该说的 = format!(
+            "{}没开跑：{那句理由}",
+            if 加进去 {
+                "加入合集"
+            } else {
+                "移出合集"
+            }
+        );
+        let 屏上 = shared::跑一帧(&ctx, |ui| app.ui(ui));
+        assert!(
+            屏上.contains(&该说的),
+            "合集名空着（「{名字}」）按下去，屏上没说为什么（该说「{该说的}」）：\n{屏上}"
+        );
+    }
+    let 沉淀库里 = app.site().store.collections().expect("读得出");
+    assert!(沉淀库里.is_empty(), "空名的合集落进了沉淀库：{沉淀库里:?}");
 }
 
 /// **「加入子库」那一层：作为规则加入，名字落得进库**

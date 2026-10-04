@@ -335,6 +335,41 @@ pub fn 画着的每一处(
     out
 }
 
+/// 认得下的每一段字**画在哪儿、被裁在哪个矩形里**：`(那一段自己的外框, 它的裁剪矩形)`，按画出来的次序。
+///
+/// 「不滚就整句看得见」要的是后者：egui 的 `Label` 整段滚出视口就不画，可**只露出半截**的照样画
+/// ——画出来不等于看得全，得比它的外框在不在裁剪矩形（滚动区露出来的那一截）里。
+#[must_use]
+pub fn 画着的每一处连裁剪(
+    output: &egui::FullOutput,
+    认: &dyn Fn(&str) -> bool,
+) -> Vec<(egui::Rect, egui::Rect)> {
+    fn 收(
+        shape: &egui::epaint::Shape,
+        clip: egui::Rect,
+        认: &dyn Fn(&str) -> bool,
+        out: &mut Vec<(egui::Rect, egui::Rect)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) if 认(text.galley.text()) => {
+                out.push((
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                    clip,
+                ));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().for_each(|one| 收(one, clip, 认, out));
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, clipped.clip_rect, 认, &mut out);
+    }
+    out
+}
+
 /// 这一帧画出来的那些**填着这个颜色的框**（`Shape::Rect` 的底色正好是它）：主按钮（强调色底）、警示底那一类。
 #[must_use]
 pub fn 填着这个颜色的框(

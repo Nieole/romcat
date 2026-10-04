@@ -3109,7 +3109,7 @@ impl Screen {
         joining: bool,
         doing: &str,
     ) {
-        if self.上一趟还在跑() {
+        if self.上一趟还在跑() || self.合集名空着(name, doing) {
             return;
         }
         let Some(keys) = self.scoped_keys(&site.catalog, doing) else {
@@ -3138,6 +3138,27 @@ impl Screen {
         true
     }
 
+    /// **合集名空着就不排**，摆一句话出来并交回 `true`（票 `gui-draws-the-rest-of-the-design/07`，收挂单 `Q798`）。
+    ///
+    /// ADR-0005 修订段：**拒绝写在排活那一个入口里**。弹层上那颗「加入」灰着挡得住人，挡不住绕过弹层直接调
+    /// [`Self::join_collection`] / [`Self::leave_collection`] 的那一下——从前它照样排上任务台，到核心库
+    /// `collection::plan` 门口才记一条失败。再修订段允许弹层同时画灰，条件是**这儿拒得带着理由**，
+    /// 而且那句理由与弹层上常驻的那句是同一句：两处都取 [`collection::check_name`] 交回的
+    /// [`collection::BadName::Empty`]。**空不空也由它判**（ADR-0024），守卫这一处不自己比空串。
+    ///
+    /// **只拦空名**：「与收藏重名」「已经有同名的」在这儿都不是错——★ 收藏与加进已有的合集走的就是这两种名字。
+    /// 别的几条（逗号、写不进规则）核心库这一层眼下也不拦，那是挂单 `Q1106` 的事。
+    ///
+    /// 与 [`Self::上一趟还在跑`] 同一个摆法：两个入口起手各问一遍，话只有这一处。`doing` 是那一下叫什么
+    /// （[`这一下叫什么`]，名字空着时是「加入合集」「移出合集」），与旁边「没开跑」那几句同一个说法。
+    fn 合集名空着(&mut self, name: &str, doing: &str) -> bool {
+        let Err(空的 @ collection::BadName::Empty) = collection::check_name(name, &[]) else {
+            return false;
+        };
+        self.error = Some(format!("{doing}没开跑：{}", 空的.advice()));
+        true
+    }
+
     /// 同 [`Self::queue_collection`]，只是**作用范围由调用方交进来**。
     ///
     /// 分出这一半，是因为收藏这一下有两种范围：屏头那颗 ★ 与左栏那几颗作用于**勾中的那一批**
@@ -3152,7 +3173,7 @@ impl Screen {
         keys: Vec<String>,
         doing: &str,
     ) {
-        if self.上一趟还在跑() {
+        if self.上一趟还在跑() || self.合集名空着(name, doing) {
             return;
         }
         let title = format!(
@@ -5928,10 +5949,14 @@ fn 合集账本(
 /// **收藏是那个默认的一组**，它与自建合集走同一套成员关系，可屏上不该叫它「加入合集」
 /// ——按钮上写的是「★ 收藏」。自建的那些反过来：按的是「加入合集…」，
 /// 说成「加收藏」人会以为自己按错了。
+///
+/// **名字空着时不印一对空的「」**：那一下会被排活入口拒下（`Screen::合集名空着`），拒的那句话里嵌的就是它。
 fn 这一下叫什么(name: &str, joining: bool) -> String {
     match (name == FAVORITE, joining) {
         (true, true) => "加收藏".to_string(),
         (true, false) => "取消收藏".to_string(),
+        (false, true) if name.trim().is_empty() => "加入合集".to_string(),
+        (false, false) if name.trim().is_empty() => "移出合集".to_string(),
         (false, true) => format!("加入合集「{name}」"),
         (false, false) => format!("移出合集「{name}」"),
     }

@@ -27,7 +27,9 @@
 //! 「还有 N 条没生效」，红的。
 
 use egui::ComboBox;
-use romcat_core::sublibrary::{Clause, Dimension, Group, Join, KnownValues, Node, Op, Rule};
+use romcat_core::sublibrary::{
+    Clause, Dimension, Group, Join, KnownValues, Node, Op, Rule, RuleError,
+};
 
 /// 界面上那棵**条件组**树。
 ///
@@ -73,6 +75,16 @@ struct Leaf {
     dimension: Dimension,
     op: Op,
     value: String,
+}
+
+impl Leaf {
+    /// 这一条读成子句。`None` 是**还没填值**，`Some(Err(..))` 是读不成——两种都不进规则。
+    ///
+    /// **读一条子句只有这一处**：折成规则（[`group_of`]）与「这一条筛不筛得出东西」（[`thin_clause_ui`]）
+    /// 都走它，于是屏上贴着提示的那一条，就是规则里那一条。
+    fn clause(&self) -> Option<Result<Clause, RuleError>> {
+        (!self.value.trim().is_empty()).then(|| Clause::build(self.dimension, self.op, &self.value))
+    }
 }
 
 impl Default for Leaf {
@@ -129,33 +141,11 @@ impl Filter {
     /// 话印出来（ADR-0024）。
     pub fn ui(&mut self, ui: &mut egui::Ui, known: &KnownValues<'_>) -> bool {
         let mut changed = false;
-        group_ui(ui, &mut self.root, 0, &mut changed);
+        group_ui(ui, &mut self.root, 0, known, &mut changed);
         if changed {
             self.refresh();
         }
-        // **筛不出东西的那几条**（票 `gui-looks-like-the-design/12`）：与底下「没生效」
-        // 那一段是两件事，颜色也不一样——**这几条是生效的**，只是眼下一个都选不中。
-        // 当成错印成红的，人会去「改正」一条本来没错的规则（合集可以是待会儿才建的）。
-        let 筛不出: Vec<String> = self
-            .rule
-            .iter()
-            .flat_map(Rule::clauses)
-            .flat_map(|clause| romcat_core::sublibrary::thin_clause(clause, known))
-            .map(|thin| thin.advice())
-            .collect();
-        if !筛不出.is_empty() {
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                format!("有 {} 条筛不出东西：", 筛不出.len()),
-            )
-            .on_hover_text(
-                "这几条读得成、也存得进子库的规则，只是眼下一个变体都选不中。\
-                 不拦着你——合集可以是待会儿才建的，平台清单也会长。",
-            );
-            for line in 筛不出 {
-                ui.colored_label(ui.visuals().warn_fg_color, format!("　{line}"));
-            }
-        }
+        // **筛不出东西的那几条不在这儿汇总**：各自贴在出问题的那一条子句底下（[`leaf_ui`]）。
         if !self.pending.is_empty() {
             ui.colored_label(
                 ui.visuals().error_fg_color,
@@ -188,25 +178,20 @@ fn group_of(draft: &Draft, pending: &mut Vec<String>) -> Option<Group> {
     let mut nodes = Vec::new();
     for slot in &draft.nodes {
         match slot {
-            Slot::Leaf(leaf) => {
-                if leaf.value.trim().is_empty() {
-                    pending.push(format!(
-                        "{}{} —— 还没填值",
-                        leaf.dimension.label(),
-                        leaf.op.label()
-                    ));
-                    continue;
-                }
-                match Clause::build(leaf.dimension, leaf.op, &leaf.value) {
-                    Ok(clause) => nodes.push(Node::Clause(clause)),
-                    Err(error) => pending.push(format!(
-                        "{}{}{} —— {error}",
-                        leaf.dimension.label(),
-                        leaf.op.label(),
-                        leaf.value.trim()
-                    )),
-                }
-            }
+            Slot::Leaf(leaf) => match leaf.clause() {
+                None => pending.push(format!(
+                    "{}{} —— 还没填值",
+                    leaf.dimension.label(),
+                    leaf.op.label()
+                )),
+                Some(Ok(clause)) => nodes.push(Node::Clause(clause)),
+                Some(Err(error)) => pending.push(format!(
+                    "{}{}{} —— {error}",
+                    leaf.dimension.label(),
+                    leaf.op.label(),
+                    leaf.value.trim()
+                )),
+            },
             Slot::Group(inner) => {
                 if let Some(group) = group_of(inner, pending) {
                     nodes.push(Node::Group(group));
@@ -242,7 +227,13 @@ fn draft_of(group: &Group) -> Draft {
 ///
 /// 那一行**排不下就折行**（票 `gui-looks-like-the-design/09`）：浏览屏左栏默认只有两百来点宽，
 /// 组合方式、两颗按钮挤在一行会伸出那一栏。
-fn group_ui(ui: &mut egui::Ui, draft: &mut Draft, depth: usize, changed: &mut bool) {
+fn group_ui(
+    ui: &mut egui::Ui,
+    draft: &mut Draft,
+    depth: usize,
+    known: &KnownValues<'_>,
+    changed: &mut bool,
+) {
     ui.horizontal_wrapped(|ui| {
         let before = draft.join;
         ComboBox::from_id_salt(("组合方式", depth, ui.id()))
@@ -278,7 +269,7 @@ fn group_ui(ui: &mut egui::Ui, draft: &mut Draft, depth: usize, changed: &mut bo
     for (index, slot) in draft.nodes.iter_mut().enumerate() {
         ui.push_id(index, |ui| match slot {
             Slot::Leaf(leaf) => {
-                if leaf_ui(ui, leaf, changed) {
+                if leaf_ui(ui, leaf, known, changed) {
                     drop_at = Some(index);
                 }
             }
@@ -292,7 +283,7 @@ fn group_ui(ui: &mut egui::Ui, draft: &mut Draft, depth: usize, changed: &mut bo
                         }
                         ui.weak("分组");
                     });
-                    group_ui(ui, inner, depth + 1, changed);
+                    group_ui(ui, inner, depth + 1, known, changed);
                     drop_me
                 });
                 if response.inner {
@@ -308,7 +299,16 @@ fn group_ui(ui: &mut egui::Ui, draft: &mut Draft, depth: usize, changed: &mut bo
 }
 
 /// 画一条子句。返回**该不该把它去掉**。排不下就折行，同 [`group_ui`]。
-fn leaf_ui(ui: &mut egui::Ui, leaf: &mut Leaf, changed: &mut bool) -> bool {
+///
+/// **这一条筛不出东西时，那句话就贴在它底下**（照稿 `.tnote`：说明字号、`mid` 色，是那一条子句 `.tc` 里的最后一格；
+/// 票 `gui-draws-the-rest-of-the-design/07`，收挂单 `Q1104`）。从前那几句汇总在条件组框最底下，
+/// 默认窗口里正好落在折线以下；贴着出问题的那一条，人改的是哪一条、看见的就是哪一条的话。
+fn leaf_ui(
+    ui: &mut egui::Ui,
+    leaf: &mut Leaf,
+    known: &KnownValues<'_>,
+    changed: &mut bool,
+) -> bool {
     let mut drop_me = false;
     ui.horizontal_wrapped(|ui| {
         if ui.small_button("×").on_hover_text("去掉这一条。").clicked() {
@@ -356,7 +356,33 @@ fn leaf_ui(ui: &mut egui::Ui, leaf: &mut Leaf, changed: &mut bool) -> bool {
             *changed = true;
         }
     });
+    thin_clause_ui(ui, leaf, known);
     drop_me
+}
+
+/// 这一条**筛不出东西**时贴在它底下的那几句（票 `gui-looks-like-the-design/12` 立的口径，这一票挪了位置）。
+///
+/// 与框底「还有 N 条没生效」是两件事，颜色也不一样——**这一条是生效的**，只是眼下一个都选不中。
+/// 当成错印成红的，人会去「改正」一条本来没错的规则（合集可以是待会儿才建的）。
+///
+/// **判在核心库**（`sublibrary::thin_clause`，ADR-0024），这一层只把交回来的话印出来。读这一条走的是
+/// [`Leaf::clause`]——与折成规则那一趟（[`group_of`]）同一处，所以这儿点名的就是规则里那一条；
+/// 没填完、读不成的那几条不在规则里，轮不到这一问（它们归框底那一段）。
+fn thin_clause_ui(ui: &mut egui::Ui, leaf: &Leaf, known: &KnownValues<'_>) {
+    let Some(Ok(clause)) = leaf.clause() else {
+        return;
+    };
+    for thin in romcat_core::sublibrary::thin_clause(&clause, known) {
+        ui.label(
+            egui::RichText::new(thin.advice())
+                .text_style(egui::TextStyle::Name(crate::look::CAPTION.into()))
+                .color(ui.visuals().warn_fg_color),
+        )
+        .on_hover_text(
+            "这一条读得成、也存得进子库的规则，只是眼下一个变体都选不中。\
+             不拦着你——合集可以是待会儿才建的，平台清单也会长。",
+        );
+    }
 }
 
 /// 值那一格里的灰字。**说清这一维收什么**，比让人对着空框猜强。
