@@ -1167,7 +1167,7 @@ fn 点一下把识别排上任务台_跑完那一行的数字当场刷新_队列
 
     // 任务台上留下一条**跑完了**的历史。
     let record = &现场.app.tasks().history()[0];
-    assert_eq!(record.name, "识别");
+    assert_eq!(record.name, "识别 · 全部变体");
     assert!(
         matches!(record.ending, Ending::Done(_)),
         "跑完的那一趟记成了「{}」",
@@ -1350,8 +1350,8 @@ fn 取回_dat_那一趟已经排在台上时按识别_排在它后面而不是�
         .tasks()
         .queued()
         .into_iter()
-        .find(|(_, name)| name.starts_with("取回"))
-        .map(|(id, _)| id)
+        .find(|waiting| waiting.name.starts_with("取回"))
+        .map(|waiting| waiting.id)
         .expect("取回 DAT 那一趟排上了");
 
     现场.app.start_stage(Stage::Identify);
@@ -1468,9 +1468,9 @@ fn 折标题跑完之后浏览屏上的显示标题跟着更新() {
         "中文名没顶上来——DAT 里没有中文，这个名字只可能从盘上那个文件名来",
     );
 
-    // 任务台历史上留下一条**跑完了**，名字就是那道工序的名字。
+    // 任务台历史上留下一条**跑完了**，名字照稿 `TASKS`：那道工序的名字加上它管的范围。
     let record = &现场.app.tasks().history()[0];
-    assert_eq!(record.name, "整理标题");
+    assert_eq!(record.name, "整理标题 · 全部作品");
     assert!(
         matches!(record.ending, Ending::Done(_)),
         "跑完的那一趟记成了「{}」",
@@ -1988,7 +1988,12 @@ fn 顶上那一行下一步指向该做的那一道_按钮点得动_跑完自动
         .collect();
     assert_eq!(
         跑过的,
-        ["扫描 · 主库", "识别", "刮削", "整理标题"],
+        [
+            "扫描 · 主库",
+            "识别 · 全部变体",
+            "刮削 · 全部变体（补缺）",
+            "整理标题 · 全部作品"
+        ],
         "按下去的那几下排上去的不是这几趟",
     );
     for record in 现场.app.tasks().history() {
@@ -2330,9 +2335,9 @@ fn 点一下把刮削排上任务台_跑完那一行的数跟着变_主库一个
 
     现场.跑刮削();
 
-    // 任务台上留下一条**跑完了**的历史，名字就是这道工序的名字。
+    // 任务台上留下一条**跑完了**的历史，名字照稿 `TASKS`：这道工序的名字加上它管的范围与采法。
     let record = &现场.app.tasks().history()[0];
-    assert_eq!(record.name, "刮削");
+    assert_eq!(record.name, "刮削 · 全部变体（补缺）");
     assert!(
         matches!(record.ending, Ending::Done(_)),
         "跑完的那一趟记成了「{}」",
@@ -2463,7 +2468,7 @@ fn 刮削读不动优先级表时记成失败_并说清停在哪一步() {
     现场.跑刮削();
 
     let record = &现场.app.tasks().history()[0];
-    assert_eq!(record.name, "刮削");
+    assert_eq!(record.name, "刮削 · 全部变体（补缺）");
     let Ending::Failed { step, why } = &record.ending else {
         panic!("表都读不动却把这一趟记成了「{}」", record.ending.render());
     };
@@ -2512,9 +2517,9 @@ fn 选一次前端格式与目录之后_点一下就重导_而主库里的东西
     // **主库一个 ROM 都没搬、一个字节都没改**（验收第 6 条逐字要求）。
     assert_eq!(主库快照(库.path()), 主库原样, "导出动了主库里的东西");
 
-    // 任务台历史上留下一条**跑完了**，名字就是那道工序的名字。
+    // 任务台历史上留下一条**跑完了**，名字照稿 `TASKS`：那道工序的名字加上它管的范围。
     let record = &现场.app.tasks().history()[0];
-    assert_eq!(record.name, "导出");
+    assert_eq!(record.name, "导出 · Pegasus");
     assert!(
         matches!(record.ending, Ending::Done(_)),
         "跑完的那一趟记成了「{}」",
@@ -2539,7 +2544,7 @@ fn 选一次前端格式与目录之后_点一下就重导_而主库里的东西
             .tasks()
             .history()
             .iter()
-            .filter(|record| record.name == "导出")
+            .filter(|record| record.name == "导出 · Pegasus")
             .count(),
         2,
         "第二趟没排上台——「下一趟不必再选」没兑现",
@@ -2703,11 +2708,11 @@ fn 看过之后按一下我看过了照写_那几份真的被写过去了() {
     );
     // 任务台历史上看得出**这一趟是照写的**：丢掉手改的那一趟不许与平常那几趟长得一样。
     // 历史**最近的在前面**（`Board::history`）。
+    // 名字照稿 `TASKS.export.name`：「导出 · 格式（照写 N 份）」，N 是这一趟照写掉的那几份。
     let 最后一趟 = 现场.app.tasks().history().first().expect("进了历史");
-    assert!(
-        最后一趟.name.contains("照写"),
-        "历史上看不出这一趟是照写的：{}",
-        最后一趟.name,
+    assert_eq!(
+        最后一趟.name, "导出 · Pegasus（照写 1 份）",
+        "历史上看不出这一趟是照写的、照写了几份",
     );
 }
 
@@ -2749,7 +2754,7 @@ fn 照写那颗按钮不记状态_下一趟撞上同样的事还得再点一次(
         "屏上没说清照写只管这一趟：\n{屏上}",
     );
     let 最后一趟 = 现场.app.tasks().history().first().expect("进了历史");
-    assert_eq!(最后一趟.name, "导出", "平常那一趟被记成了照写");
+    assert_eq!(最后一趟.name, "导出 · Pegasus", "平常那一趟被记成了照写");
 }
 
 #[test]
@@ -2777,7 +2782,7 @@ fn 没人动过任何文件时_导出一路走完不多问一句() {
     let 历史 = 现场.app.tasks().history();
     assert_eq!(历史.len(), 3, "扫描一趟、导出两趟：{历史:?}");
     for record in 历史.iter().filter(|record| record.name.starts_with("导出")) {
-        assert_eq!(record.name, "导出", "没人动过却排了一趟照写");
+        assert_eq!(record.name, "导出 · Pegasus", "没人动过却排了一趟照写");
         assert!(
             matches!(record.ending, Ending::Done(_)),
             "没人动过的那一趟记成了「{}」",
@@ -3145,9 +3150,9 @@ fn 队列屏那颗捷径排的是与库屏工序段完全同一趟识别() {
         现场.app.roots().stages().notice(),
         现场.app.roots().stages().error(),
     );
-    // **在任务台上与从库屏排的看不出区别**：那一行的名字就是这道工序的名字。
+    // **在任务台上与从库屏排的看不出区别**：那一行的名字与库屏排的同一个（照稿 `TASKS.identify`）。
     let record = &现场.app.tasks().history()[0];
-    assert_eq!(record.name, "识别");
+    assert_eq!(record.name, "识别 · 全部变体");
     assert!(matches!(record.ending, Ending::Done(_)));
     // **同一份产物**：那一行的数当场刷新，队列自己重新列过——一次「重新列队列」都没点。
     assert_eq!(现场.识别那一行().behind, Behind::Left(0));
@@ -3423,7 +3428,7 @@ fn 铺媒体开关默认关着_关着时导出与今天一模一样_一份媒体
         );
     }
     let record = &现场.app.tasks().history()[0];
-    assert_eq!(record.name, "导出", "关着时那一趟的名字变了");
+    assert_eq!(record.name, "导出 · Pegasus", "关着时那一趟的名字变了");
     assert!(
         matches!(record.ending, Ending::Done(_)),
         "关着时那一趟记成了「{}」",
@@ -3526,7 +3531,7 @@ fn 要铺多少还没算出来时按导出_当场说清_一份都不先铺() {
             .tasks()
             .history()
             .iter()
-            .any(|record| record.name == "导出"),
+            .any(|record| record.name == "导出 · Pegasus"),
         "算出来之后导出还是排不上：{:?}",
         现场.app.tasks().history(),
     );
@@ -3557,7 +3562,7 @@ fn 打开铺媒体之后导出那一趟真的铺出去_任务台记完成_回执
         "条目里没写封面铺在哪儿",
     );
     let record = &现场.app.tasks().history()[0];
-    assert_eq!(record.name, "导出");
+    assert_eq!(record.name, "导出 · Pegasus");
     assert!(
         matches!(record.ending, Ending::Done(_)),
         "铺完了的那一趟记成了「{}」",
@@ -3785,8 +3790,8 @@ fn 要铺多少那一趟被撤掉时屏上说清_关掉再打开就重算() {
         .tasks()
         .queued()
         .into_iter()
-        .find(|(_, name)| name == romcat_gui::stages::COUNT_MEDIA)
-        .map(|(id, _)| id)
+        .find(|waiting| waiting.name == romcat_gui::stages::COUNT_MEDIA)
+        .map(|waiting| waiting.id)
         .expect("打开开关就排上了算要铺多少那一趟");
     现场.app.tasks_mut().stop(算的那一趟);
     现场.app.poll_tasks();

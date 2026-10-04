@@ -4451,7 +4451,7 @@ fn 一份产物() -> Product {
 fn 摆上四档收场(app: &mut App) {
     let tasks = app.tasks_mut();
     tasks.run_here("算一遍容量", |_| Ok(一份产物()));
-    tasks.run_here("排差量预览 · 掌机", |task| {
+    tasks.run_here("生成差量预览 · 掌机", |task| {
         task.stop();
         task.step("读选择集")?;
         Ok(一份产物())
@@ -4486,7 +4486,12 @@ fn 拍正在跑(名字: &str, 主题: Theme, 临时目录名: &str) {
     }
     let mut app = 任务屏(临时目录名);
     let (报完了, 等它报完) = 一对信号();
-    let 占位 = 占位活::照这样排上(app.tasks_mut(), "扫描 · 主库", move |task, 等收场| {
+    // 名字底下那一行副标题照排活那一处交的说法（票 `gui-draws-the-rest-of-the-design/02`）：扫描是根的路径，识别是几个变体、本地运行。
+    // 扫描那一趟排活入口说续得上（一定写断点），卡底下于是有那一句「停止后已完成的部分会保留…」。
+    let 扫描 = romcat_core::task::Caption::new("扫描 · 主库")
+        .with_subtitle("/Volumes/新加卷/Game")
+        .resumable();
+    let 占位 = 占位活::照这样排上(app.tasks_mut(), 扫描, move |task, 等收场| {
         task.steps(4);
         task.step("认根")?;
         task.step("挨个文件过一遍")?;
@@ -4497,7 +4502,11 @@ fn 拍正在跑(名字: &str, 主题: Theme, 临时目录名: &str) {
         Err(Cutoff::failed("占位活放行了"))
     });
     等它报完.等();
-    app.tasks_mut().queue("识别 · 全部变体", |_| Ok(一份产物()));
+    app.tasks_mut().queue(
+        romcat_core::task::Caption::new("识别 · 全部变体")
+            .with_subtitle("200 个变体 · 本地运行，不产生网络请求"),
+        |_| Ok(一份产物()),
+    );
     let mut harness = 搭一个(主题, move |ui| app.ui(ui));
     harness.run_steps(6);
     拍下(harness, 名字);

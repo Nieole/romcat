@@ -268,7 +268,7 @@ fn 台上的体检(app: &App) -> usize {
         .tasks()
         .queued()
         .iter()
-        .filter(|(_, name)| name == "库体检 · 全部根")
+        .filter(|waiting| waiting.name == "库体检 · 全部根")
         .count();
     usize::from(跑着) + 排着
 }
@@ -1238,7 +1238,7 @@ fn 重新成型了几趟(app: &App) -> usize {
         .tasks()
         .queued()
         .iter()
-        .filter(|(_, name)| name == 名字)
+        .filter(|waiting| waiting.name == 名字)
         .count();
     跑完 + usize::from(跑着) + 排着
 }

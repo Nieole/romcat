@@ -2303,7 +2303,7 @@ fn 排差量预览进任务队列跑完之后留一条带耗时的历史() {
     let history = 场.app.tasks().history();
     assert_eq!(history.len(), 1, "任务台上没留下这一趟");
     assert!(
-        history[0].name.contains("排差量预览") && history[0].name.contains("掌机"),
+        history[0].name.contains("生成差量预览") && history[0].name.contains("掌机"),
         "历史那条说不清是给哪个子库排的：{}",
         history[0].name,
     );
@@ -2899,7 +2899,7 @@ fn 按停一趟同步之后子库屏与任务屏说的是同一件事() {
     // 屏上本来就该有一个「完成」。
     let 这一趟的收场 = 任务屏
         .lines()
-        .skip_while(|line| line.trim() != "同步「掌机」")
+        .skip_while(|line| line.trim() != "同步 · 掌机")
         .nth(2)
         .expect("任务屏历史里没有这一趟");
     assert!(
@@ -5823,7 +5823,13 @@ fn 差量预览排着时勾补回_台上那一趟先停掉_按新的勾排的那
         .previewing()
         .expect("勾上之后该重排一趟");
     assert_ne!(新的, 旧的, "没有重排");
-    let 排着的: Vec<u64> = 场.app.tasks().queued().iter().map(|(id, _)| *id).collect();
+    let 排着的: Vec<u64> = 场
+        .app
+        .tasks()
+        .queued()
+        .iter()
+        .map(|waiting| waiting.id)
+        .collect();
     assert!(
         !排着的.contains(&旧的),
         "按旧的勾排的那一趟还在队里，白跑一趟：{排着的:?}"
@@ -5842,7 +5848,7 @@ fn 差量预览排着时勾补回_台上那一趟先停掉_按新的勾排的那
     assert_eq!(旧那条.ending, Ending::Stopped, "旧那一趟没被停");
     let 排完的: Vec<u64> = history
         .iter()
-        .filter(|record| record.name.contains("排差量预览") && record.ending == Ending::Done(()))
+        .filter(|record| record.name.contains("生成差量预览") && record.ending == Ending::Done(()))
         .map(|record| record.id)
         .collect();
     assert_eq!(排完的, [新的], "排完的不只新那一趟");

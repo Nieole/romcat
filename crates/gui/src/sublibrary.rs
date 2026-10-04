@@ -147,6 +147,19 @@ const SEARCH_HITS: u64 = 6;
 const NO_PREVIEW: &str = "还没排过差量预览：同步前必须先看一遍它要做什么。\
      按「生成差量预览」排一趟。";
 
+/// 差量预览那一趟在任务台上叫什么：「生成差量预览 · 子库名」（设计稿 `TASKS.plan` 的 `name`）。卡上那颗按钮、
+/// 行内那句进度、按停与失败那两句话说的都是这几个字（差距 `D-04`，票 `gui-draws-the-rest-of-the-design/02`）。
+const PREVIEW_TASK: &str = "生成差量预览";
+
+/// 差量预览那一趟名字底下那一行副标题（设计稿 `TASKS.plan` 的 `sub` 原话）：整条只读，中立库与目标设备各读一遍。
+const PREVIEW_SUBTITLE: &str = "只读取库和设备上的目录，不写入文件";
+
+/// 同步那一趟名字底下那一行副标题（设计稿 `TASKS.sync` 的 `sub`）：先删后传（[`sync::Plan::steps`] 就是这个次序），
+/// 共几个文件取这份差量预览的步数（[`sync::Plan::touched`]）。
+fn sync_subtitle(plan: &sync::Plan) -> String {
+    format!("先删除，再复制 · 共 {} 个文件", thousands(plan.touched()))
+}
+
 /// 排过差量、**一步都不用做**时「同步」旁边那一句，也是那颗按不动时悬停里的那一句。
 const ALIGNED: &str = "一步都不用做：目标已经和选择集对齐了。";
 
@@ -1356,12 +1369,13 @@ impl Screen {
         self.invalidate();
         self.error = None;
         let workspace = self.workspace.clone();
-        let title = format!("排差量预览 · {name}");
+        let caption = romcat_core::task::Caption::new(format!("{PREVIEW_TASK} · {name}"))
+            .with_subtitle(PREVIEW_SUBTITLE);
         // **「补回」是排它那一刻定下的**：那份计划此后怎么被看都改不了它，屏上那个勾
         // 改一下就得重排一趟（[`Self::set_restore_missing`]）。
         let restore_missing = self.restore_missing;
         self.previewing = Some(match site.catalog.read_only() {
-            Ok(reader) => tasks.queue(title, move |task| {
+            Ok(reader) => tasks.queue(caption, move |task| {
                 sync::prepare(
                     &reader,
                     &workspace,
@@ -1377,7 +1391,7 @@ impl Screen {
             }),
             // **只活在内存里的库分不出第二份连接**（合成数据走这条），那是意料之中的：
             // 这一趟就地跑完，几毫秒的事。
-            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(title, |task| {
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(caption, |task| {
                 sync::prepare(
                     &site.catalog,
                     &workspace,
@@ -1395,7 +1409,7 @@ impl Screen {
             // 对不上。这时**直说，不要退到画帧这条线程上偷偷跑一趟**：那既会僵住窗口，
             // 又把真正的问题盖在一句「怎么卡了一下」底下。
             Err(why) => {
-                self.error = Some(no_second_connection("排差量预览", &why));
+                self.error = Some(no_second_connection(PREVIEW_TASK, &why));
                 return;
             }
         });
@@ -1447,7 +1461,7 @@ impl Screen {
             // **停下来的地方是干净的，就得这么说。** 说成「失败」会让人去找哪儿坏了。
             Ending::Stopped => {
                 self.notice = Some(format!(
-                    "排差量预览{}。这一趟整条只读——中立库、媒体池、目标设备\
+                    "{PREVIEW_TASK}{}。这一趟整条只读——中立库、媒体池、目标设备\
                      一个字节都没动，再排一次就是。",
                     Ending::<()>::Stopped.render(),
                 ));
@@ -1455,7 +1469,7 @@ impl Screen {
             // **不静默结束**：哪一步、为什么，两样都说出来。
             Ending::Failed { step, why } => {
                 self.error = Some(format!(
-                    "排差量预览{}",
+                    "{PREVIEW_TASK}{}",
                     Ending::<()>::Failed { step, why }.render()
                 ));
             }
@@ -1753,7 +1767,12 @@ impl Screen {
         // **计划在这一刻整份交出去。** 闭包拿的是它自己那一份，屏上那一份此后作废也好、
         // 重排也好，都改不了台上这一趟要做的事（这条正是 ADR-0016 在搬上任务台之后
         // 还成立的原因）。
-        let id = tasks.queue(format!("同步「{name}」"), move |task| {
+        // 名字照稿 `TASKS.sync`「同步 · 设备名」。**续得上**：按停时落过的那几件连清单一起落回中立库（ADR-0015），
+        // 下一趟同步照这份清单接着来，落过的不再重落（`sync::execute` 报的那句）。
+        let caption = romcat_core::task::Caption::new(format!("同步 · {name}"))
+            .with_subtitle(sync_subtitle(&prepared.plan))
+            .resumable();
+        let id = tasks.queue(caption, move |task| {
             run_sync(&prepared, library_roots.as_ref(), task)
                 .map(|outcome| Product::Synced(Box::new(outcome)))
         });
@@ -1837,7 +1856,7 @@ impl Screen {
             return;
         };
         let Some(live) = tasks.running().filter(|live| live.id == id) else {
-            if tasks.queued().iter().any(|(queued, _)| *queued == id) {
+            if tasks.queued().iter().any(|waiting| waiting.id == id) {
                 ui.weak(format!("{干什么}排在任务台上等着（第 {id} 号）"));
                 if look::buttons(ui, |ui| ui.button("撤掉")).clicked() {
                     tasks.stop(id);
@@ -2342,7 +2361,7 @@ impl Screen {
             if open {
                 // 正排着的时候把进度摆在按钮旁边：人是在这一屏点的，不该逼他先切去任务屏
                 // 才知道排到哪儿了。**停下也在这儿按得着。**
-                Self::live_ui(ui, tasks, self.previewing, "排差量");
+                Self::live_ui(ui, tasks, self.previewing, PREVIEW_TASK);
             }
             if let Some(deletes) = 删除 {
                 look::checkbox(
@@ -2527,7 +2546,7 @@ impl Screen {
             }
             卡头::正在生成差量预览 => {
                 look::plain_chip(ui, look::Tone::Accent, "正在生成差量预览").on_hover_text(
-                    "排差量预览正在任务台上跑：只读，一个文件都不写。跑完这里换成它说的那一档。",
+                    format!("{PREVIEW_TASK}正在任务台上跑：只读，一个文件都不写。跑完这里换成它说的那一档。"),
                 );
             }
             卡头::正在同步 => {

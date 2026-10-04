@@ -59,6 +59,9 @@ pub const CHECKING: &str = "正在体检…";
 /// 体检那一趟在任务台上叫什么（设计稿 `TASKS.health` 原话）。测试按它在台上找那一趟。
 pub const CHECK_TASK: &str = "库体检 · 全部根";
 
+/// 体检那一趟名字底下那一行副标题（设计稿 `TASKS.health` 的 `sub` 原话）：整条只读，读的是中立库那份统计。
+const CHECK_SUBTITLE: &str = "只读，不改动任何文件";
+
 /// 还没扫描时这一块画的那一句（设计稿 `renderHealth` 空态原话）。
 pub const BEFORE_SCAN: &str = "扫描完成后生成体检报告。";
 
@@ -386,14 +389,15 @@ impl Section {
             .store
             .not_same_works(&site.library_identity)
             .unwrap_or_default();
+        let caption = romcat_core::task::Caption::new(CHECK_TASK).with_subtitle(CHECK_SUBTITLE);
         let id = match site.catalog.read_only() {
             Ok(reader) => {
                 let dismissed = dismissed.clone();
-                tasks.queue(CHECK_TASK, move |task| check_run(&reader, &dismissed, task))
+                tasks.queue(caption, move |task| check_run(&reader, &dismissed, task))
             }
-            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(CHECK_TASK, |task| {
-                check_run(&site.catalog, &dismissed, task)
-            }),
+            Err(CatalogError::NotOnDisk { .. }) => {
+                tasks.run_here(caption, |task| check_run(&site.catalog, &dismissed, task))
+            }
             // 别的原因是**意外**：直说，不退到画帧这条线程上偷偷算一遍（同工序段算要铺多少媒体那一处）。
             Err(why) => {
                 self.error = Some(format!(

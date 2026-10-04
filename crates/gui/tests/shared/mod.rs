@@ -622,7 +622,8 @@ impl 占位活 {
     /// 排一趟占位活上去：一步都不走，停在那儿等信号。醒过来时被按停过就记成**已取消**，
     /// 没按停过就记成**失败**。
     pub fn 排上<T: Send + 'static>(
-        tasks: &mut romcat_core::task::Board<T>, 名字: &str
+        tasks: &mut romcat_core::task::Board<T>,
+        名字: impl Into<romcat_core::task::Caption>,
     ) -> Self {
         Self::照这样排上(tasks, 名字, |task, 等着| {
             等着.等();
@@ -640,7 +641,7 @@ impl 占位活 {
     /// 不然被按停过它也记不成「已取消」。
     pub fn 照这样排上<T: Send + 'static>(
         tasks: &mut romcat_core::task::Board<T>,
-        名字: &str,
+        名字: impl Into<romcat_core::task::Caption>,
         活: impl FnOnce(&romcat_core::task::Handle, 等信号) -> Result<T, romcat_core::task::Cutoff>
         + Send
         + 'static,

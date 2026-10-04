@@ -10,11 +10,22 @@
 //!
 //! 验的是**状态转换**，不是像素（那是 ADR-0005 给这一层定的验收面）。
 
+use std::path::Path;
 use std::time::Duration;
 
+use romcat_core::catalog::Catalog;
 use romcat_core::collection::CollectionError;
-use romcat_core::task::{Cutoff, Ending, Halted, Handle, Live};
+use romcat_core::fs::RealFs;
+use romcat_core::scan::{self, Jobs, ScanOptions};
+use romcat_core::site::Site;
+use romcat_core::sources::Source;
+use romcat_core::stage::Stage;
+use romcat_core::sublibrary::Rule;
+use romcat_core::task::{Caption, Cutoff, Ending, Halted, Handle, Live};
+use romcat_core::testing::sample::zip;
+use romcat_core::testing::{TempDir, temp_dir};
 use romcat_gui::app::{App, View};
+use romcat_gui::scrape::{Panel, Reach};
 use romcat_gui::task::{Clock, Product};
 use romcat_gui::{demo, headless};
 
@@ -226,7 +237,7 @@ fn 失败的那一趟在历史里说得出哪一步为什么() {
     let ctx = headless::context();
     let mut app = 开一个();
     app.show_view(View::Tasks);
-    app.tasks_mut().queue("排差量预览 · 掌机", |task| {
+    app.tasks_mut().queue("生成差量预览 · 掌机", |task| {
         task.steps(12);
         task.step("读子库")?;
         task.step("看一眼目标")?;
@@ -331,7 +342,7 @@ fn 四种收场在任务屏历史里各画各的话() {
 
     app.tasks_mut().queue("算一遍容量", |_| Ok(一份产物()));
     // 整条只读的活被按停：什么都没留下，可以当没跑过。
-    app.tasks_mut().queue("排差量预览 · 掌机", |task| {
+    app.tasks_mut().queue("生成差量预览 · 掌机", |task| {
         task.stop();
         task.step("读选择集")?;
         Ok(一份产物())
@@ -532,7 +543,12 @@ fn 占位活没收到信号就一直占着台子_按停之后记成已取消() {
         .expect("没收到信号，占位活却不在台上了");
     assert_eq!(live.id, 占位.id());
     assert_eq!(live.progress.at, 0, "没人让它走，它自己走了——它还在数步数");
-    let 排着的: Vec<u64> = app.tasks().queued().iter().map(|(id, _)| *id).collect();
+    let 排着的: Vec<u64> = app
+        .tasks()
+        .queued()
+        .iter()
+        .map(|waiting| waiting.id)
+        .collect();
     assert_eq!(排着的, vec![排在后面的], "占位活没占住台子");
 
     let id = 占位.id();
@@ -685,7 +701,12 @@ fn 等待中的每一趟各有一颗移除_按下只撤掉那一趟() {
 
     // 头一颗「移除」是排在最前面那一趟的。
     let 屏上 = shared::点一下(&ctx, "移除", |ui| app.ui(ui));
-    let 排着的: Vec<u64> = app.tasks().queued().iter().map(|(id, _)| *id).collect();
+    let 排着的: Vec<u64> = app
+        .tasks()
+        .queued()
+        .iter()
+        .map(|waiting| waiting.id)
+        .collect();
     assert_eq!(排着的, vec![第二趟], "按下头一颗「移除」撤掉的不是头一趟");
     assert_eq!(
         屏上.lines().filter(|line| line.trim() == "移除").count(),
@@ -708,6 +729,216 @@ fn 等待中的每一趟各有一颗移除_按下只撤掉那一趟() {
 
     占位.按停(app.tasks_mut());
     画到台上空了(&ctx, &mut app);
+}
+
+#[test]
+fn 正在跑那张卡名字底下一行副标题_等待中那一趟名字后头跟着副标题_没交的只画名字() {
+    // 票 `gui-draws-the-rest-of-the-design/02`（收挂单 `Q1028`、`Q835`）：设计稿 `renderTasks()` 正在跑那张卡
+    // 名字底下一行副标题（`.mono.dim`），等待中那一行名字后头跟着同一句弱字（`.dim`）。那一句由排活的那一处交给
+    // 任务台（`Caption`），这一层只画；没交的那一趟屏上只有名字。
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+    let 占位 = 占位活::排上(
+        app.tasks_mut(),
+        Caption::new("扫描 · 主库").with_subtitle("/Volumes/新加卷/Game"),
+    );
+    app.tasks_mut().queue(
+        Caption::new("生成差量预览 · 掌机").with_subtitle("只读取库和设备上的目录，不写入文件"),
+        |_| Ok(一份产物()),
+    );
+    app.tasks_mut().queue("算一遍容量", |_| Ok(一份产物()));
+    // 一句长得一行放不下的副标题（导出目录很深时就是这样）。
+    let 很长的 = format!(
+        "导出到 /Volumes/{} · 仅写入元数据",
+        "很深的一层目录/".repeat(40)
+    );
+    app.tasks_mut().queue(
+        Caption::new("导出 · Pegasus").with_subtitle(很长的),
+        |_| Ok(一份产物()),
+    );
+
+    let output = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&output);
+    let 正好 =
+        |那一段: &'static str| shared::画着的每一处(&output, &move |text| text == 那一段);
+
+    // 正在跑那张卡：副标题在名字**底下**、左边与名字对齐。名字在状态栏上也画着一处，只认卡上那一处。
+    let 跑着的副标题 = 正好("/Volumes/新加卷/Game");
+    assert_eq!(
+        跑着的副标题.len(),
+        1,
+        "正在跑那张卡上没有副标题那一行：\n{屏上}"
+    );
+    let 副 = 跑着的副标题[0];
+    assert!(
+        正好("扫描 · 主库")
+            .iter()
+            .any(|名| (名.min.x - 副.min.x).abs() < 1.0 && 副.min.y >= 名.max.y - 1.0),
+        "副标题没画在正在跑那一趟的名字底下：{:?} 对 {:?}\n{屏上}",
+        正好("扫描 · 主库"),
+        副,
+    );
+
+    // 等待中那一行：副标题与名字在同一行，跟在名字后头。
+    let 名 = 正好("生成差量预览 · 掌机");
+    let 副 = 正好("只读取库和设备上的目录，不写入文件");
+    assert_eq!(
+        (名.len(), 副.len()),
+        (1, 1),
+        "等待中那一行没有名字或副标题：\n{屏上}"
+    );
+    assert!(
+        (名[0].center().y - 副[0].center().y).abs() < 2.0 && 副[0].min.x > 名[0].max.x,
+        "等待中那一趟的副标题没跟在名字后头：{名:?} 对 {副:?}",
+    );
+
+    // 没交副标题的那一趟：屏上只有名字，名字后头一个字都不添。
+    let 名 = 正好("算一遍容量");
+    assert_eq!(名.len(), 1, "等待中没有「算一遍容量」：\n{屏上}");
+    let 同一行别的字 = shared::画着的每一处(&output, &|text| {
+        text != "算一遍容量" && text != "移除" && text != "2"
+    })
+    .into_iter()
+    .filter(|别的| (别的.center().y - 名[0].center().y).abs() < 2.0)
+    .count();
+    assert_eq!(
+        同一行别的字, 0,
+        "没交副标题的那一趟名字旁边多画了东西：\n{屏上}"
+    );
+
+    // 一行放不下的副标题截掉尾巴，不把「移除」挤出卡外：每一趟照旧各有一颗「移除」，长的那一句在它左边收住。
+    let 移除 = 正好("移除");
+    assert_eq!(移除.len(), 3, "排着的三趟不是各有一颗「移除」：\n{屏上}");
+    let 长的 = shared::画着的每一处(&output, &|text| {
+        text.starts_with("导出到 /Volumes/很深的一层目录/")
+    });
+    assert_eq!(长的.len(), 1, "那一句长副标题没画出来：\n{屏上}");
+    let 同一行的移除 = 移除
+        .iter()
+        .find(|一颗| (一颗.center().y - 长的[0].center().y).abs() < 2.0)
+        .expect("长副标题那一行的「移除」被挤没了");
+    assert!(
+        长的[0].max.x <= 同一行的移除.min.x,
+        "长副标题压到了「移除」上：{:?} 对 {同一行的移除:?}",
+        长的[0],
+    );
+
+    占位.按停(app.tasks_mut());
+    画到台上空了(&ctx, &mut app);
+}
+
+#[test]
+fn 续得上的那一趟卡底下说停了会保留_续不上的不说() {
+    // 设计稿 `renderTasks()` 正在跑那张卡底下一句 `.help`：`T.half` 的那几种说「停止后已完成的部分会保留，下次从中断的位置
+    // 继续。」。拿主意的人 2026-10-04 裁：只画在排活入口说得准续得上的那一趟上（`Caption::resumable`），续不上的不画——
+    // 不画稿上另一句「停止后不会保留任何结果」，也不许界面按活名猜。
+    const 那一句: &str = "停止后已完成的部分会保留，下次从中断的位置继续。";
+    let ctx = headless::context();
+    let mut app = 开一个();
+    app.show_view(View::Tasks);
+
+    let 占位 = 占位活::排上(
+        app.tasks_mut(),
+        Caption::new("扫描 · 主库")
+            .with_subtitle("/Volumes/新加卷/Game")
+            .resumable(),
+    );
+    let output = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&output);
+    let 句 = shared::画着的每一处(&output, &|text| text == 那一句);
+    assert_eq!(句.len(), 1, "续得上的那一趟卡底下没说那一句：\n{屏上}");
+    // 在卡底下、「等待中」上头。
+    let 卡里最后一排 = shared::画着的每一处(&output, &|text| text.starts_with("已用 "));
+    let 等待中 = shared::画着的每一处(&output, &|text| text == "等待中");
+    assert!(
+        卡里最后一排.iter().all(|排| 排.max.y <= 句[0].min.y)
+            && 等待中.iter().all(|块| 句[0].max.y <= 块.min.y),
+        "那一句没摆在卡底下、等待中上头：{句:?}\n{屏上}",
+    );
+    占位.按停(app.tasks_mut());
+    画到台上空了(&ctx, &mut app);
+
+    let 占位 = 占位活::排上(app.tasks_mut(), Caption::new("库体检 · 全部根"));
+    let 屏上 = 一帧的字(&ctx, &mut app);
+    assert!(屏上.contains("库体检 · 全部根"), "前提：它在跑：\n{屏上}");
+    assert!(
+        !屏上.contains(那一句),
+        "续不上的那一趟也说了那一句：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("停止后不会保留任何结果"),
+        "续不上的那一趟画了稿上另一句：\n{屏上}",
+    );
+    占位.按停(app.tasks_mut());
+    画到台上空了(&ctx, &mut app);
+}
+
+#[test]
+fn 真按扫描那一趟正在跑时_卡上名字底下是根的路径_卡底下说停了会保留() {
+    // 照「名不副实的绿灯」那条：上面几条拿手搭的 `Caption` 验画法；这一条走真入口——库屏「扫描」那一下——让它停在
+    // 第一个文件上（[`shared::一道闸`]，不靠挂钟），看正在跑那张卡上画的是不是排活入口交的那几样。
+    let ctx = headless::context();
+    let mut 场 = 落盘的现场::摆好();
+    let (闸, 闸口) = shared::一道闸(1);
+    {
+        let (roots, site, tasks) = 场.app.roots_site_and_tasks();
+        roots.scan_through(std::sync::Arc::new(闸));
+        roots.scan(site, tasks, "主库");
+    }
+    闸口.等扫描走到闸上();
+    let 根的路径 = 场.app.roots().roots()[0].root.path.clone();
+    let output = headless::frame(&ctx, headless::input(), |ui| 场.app.ui(ui));
+    let 屏上 = 画出来的字(&output);
+    let 名 = shared::画着的每一处(&output, &|text| text == "扫描 · 主库");
+    let 副 = shared::画着的每一处(&output, &|text| text == 根的路径);
+    assert!(
+        名.iter().any(|名| 副
+            .iter()
+            .any(|副| (名.min.x - 副.min.x).abs() < 1.0 && 副.min.y >= 名.max.y - 1.0)),
+        "正在跑那张卡上名字底下不是根的路径「{根的路径}」：\n{屏上}",
+    );
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line == romcat_gui::task::RESUMABLE_NOTE),
+        "扫描那一趟续得上，卡底下却没说：\n{屏上}",
+    );
+    闸口.放行();
+    shared::等任务台空了(&mut 场.app);
+}
+
+#[test]
+fn 导出开着铺媒体那一趟副标题说写入元数据并铺媒体() {
+    // 选择题第 4 题（拿主意的人 2026-10-04 照推荐裁）：稿上没有「铺媒体」那颗开关；开着它时这一趟还往导出目录里铺媒体，
+    // 「仅写入元数据」就不是实话了。
+    let mut 场 = 落盘的现场::摆好();
+    {
+        let (roots, site, tasks) = 场.app.roots_site_and_tasks();
+        roots.stages_mut().set_lay_media(true, site, tasks);
+    }
+    // 打开那一下排一趟去算要铺多少；算出来之前导出按不下去。
+    shared::等任务台空了(&mut 场.app);
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着台子");
+    场.app.start_stage(Stage::Export);
+    let 排着的 = 场.app.tasks().queued();
+    let 那一趟 = 排着的.last().expect("导出排上了");
+    assert_eq!(
+        (
+            那一趟.name.as_str(),
+            那一趟.subtitle.clone(),
+            那一趟.resumable
+        ),
+        (
+            "导出 · Pegasus",
+            Some(format!(
+                "导出到 {} · 写入元数据并铺媒体",
+                场.导出到.path().display()
+            )),
+            true,
+        ),
+    );
+    场.撤掉排着的再放行(占位);
 }
 
 /// 状态栏上任务那一句：以这一趟的名字加「 · 」起头的那一行。没有就是 `None`。
@@ -816,4 +1047,393 @@ fn 任务跑着的时候别的屏照常用_底下状态栏说的与任务屏是�
         收场后.lines().any(|line| line.trim() == "任务台空闲"),
         "收场之后状态栏没回到空闲：\n{收场后}",
     );
+}
+
+// ——— 稿上那几种长活各排一趟：任务屏上每一张卡都带副标题（票 `gui-draws-the-rest-of-the-design/02`）———
+
+fn 写(path: &Path, bytes: &[u8]) {
+    std::fs::create_dir_all(path.parent().expect("有上级目录")).expect("能建目录");
+    std::fs::write(path, bytes).expect("能写文件");
+}
+
+/// 一套**落在磁盘上**的现场：fixture 主库（一个根「主库」，三个变体，两个在 SFC）扫进一份落盘的中立库，
+/// 工作目录里摆着一份 DAT 库，导出设置记过一次，子库「掌机」指着一个临时目录、选择集是「平台=SFC」。
+///
+/// **落盘是为了让每一趟真排上任务台**：只活在内存里的库分不出第二份连接，那几处会就地跑完，
+/// 等待中那一块里一趟都看不见。主库与「卡」**一律是本地临时目录**，一个字节都不碰真库与真设备。
+struct 落盘的现场 {
+    _主库: TempDir,
+    工作区: TempDir,
+    _卡: TempDir,
+    导出到: TempDir,
+    app: App,
+}
+
+impl 落盘的现场 {
+    fn 摆好() -> Self {
+        let 主库 = temp_dir("gui-task-lib");
+        写(&主库.path().join("SFC/幻想传说 汉化版.zip"), &zip(4096));
+        写(&主库.path().join("SFC/圣剑传说 3 汉化版.zip"), &zip(8192));
+        写(&主库.path().join("GBA/口袋妖怪 绿宝石.zip"), &zip(2048));
+        let 工作区 = temp_dir("gui-task-ws");
+        let 卡 = temp_dir("gui-task-card");
+        let 导出到 = temp_dir("gui-task-out");
+        // 识别按下去之前要查一眼有没有 DAT 库（没有就当场拒、不排）。
+        shared::摆一份取回过的dat库(工作区.path());
+        let 库文件 = 工作区.path().join("catalog").join("fixture.sqlite3");
+        {
+            let mut catalog = Catalog::create(&库文件, "fixture").expect("能开中立库");
+            let mut options = ScanOptions::named(主库.path(), "主库");
+            options.jobs = Jobs::Fixed(2);
+            scan::scan(&RealFs::new(), &mut catalog, &options, &Handle::new()).expect("扫得动");
+        }
+        let site = Site::open_file(工作区.path(), &库文件, None).expect("开得出现场");
+        let mut app = App::new(site, 工作区.path().to_path_buf());
+        // 导出去哪儿：库屏「导出设置」那一块记下的那一份。
+        {
+            let (roots, site, _) = app.roots_site_and_tasks();
+            roots
+                .stages_mut()
+                .set_export_setup(site, "pegasus", &导出到.path().to_string_lossy());
+        }
+        // 一台子库：子库屏「新建子库」那一层存下的那一份；选择集那条规则直接摆进中立库
+        // （界面上写规则走浏览屏，它自己在 `tests/browse.rs` 里验）。
+        {
+            let (screen, site) = app.sublibrary_and_site();
+            let form = screen.form_mut();
+            form.name = "掌机".to_string();
+            form.target = romcat_core::path::display(卡.path());
+            form.capacity_by_device = false;
+            form.capacity = String::new();
+            screen.save(site);
+            assert!(screen.error().is_none(), "{:?}", screen.error());
+            site.catalog
+                .add_rule("掌机", &Rule::parse("平台=SFC").expect("读得懂"), None)
+                .expect("写得进去");
+            screen.reload(site);
+            screen.open(site, "掌机");
+        }
+        app.show_view(View::Tasks);
+        Self {
+            _主库: 主库,
+            工作区,
+            _卡: 卡,
+            导出到,
+            app,
+        }
+    }
+
+    /// 台上排着的每一趟都撤掉，再按停占位那一趟、等台子空了。**排着的那几趟一趟都不真跑**：
+    /// 下载数据源那一趟真跑就要联网，测试不该往外发一个请求。
+    fn 撤掉排着的再放行(&mut self, 占位: 占位活) {
+        for waiting in self.app.tasks().queued() {
+            self.app.tasks_mut().stop(waiting.id);
+        }
+        占位.按停(self.app.tasks_mut());
+        shared::等任务台空了(&mut self.app);
+    }
+}
+
+/// 跑一帧**够高**的任务屏（1280×1600），交出这一帧：等待中那一块排着十来趟，800 高的窗装不下，
+/// 视口外的字 egui 不画。
+fn 高高的一帧(ctx: &egui::Context, app: &mut App) -> egui::FullOutput {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 1600.0),
+        )),
+        ..Default::default()
+    };
+    headless::frame(ctx, input, |ui| app.ui(ui))
+}
+
+/// 等待中那一块里，名字**正好**是 `名字` 的那一行，后头跟着的副标题**正好**是 `副标题`。
+fn 那一行写着(output: &egui::FullOutput, 名字: &str, 副标题: &str) {
+    let 屏上 = 画出来的字(output);
+    let 名 = shared::画着的每一处(output, &|text| text == 名字);
+    let 副 = shared::画着的每一处(output, &|text| text == 副标题);
+    assert!(
+        名.iter().any(|名| 副
+            .iter()
+            .any(|副| (名.center().y - 副.center().y).abs() < 2.0 && 副.min.x > 名.max.x)),
+        "等待中那一行「{名字}」后头没跟着副标题「{副标题}」：\n{屏上}",
+    );
+}
+
+#[test]
+fn 稿上八种长活各排一趟_任务屏上每一张卡都有副标题_文字照稿() {
+    // 设计稿 `TASKS` 每一种长活都有一行 `sub`：扫描是那个根的路径，识别说几个变体、本地运行，刮削说只用本地源，
+    // 整理标题说它在做什么，导出说导到哪儿、只写元数据，差量预览说只读，同步说先删再复制、共几个文件
+    // （`prototype.html` 的 `TASKS`）。这里**按界面上那几颗按钮同一个入口**一趟趟排上去，看任务屏上那一行。
+    let ctx = headless::context();
+    let mut 场 = 落盘的现场::摆好();
+
+    // ① 差量预览：台上先占住，它稳稳排在等待中；看完放行，让它真排出一份差量——同步那一趟照它跑。
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着台子");
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.preview(site, tasks);
+        assert!(screen.error().is_none(), "{:?}", screen.error());
+    }
+    那一行写着(
+        &高高的一帧(&ctx, &mut 场.app),
+        "生成差量预览 · 掌机",
+        "只读取库和设备上的目录，不写入文件",
+    );
+    // 差量预览整条只读，停了什么都不留下：不说续得上。
+    assert_eq!(
+        场.app
+            .tasks()
+            .queued()
+            .iter()
+            .map(|waiting| waiting.resumable)
+            .collect::<Vec<_>>(),
+        vec![false],
+    );
+    占位.按停(场.app.tasks_mut());
+    shared::等任务台空了(&mut 场.app);
+    let 几步 = 场
+        .app
+        .sublibrary()
+        .prepared()
+        .expect("差量预览排出来了")
+        .plan
+        .touched();
+    assert!(几步 > 0, "前提：这份差量里有要同步的步");
+
+    // ② 其余几种：台上再占住，一趟趟按下去，全都排在等待中。
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着台子");
+    {
+        let (roots, site, tasks) = 场.app.roots_site_and_tasks();
+        roots.scan(site, tasks, "主库");
+        roots.fetch(tasks, Source::Dat);
+        roots.check_health(site, tasks);
+    }
+    for stage in [
+        Stage::Identify,
+        Stage::Scrape,
+        Stage::FoldTitles,
+        Stage::Export,
+    ] {
+        场.app.start_stage(stage);
+    }
+    // 浏览屏「刮削…」那一层，勾中了两个作品（SFC 那两个变体）。
+    let mut 刮削 = Panel::new(场.工作区.path().to_path_buf());
+    刮削.open(
+        vec![
+            "主库/SFC/幻想传说 汉化版.zip".to_string(),
+            "主库/SFC/圣剑传说 3 汉化版.zip".to_string(),
+        ],
+        2,
+        Reach::Picked { works: 2 },
+    );
+    {
+        let (_, site, tasks) = 场.app.roots_site_and_tasks();
+        刮削.start(site, tasks);
+    }
+    assert!(刮削.error().is_none(), "{:?}", 刮削.error());
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.sync(site, tasks);
+        assert!(screen.error().is_none(), "{:?}", screen.error());
+    }
+
+    let output = 高高的一帧(&ctx, &mut 场.app);
+    let 根的路径 = 场.app.roots().roots()[0].root.path.clone();
+    let 导出目录 = 场.导出到.path().display().to_string();
+    // 名字照稿 `TASKS` 的 `name`（拿主意的人 2026-10-04 裁：活名照稿全改，「取回」那一个留给票 11）；
+    // 第三格是排活入口说没说**续得上**——稿上 `half` 为真的那几种，各自读代码核过停了真接得上（`Caption::resumable`）。
+    let 排着的 = 场.app.tasks().queued();
+    for (名字, 副标题, 续得上) in [
+        ("扫描 · 主库", 根的路径, true),
+        (
+            "取回 · DAT 仓库",
+            "DAT 文件 · 联网下载，只写入工作目录".to_string(),
+            false,
+        ),
+        ("库体检 · 全部根", "只读，不改动任何文件".to_string(), false),
+        (
+            "识别 · 全部变体",
+            "3 个变体 · 本地运行，不产生网络请求".to_string(),
+            true,
+        ),
+        (
+            "刮削 · 全部变体（补缺）",
+            "仅使用本地数据源 · 不产生网络请求".to_string(),
+            true,
+        ),
+        (
+            "整理标题 · 全部作品",
+            "根据识别和刮削结果生成显示标题与排序标题".to_string(),
+            false,
+        ),
+        (
+            "导出 · Pegasus",
+            format!("导出到 {导出目录} · 仅写入元数据"),
+            true,
+        ),
+        (
+            "刮削 · 2 个作品（补缺）",
+            "仅使用本地数据源 · 不产生网络请求".to_string(),
+            true,
+        ),
+        (
+            "同步 · 掌机",
+            format!("先删除，再复制 · 共 {几步} 个文件"),
+            true,
+        ),
+    ] {
+        那一行写着(&output, 名字, &副标题);
+        let 那一趟 = 排着的
+            .iter()
+            .find(|waiting| waiting.name == 名字)
+            .unwrap_or_else(|| panic!("台上没有「{名字}」：{排着的:?}"));
+        assert_eq!(那一趟.resumable, 续得上, "「{名字}」续不续得上说错了");
+    }
+    // **每一张卡都有**：等待中那一块排着的每一趟都交了副标题，没有漏掉的入口。
+    assert_eq!(排着的.len(), 9, "{排着的:?}");
+    let 没交的: Vec<&str> = 排着的
+        .iter()
+        .filter(|waiting| waiting.subtitle.is_none())
+        .map(|waiting| waiting.name.as_str())
+        .collect();
+    assert!(没交的.is_empty(), "这几趟排上去没带副标题：{没交的:?}");
+
+    场.撤掉排着的再放行(占位);
+}
+
+#[test]
+fn 刮削那一趟名字说范围与采法_用了哪几样源交给副标题() {
+    // 差距 `S-21`（`gaps-scrape-dialog.md`）：任务名照稿——勾选、筛选那两路「刮削 · N 个作品（补缺）」，单位是作品；
+    // 「刮削此作品」那一路「刮削 · 作品名」，采法挪到副标题头上（稿 `TASKS.scrapeOne`）。「仅本地源」「含联网源」不再塞进
+    // 名字的括号里，联网与否交给副标题。
+    let mut 场 = 落盘的现场::摆好();
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着台子");
+    let 排一趟 = |场: &mut 落盘的现场, reach: Reach, 联网: bool| {
+        let mut 刮削 = Panel::new(场.工作区.path().to_path_buf());
+        刮削.open(vec!["主库/SFC/幻想传说 汉化版.zip".to_string()], 1, reach);
+        if 联网 {
+            刮削.toggle_online();
+        }
+        let (_, site, tasks) = 场.app.roots_site_and_tasks();
+        刮削.start(site, tasks);
+        assert!(刮削.error().is_none(), "{:?}", 刮削.error());
+        let 排着的 = 场.app.tasks().queued();
+        let 那一趟 = 排着的.last().expect("排上了");
+        (那一趟.name.clone(), 那一趟.subtitle.clone())
+    };
+
+    assert_eq!(
+        排一趟(&mut 场, Reach::Filtered { works: 1_284 }, false),
+        (
+            "刮削 · 1,284 个作品（补缺）".to_string(),
+            Some("仅使用本地数据源 · 不产生网络请求".to_string()),
+        ),
+    );
+    assert_eq!(
+        排一趟(
+            &mut 场,
+            Reach::Work {
+                name: "幻想传说".to_string()
+            },
+            false
+        ),
+        (
+            "刮削 · 幻想传说".to_string(),
+            Some("补缺 · 仅使用本地数据源".to_string()),
+        ),
+    );
+    // 补缺那一趟续得上：停下之后已经采完的落在中立库里，下一趟补缺照输入指纹跳过它们。
+    assert!(
+        场.app
+            .tasks()
+            .queued()
+            .iter()
+            .all(|waiting| waiting.resumable)
+    );
+    // **重采那一趟不说续得上**：再按一次重采，绕过输入指纹全部重来——停下之前采完的那些也再采一遍。
+    let mut 重采 = Panel::new(场.工作区.path().to_path_buf());
+    重采.open(
+        vec!["主库/SFC/幻想传说 汉化版.zip".to_string()],
+        1,
+        Reach::Picked { works: 1 },
+    );
+    重采.set_sweep(romcat_core::scrape::Gather::Refresh);
+    {
+        let (_, site, tasks) = 场.app.roots_site_and_tasks();
+        重采.start(site, tasks);
+    }
+    let 排着的 = 场.app.tasks().queued();
+    let 那一趟 = 排着的.last().expect("排上了");
+    assert_eq!(
+        (那一趟.name.as_str(), 那一趟.resumable),
+        ("刮削 · 1 个作品（重采）", false),
+    );
+
+    // 勾着联网源（工作目录里存着一套账号，设置屏存的就是这一份）：名字照旧，副标题说清还用了 ScreenScraper。
+    // 这一批一个确认过的条目都没有，一个请求都不发——副标题照预估框那一格说。
+    romcat_core::scrape::online::save_account(
+        场.工作区.path(),
+        &romcat_core::scrape::online::Account {
+            dev_id: "测试".to_owned(),
+            dev_password: "测试".to_owned(),
+            ..Default::default()
+        },
+    )
+    .expect("存得下账号");
+    assert_eq!(
+        排一趟(&mut 场, Reach::Picked { works: 1 }, true),
+        (
+            "刮削 · 1 个作品（补缺）".to_string(),
+            Some("使用本地数据源与 ScreenScraper · 不产生网络请求".to_string()),
+        ),
+    );
+    assert_eq!(
+        排一趟(
+            &mut 场,
+            Reach::Work {
+                name: "幻想传说".to_string()
+            },
+            true
+        ),
+        (
+            "刮削 · 幻想传说".to_string(),
+            Some("补缺 · 使用本地数据源与 ScreenScraper".to_string()),
+        ),
+    );
+
+    场.撤掉排着的再放行(占位);
+}
+
+#[test]
+fn 差量预览那一趟在卡上也叫生成差量预览_排着时那一句与撤掉之后那一句() {
+    // 差距 `D-04`（`gaps-diff-preview-and-merge.md`）：活名照稿「生成差量预览 · 子库名」，卡上那几处跟着改——排着、跑着时
+    // 按钮旁边那一句（拿主意的人 2026-10-01 裁 `F-12`：留，字改「正在生成差量预览：…」）、撤掉之后那一句，都不再说「排差量」。
+    let ctx = headless::context();
+    let mut 场 = 落盘的现场::摆好();
+    场.app.show_view(View::Sublibraries);
+    let 占位 = 占位活::排上(场.app.tasks_mut(), "占着台子");
+    {
+        let (screen, site, tasks) = 场.app.sublibrary_site_and_tasks();
+        screen.preview(site, tasks);
+    }
+    let 排着的 = 场.app.sublibrary().previewing().expect("排上了");
+    let 屏上 = 画出来的字(&高高的一帧(&ctx, &mut 场.app));
+    assert!(
+        屏上.contains(&format!("生成差量预览排在任务台上等着（第 {排着的} 号）")),
+        "卡上那一句没照新活名说：\n{屏上}",
+    );
+
+    // 撤掉排着的那一趟（任务屏「移除」与卡上「撤掉」走的同一个入口），卡上那句收场的话也照新活名说。
+    场.app.tasks_mut().stop(排着的);
+    场.app.poll_tasks();
+    let 屏上 = 画出来的字(&高高的一帧(&ctx, &mut 场.app));
+    assert!(
+        屏上.contains("生成差量预览已取消。这一趟整条只读"),
+        "撤掉之后那一句没照新活名说：\n{屏上}",
+    );
+    assert!(!屏上.contains("排差量"), "卡上还有旧活名：\n{屏上}");
+
+    占位.按停(场.app.tasks_mut());
+    shared::等任务台空了(&mut 场.app);
 }
