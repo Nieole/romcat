@@ -830,6 +830,17 @@ pub struct Plan {
     /// 界面上那一格「同步时补回这 N 个文件」照它写——不在这儿数，界面就得自己把两批凑
     /// 一遍，而第二批压根不在 [`Self::surprises`] 里，凑出来的数只会比真的少（ADR-0024）。
     pub restorable: u64,
+    /// **补回之后新增变为几个**（差距 C-1）：界面上补回那一格说明的前半句「补回后新增变为 N 个」照它写。
+    ///
+    /// **开没开[补回](Options::restore_missing)，这个数都一样**——它答的是「勾上之后会是几个」，不是「这一趟是几个」；
+    /// 勾上之后它就等于[新增](Self::adds)那一格。不在这儿答的话，界面得自己拿新增与[能补几个](Self::restorable)
+    /// 凑一遍，而开着补回时新增里已经含着补回的那几步，凑出来会多算一遍（ADR-0024）。
+    ///
+    /// [`plan`] 只看得见手上这一份期望状态，填的是**补回不改期望状态**时的那个数：新增，扣掉已经补上的那几步，加上能补几个。
+    /// 同步那条线上补回**会**改期望状态：设备上缺失、这一趟不补的变体不铺媒体、不列条目，勾上补回它们就跟着回来（票
+    /// `verdict-store-and-sync/22`）。于是没开补回、又有变体会因补回重新上卡时，[`prepare_selected`] 另走一遍补回的那一份，
+    /// 把这一格换成那一份的新增（挂单 `Q1888`）——跟着回来的媒体与元数据都算在里头。
+    pub adds_if_restored: u64,
     /// 目标上列不开的目录数。
     pub unlistable_dirs: u64,
     /// 主库侧元数据读不到的成员数：这几个的容量没算进账里（ADR-0021）。
@@ -885,17 +896,6 @@ impl Plan {
     #[must_use]
     pub fn touched(&self) -> u64 {
         self.steps.len() as u64
-    }
-
-    /// **补回之后新增变为几个**（差距 C-1）：界面上补回那一格说明的前半句「补回后新增变为 N 个」照它写。
-    ///
-    /// **开没开[补回](Options::restore_missing)，这个数都一样**——它答的是「勾上之后会是几个」，不是「这一趟是几个」；
-    /// 勾上之后它就等于[新增](Self::adds)那一格。不在这儿算的话，界面得自己拿新增与[能补几个](Self::restorable)
-    /// 凑一遍，而开着补回时新增里已经含着补回的那几步，凑出来会多算一遍（ADR-0024）。
-    #[must_use]
-    pub fn adds_if_restored(&self) -> u64 {
-        let 已经补上的 = self.steps.iter().filter(|step| step.restore).count() as u64;
-        self.adds.files - 已经补上的 + self.restorable
     }
 
     /// **目标上对不上的那几件**涉及几个不同的变体。人认得的是这个数，不是文件数。
@@ -1266,29 +1266,8 @@ pub fn plan(
         .iter()
         .map(|file| (file.path.as_str(), file))
         .collect();
-    let recorded: BTreeMap<&str, &ManifestFile> = manifest
-        .files
-        .iter()
-        .map(|file| (file.path.as_str(), file))
-        .collect();
-    let on_target: BTreeMap<&str, &TargetFile> = actual
-        .files
-        .iter()
-        .map(|file| (file.path.as_str(), file))
-        .collect();
-    // **清单之外**的那些，按**折起来的落点**再索引一份（见函数文档）。只收清单之外的：
-    // ADR-0015 里「落点被占」说的就是「有个清单之外的文件挡着」，而清单里记着的那些
-    // 归下面两个循环按**一模一样的键**处置——折起来一样的不算认领。
-    //
-    // 同一个折起来的键上撞了好几个（只有大小写敏感的目标才可能）就留**最先**那个：
-    // 报出来的是挡路的证据，谁挡的都一样，而按路径排过的输入让这个选择是确定的。
-    let mut strangers: BTreeMap<String, &TargetFile> = BTreeMap::new();
-    for file in &actual.files {
-        if recorded.contains_key(file.path.as_str()) {
-            continue;
-        }
-        strangers.entry(path::fold(&file.path)).or_insert(file);
-    }
+    let sides = Sides::new(manifest, actual);
+    let (recorded, on_target) = (&sides.recorded, &sides.on_target);
 
     // 目标存储放不下的那些**既不新增也不删除**：它们进不了目标（新增必然失败），
     // 可万一目标上已经有一份，那也不是它该被删掉的理由——我们这条「放不下」的声明
@@ -1323,14 +1302,7 @@ pub fn plan(
 
     // ── 期望这一侧：新增、更新、不动，以及落点被占。
     for (path, file) in &wanted {
-        // 落点上有个**清单之外**的东西挡着吗。逐字先问一次（那是常态），
-        // 折起来再问一次（目标多半大小写不敏感，见函数文档）。清单里记着的那些
-        // 不算挡路：它们是工具自己放的，下面按一模一样的键处置。
-        let blocking = on_target
-            .get(path)
-            .copied()
-            .filter(|_| !recorded.contains_key(path))
-            .or_else(|| strangers.get(&path::fold(path)).copied());
+        let blocking = sides.blocking(path);
 
         let Some(previous) = recorded.get(path) else {
             // 清单里没有这条路径。目标上有东西挡着就一定不碰——**那多半就是维护者
@@ -1341,24 +1313,7 @@ pub fn plan(
             }
             continue;
         };
-        // 上一趟就已经知道它没了：那是维护者在掌机上删的，工具**记着不补**（故事 65）。
-        // 目标上眼下还是没有它，就只数一数——不当意外报第二遍，也不重新变成一条新增。
-        if previous.absent && !on_target.contains_key(path) {
-            out.withheld += 1;
-            // **补回也要看落点**：明知故犯不是静默，但它也不是覆盖别人的许可。挡着的那几个
-            // 补回不了，所以也不算进「补回会补几个」（[`Plan::restorable`]）。
-            if blocking.is_none() {
-                out.restorable += 1;
-            }
-            if options.restore_missing {
-                match blocking {
-                    Some(target) => out.surprises.push(occupied(path, target, &file.variant)),
-                    None => steps.push(step(Act::Add, file, 0, true)),
-                }
-            }
-            continue;
-        }
-        // 它又落回目标上了（维护者自己拷回去的，或者换了一份）：底下这段核对照常走，
+        // 清单里那一格记着「你删过」、它却又落回目标上了（维护者自己拷回去的，或者换了一份）：底下这段核对照常走，
         // 比的是**当初放上去时**记下的那个戳——回来的是不是同一份，那一格答得出来。
         match verify(previous, on_target.get(path).copied()) {
             Verified::Same => {
@@ -1368,26 +1323,36 @@ pub fn plan(
                     steps.push(step(Act::Update, file, previous.stamp.bytes, false));
                 }
             }
+            // **设备上缺失**：清单记着、目标上没有。补不补只在 [`missing_fate`] 一处判——这一趟哪几个变体因此不在卡上
+            // （[`stays_gone`]）问的是同一处。
             Verified::Gone => {
-                out.surprises.push(Surprise {
-                    kind: SurpriseKind::Gone,
-                    path: (*path).to_string(),
-                    landing: None,
-                    expected: Some(previous.stamp),
-                    found: None,
-                    variant: file.variant.clone(),
-                    still_wanted: true,
-                });
-                // 我们放的那份没了，可落点上换了个清单之外的东西站着
-                // （只差大小写就看不见它）——补回去等于顶掉它，所以挡着的不算能补。
+                if previous.absent {
+                    // 上一趟就已经知道它没了：那是维护者在掌机上删的，工具**记着不补**（故事 65）。
+                    // 只数一数——不当意外报第二遍，也不重新变成一条新增。
+                    out.withheld += 1;
+                } else {
+                    out.surprises.push(Surprise {
+                        kind: SurpriseKind::Gone,
+                        path: (*path).to_string(),
+                        landing: None,
+                        expected: Some(previous.stamp),
+                        found: None,
+                        variant: file.variant.clone(),
+                        still_wanted: true,
+                    });
+                }
+                // **补回也要看落点**：明知故犯不是静默，但它也不是覆盖别人的许可。我们放的那份没了，可落点上换了个
+                // 清单之外的东西站着（只差大小写就看不见它）——补回去等于顶掉它，所以挡着的不算进「补回会补几个」
+                // （[`Plan::restorable`]）。
                 if blocking.is_none() {
                     out.restorable += 1;
                 }
-                if options.restore_missing {
-                    match blocking {
-                        Some(target) => out.surprises.push(occupied(path, target, &file.variant)),
-                        None => steps.push(step(Act::Add, file, 0, true)),
+                match missing_fate(options, blocking) {
+                    Missing::Restore => steps.push(step(Act::Add, file, 0, true)),
+                    Missing::Blocked(target) => {
+                        out.surprises.push(occupied(path, target, &file.variant));
                     }
+                    Missing::Stays => {}
                 }
             }
             Verified::Off(kind, stamp) => out.surprises.push(Surprise {
@@ -1403,7 +1368,7 @@ pub fn plan(
     }
 
     // ── 清单这一侧：删除。**删除项只可能从这个循环里长出来。**
-    for (path, previous) in &recorded {
+    for (path, previous) in recorded {
         if wanted.contains_key(path) || barred.contains(path) {
             continue;
         }
@@ -1473,6 +1438,9 @@ pub fn plan(
         .map(|s| s.was)
         .sum();
     out.deletes = tally(steps.iter().filter(|s| s.act == Act::Delete), |s| s.was);
+    // 补回不改期望状态时，勾上之后的新增就是这么多（[`Plan::adds_if_restored`]；改期望状态的那一种由同步那条线换掉）。
+    let 已经补上的 = steps.iter().filter(|step| step.restore).count() as u64;
+    out.adds_if_restored = out.adds.files - 已经补上的 + out.restorable;
     out.keeps = Tally {
         files: keeps.len() as u64,
         variants: distinct(keeps.iter().map(|file| file.variant.as_str())),
@@ -1602,6 +1570,120 @@ fn verify(previous: &ManifestFile, target: Option<&TargetFile>) -> Verified {
     } else {
         Verified::Off(SurpriseKind::Changed, Some(stamp))
     }
+}
+
+/// 清单与目标这两方，**按落点索引好**：[`plan`] 与 [`stays_gone`] 拿同一份去问（ADR-0024）。
+struct Sides<'a> {
+    /// 清单里记着的，按落点。
+    recorded: BTreeMap<&'a str, &'a ManifestFile>,
+    /// 目标上实际躺着的，按落点（逐字）。
+    on_target: BTreeMap<&'a str, &'a TargetFile>,
+    /// **清单之外**的那些，按**折起来的落点**再索引一份（见 [`plan`] 的函数文档）。只收清单之外的：
+    /// ADR-0015 里「落点被占」说的就是「有个清单之外的文件挡着」，而清单里记着的那些
+    /// 按**一模一样的键**处置——折起来一样的不算认领。
+    ///
+    /// 同一个折起来的键上撞了好几个（只有大小写敏感的目标才可能）就留**最先**那个：
+    /// 报出来的是挡路的证据，谁挡的都一样，而按路径排过的输入让这个选择是确定的。
+    strangers: BTreeMap<String, &'a TargetFile>,
+}
+
+impl<'a> Sides<'a> {
+    fn new(manifest: &'a Manifest, actual: &'a TargetState) -> Self {
+        let recorded: BTreeMap<&str, &ManifestFile> = manifest
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file))
+            .collect();
+        let on_target = actual
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file))
+            .collect();
+        let mut strangers: BTreeMap<String, &TargetFile> = BTreeMap::new();
+        for file in &actual.files {
+            if recorded.contains_key(file.path.as_str()) {
+                continue;
+            }
+            strangers.entry(path::fold(&file.path)).or_insert(file);
+        }
+        Self {
+            recorded,
+            on_target,
+            strangers,
+        }
+    }
+
+    /// 落点上有个**清单之外**的东西挡着吗。逐字先问一次（那是常态），折起来再问一次（目标多半大小写不敏感，见 [`plan`]
+    /// 的函数文档）。清单里记着的那些不算挡路：它们是工具自己放的，按一模一样的键处置。
+    fn blocking(&self, path: &str) -> Option<&'a TargetFile> {
+        self.on_target
+            .get(path)
+            .copied()
+            .filter(|_| !self.recorded.contains_key(path))
+            .or_else(|| self.strangers.get(&path::fold(path)).copied())
+    }
+
+    /// 期望状态里的这一份**设备上缺失、这一趟不补**吗：清单记着、目标上没有它（[`verify`]），而 [`missing_fate`] 说不补回去。
+    fn stays_gone(&self, path: &str, options: Options) -> bool {
+        self.recorded.get(path).is_some_and(|previous| {
+            matches!(
+                verify(previous, self.on_target.get(path).copied()),
+                Verified::Gone
+            )
+        }) && !matches!(missing_fate(options, self.blocking(path)), Missing::Restore)
+    }
+}
+
+/// **设备上缺失**的一份（清单记着、目标上没有）这一趟怎么办（[`missing_fate`]）。
+enum Missing<'a> {
+    /// 不补：没开补回（ADR-0015：那可能是维护者在掌机上有意删的）。
+    Stays,
+    /// 补回去：开了补回，落点上又没有别的东西挡着。
+    Restore,
+    /// 开了补回，落点上却挡着一个清单之外的东西：补回不是覆盖别人的许可，报成[落点被占](SurpriseKind::Occupied)，照旧不补。
+    Blocked(&'a TargetFile),
+}
+
+/// **设备上缺失**的一份这一趟补不补回去。只在这一处判（ADR-0024）：[`plan`] 照它长不长补回那一步，[`stays_gone`] 照它答
+/// 哪几份这一趟不在卡上——两处各判一遍的话，勾上「补回」之后文件补回来了、条目却还不列，或者反过来。
+fn missing_fate(options: Options, blocking: Option<&TargetFile>) -> Missing<'_> {
+    match (options.restore_missing, blocking) {
+        (false, _) => Missing::Stays,
+        (true, None) => Missing::Restore,
+        (true, Some(target)) => Missing::Blocked(target),
+    }
+}
+
+/// 期望状态里哪几份**设备上缺失、这一趟不补**（交回的是 `desired` 里那几条落点）：清单记着、目标上没有，而这一趟不补回去
+/// ——没开[补回](Options::restore_missing)，或者落点上挡着清单之外的东西。与 [`plan`] 判的是同一件事、同一段代码
+/// （`verify`、`missing_fate`）；[`Footprint::launching`] 照它答哪几个变体这一趟不在卡上（票 `verdict-store-and-sync/22`）。
+///
+/// [`plan`] 比的是**与目标折齐之后**的落点（[`align`]），这里也照那样比；只是不动调用方那一份——前端元数据与媒体照折齐之前的
+/// 落点起名（[`prepare_selected`]），于是折在一份副本上，交回的仍是折齐之前那一条。
+///
+/// 只读三样（期望状态、清单、目标状态），不碰磁盘：「看一眼目标」那一步读过的那份目标状态原样拿来用，排计划不多读一遍目标。
+#[must_use]
+pub fn stays_gone(
+    desired: &Desired,
+    manifest: &Manifest,
+    actual: &TargetState,
+    options: Options,
+) -> BTreeSet<String> {
+    let mut aligned = desired.clone();
+    let realign = align(&mut aligned, actual);
+    let sides = Sides::new(manifest, actual);
+    desired
+        .files
+        .iter()
+        .filter(|file| {
+            let at = realign
+                .moved
+                .get(&file.path)
+                .map_or(file.path.as_str(), String::as_str);
+            sides.stays_gone(at, options)
+        })
+        .map(|file| file.path.clone())
+        .collect()
 }
 
 /// 主库那一侧还是清单记着的那份东西吗。
@@ -1934,25 +2016,36 @@ impl Footprint {
     ///   产物，主库里那个名字卡上没有，写原名的话前端里点下去找不着文件。多碟变体没生成播放列表时也走这一条：条目照旧指
     ///   主文件，转了格式就指转出来那一份。
     ///
-    /// 剩下一种是 [`OnCard::left_off`]：**主文件放不进目标**（原样搬的那一份、或者转出来的那一份被拦在
-    /// [`Desired::rejected`] 里），卡上的播放列表又没接住它——条目要启动的那一份卡上没有，写哪个名字都指着空处，
-    /// 于是卡上的前端元数据不列它、媒体也不铺（票 `verdict-store-and-sync/21`，挂单 `Q1847`）。认的是**明着被拦下**
-    /// 的那一份，不是「期望状态里找不着」：目录树变体的主文件是个目录，本来就不进期望状态，它的内容照样上卡。
+    /// 剩下的是 [`OnCard::left_off`]：**没上卡**，条目要启动的那一份卡上没有，写哪个名字都指着空处，于是卡上的前端元数据
+    /// 不列它、媒体也不铺。两种（[`LeftOff`]）：
     ///
-    /// `desired` 得是**按目标存储筛过之后**的期望状态，播放列表也已经并进来筛过（[`Desired::add_and_screen`]）。
-    /// 转不转、转成什么只在 [`Self::desired`] 判一次，放不放得下只在 [`Desired::screen`] 判一次，这里只读它们的结论。
+    /// - **主文件放不进目标**（原样搬的那一份、或者转出来的那一份被拦在 [`Desired::rejected`] 里），卡上的播放列表又没接住
+    ///   它（票 `verdict-store-and-sync/21`，挂单 `Q1847`）。认的是**明着被拦下**的那一份，不是「期望状态里找不着」：
+    ///   目录树变体的主文件是个目录，本来就不进期望状态，它的内容照样上卡。
+    /// - **条目启动的那一份设备上缺失、这一趟不补**（`gone`，[`stays_gone`] 交的那几条落点；票
+    ///   `verdict-store-and-sync/22`，挂单 `Q1880`）：人在掌机上删了它，默认不补（ADR-0015）。看的是条目启动的那一份——
+    ///   有播放列表的看播放列表，没有的看主文件（转了格式的是转出来那一份）；勾上补回的那几份不在 `gone` 里，照旧列。
     ///
-    /// **只有同步这一侧有**：导出到主库那一侧不转格式、不生成播放列表、没有放不放得下这回事（ADR-0004），条目照旧指
-    /// 每个变体的主文件，一个都不少。
+    /// `desired` 得是**按目标存储筛过之后**的期望状态，播放列表也已经并进来筛过（[`Desired::add_and_screen`]），落点是
+    /// 与目标折齐之前的写法（`gone` 也是）。转不转、转成什么只在 [`Self::desired`] 判一次，放不放得下只在
+    /// [`Desired::screen`] 判一次，补不补只在 [`stays_gone`] 那一处判，这里只读它们的结论。
+    ///
+    /// **只有同步这一侧有**：导出到主库那一侧不转格式、不生成播放列表、没有放不放得下与设备上缺失这回事（ADR-0004），
+    /// 条目照旧指每个变体的主文件，一个都不少。
     #[must_use]
-    pub fn launching(&self, desired: &Desired, playlists: &playlist::Laid) -> OnCard {
+    pub fn launching(
+        &self,
+        desired: &Desired,
+        playlists: &playlist::Laid,
+        gone: &BTreeSet<String>,
+    ) -> OnCard {
         let mut launch = playlists.launching(desired);
-        // 主库里的键 → 转出来那一份在卡上的落点。只有 ROM 那一类有主库里的键。
-        let converted: BTreeMap<&str, &str> = desired
+        // 主库里的键 → 它在卡上的那一份（期望状态里那一份；转了格式的是转出来那一份）。只有 ROM 那一类有主库里的键。
+        let landing: BTreeMap<&str, &DesiredFile> = desired
             .files
             .iter()
-            .filter(|file| file.kind == FileKind::Rom && file.convert.is_some())
-            .map(|file| (file.source.as_str(), file.path.as_str()))
+            .filter(|file| file.kind == FileKind::Rom)
+            .map(|file| (file.source.as_str(), file))
             .collect();
         // 主库里的键 → 拦下它的那一条。转出来那一份被拦下时，`source` 照旧是主库里那份原始形态的键。
         let barred: BTreeMap<&str, RejectReason> = desired
@@ -1963,19 +2056,38 @@ impl Footprint {
             .collect();
         let mut left_off = BTreeMap::new();
         for member in self.members.iter().filter(|member| member.is_main()) {
-            if launch.contains_key(&member.variant_key) {
-                continue;
+            // 卡上有它的播放列表：条目启动播放列表，看的是它在不在。
+            match launch
+                .get(&member.variant_key)
+                .map(|playlist| gone.contains(&playlist.file))
+            {
+                Some(true) => {
+                    launch.remove(&member.variant_key);
+                    left_off.insert(member.variant_key.clone(), LeftOff::Gone);
+                    continue;
+                }
+                Some(false) => continue,
+                None => {}
             }
-            if let Some(at) = converted.get(member.key.as_str()) {
-                launch.insert(
-                    member.variant_key.clone(),
-                    Launch {
-                        file: (*at).to_string(),
-                        hidden: Vec::new(),
-                    },
-                );
-            } else if let Some(reason) = barred.get(member.key.as_str()) {
-                left_off.insert(member.variant_key.clone(), *reason);
+            match landing.get(member.key.as_str()) {
+                Some(file) if gone.contains(&file.path) => {
+                    left_off.insert(member.variant_key.clone(), LeftOff::Gone);
+                }
+                Some(file) if file.convert.is_some() => {
+                    launch.insert(
+                        member.variant_key.clone(),
+                        Launch {
+                            file: file.path.clone(),
+                            hidden: Vec::new(),
+                        },
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    if let Some(reason) = barred.get(member.key.as_str()) {
+                        left_off.insert(member.variant_key.clone(), LeftOff::Rejected(*reason));
+                    }
+                }
             }
         }
         OnCard { launch, left_off }
@@ -1991,17 +2103,26 @@ impl Footprint {
 pub struct OnCard {
     /// 条目在卡上启动的**不是主文件原名**的那几个变体（键是变体的键）→ 启动哪一份：播放列表，或者转出来的主文件。
     pub launch: BTreeMap<String, Launch>,
-    /// **没上卡**的变体（键是变体的键）→ 拦下它主文件的那一条（[`RejectReason`]）。卡上的前端元数据不列它们，
-    /// 媒体也不铺；差量预览照它说一句（[`Concern::LeftOffCard`]）。
-    pub left_off: BTreeMap<String, RejectReason>,
+    /// **没上卡**的变体（键是变体的键）→ 为什么（[`LeftOff`]）。卡上的前端元数据不列它们，媒体也不铺；差量预览照它说一句
+    /// （[`Concern::LeftOffCard`]、[`Concern::GoneLeftOff`]）。
+    pub left_off: BTreeMap<String, LeftOff>,
 }
 
 impl OnCard {
-    /// 这个变体上了卡吗：主文件（或它的播放列表）在筛过之后的期望状态里——更准确地说，主文件没被明着拦下。
+    /// 这个变体上了卡吗：条目启动的那一份没被明着拦下（放不进目标），也不是设备上缺失、这一趟不补。
     #[must_use]
     pub fn landed(&self, variant: &str) -> bool {
         !self.left_off.contains_key(variant)
     }
+}
+
+/// 一个变体**为什么没上卡**（[`OnCard::left_off`]，只在 [`Footprint::launching`] 判）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftOff {
+    /// 主文件**放不进目标**：拦下它的那一条（票 `verdict-store-and-sync/21`）。
+    Rejected(RejectReason),
+    /// 条目启动的那一份**设备上缺失、这一趟不补**（[`stays_gone`]，票 `verdict-store-and-sync/22`）。
+    Gone,
 }
 
 // ── 落点预览（票 `gui-looks-like-the-design/21`）─────────────────────────────

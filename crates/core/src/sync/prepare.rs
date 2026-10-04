@@ -3,8 +3,8 @@
 //! ## 为什么这一步在核心里
 //!
 //! 它是十来个步骤串起来的一条线：读子库 → 读选择集 → 折事实 → 求值 → 看一眼目标 →
-//! 读能力档案 → 折期望状态 → 按目标存储筛一遍（连多碟变体的播放列表）→ 铺媒体 → 折前端元数据 →
-//! 读清单 → 排计划。每一步都是领域
+//! 读能力档案 → 折期望状态 → 按目标存储筛一遍（连多碟变体的播放列表）→ 读清单 → 铺媒体 →
+//! 折前端元数据 → 排计划。每一步都是领域
 //! 判断，而**命令行与界面必须得到同一份计划**——`romcat sublibrary plan` 印出来的那份
 //! 差量，与界面上按钮旁边显示的那份，不能是两条各自演化的代码。
 //!
@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::adapter::NoAdapter;
-use crate::capability::{RejectReason, Roster, today};
+use crate::adapter::{Adapter, NoAdapter};
+use crate::capability::{Filesystem, RejectReason, Roster, today};
 use crate::catalog::{Catalog, Roots};
 use crate::fs::RealFs;
 use crate::path;
@@ -37,7 +37,7 @@ use crate::sublibrary::{self, Selected, Sublibrary};
 use crate::task::{Cutoff, Halted, Handle};
 use crate::workspace;
 
-use super::{Desired, Manifest, ObserveError, Options, Plan, TargetState};
+use super::{Desired, LeftOff, Manifest, ObserveError, OnCard, Options, Plan, TargetState};
 
 /// **排不出计划的原因**，结构化地交出去（挂单 `Q851` `Q622`）。
 ///
@@ -187,10 +187,14 @@ pub struct Prepared {
     pub media_crowded_out: u64,
     /// 折出了几个前端条目。
     pub entries: u64,
-    /// **没上卡**的变体 → 拦下它主文件的那一条（[`OnCard::left_off`](super::OnCard::left_off)）：卡上的前端元数据不列、
-    /// 媒体也不铺（票 `verdict-store-and-sync/21`）。差量预览照它说一句：命令行印 [`Concern::LeftOffCard`]，界面在
-    /// 「放不进目标」那一栏的说明后头接 [`Self::left_off_note`]。
-    pub left_off: BTreeMap<String, RejectReason>,
+    /// **没上卡**的变体 → 为什么（[`OnCard::left_off`](super::OnCard::left_off)）：卡上的前端元数据不列、媒体也不铺。
+    /// 差量预览照它说一句，两种各说各的：
+    ///
+    /// - 主文件**放不进目标**（票 `verdict-store-and-sync/21`）：命令行印 [`Concern::LeftOffCard`]，界面在「放不进目标」
+    ///   那一栏的说明底下另起一行写 [`Self::left_off_note`]。
+    /// - **设备上缺失、这一趟不补**（票 `verdict-store-and-sync/22`）：命令行印 [`Concern::GoneLeftOff`]，界面在「设备上
+    ///   缺失」那一栏的说明底下另起一行写 [`Self::gone_note`]。
+    pub left_off: BTreeMap<String, LeftOff>,
     /// 子库记着的能力档案在眼下这份名册里找不到——退回了「不作声称」。
     pub missing_capability: Option<String>,
     /// 这份档案里有几条声明已经陈旧。
@@ -205,8 +209,9 @@ impl Prepared {
     /// 那段话只说事实与去处的名字、**不带命令**（挂单 `Q622` 那一族）：命令行照种类补自己那条命令，
     /// 界面照种类补屏上的去处。
     ///
-    /// **一条例外是 [`Concern::LeftOffCard`]**：界面不在这几行里画它，在「放不进目标」那一栏的说明后头接一句
-    /// [`Self::left_off_note`]（拿主意的人 2026-10-04 裁，挂单 `Q1877`）；命令行照旧印它。
+    /// **例外是没上卡那两条**：[`Concern::LeftOffCard`] 界面不在这几行里画，在「放不进目标」那一栏的说明底下另起一行写
+    /// [`Self::left_off_note`]（拿主意的人 2026-10-04 裁，挂单 `Q1877`）；[`Concern::GoneLeftOff`] 照同一个做法，写在
+    /// 「设备上缺失」那一栏的说明底下（[`Self::gone_note`]，票 `verdict-store-and-sync/22`）。命令行照旧印它们。
     #[must_use]
     pub fn concerns(&self) -> Vec<Concern> {
         let mut out = Vec::new();
@@ -228,24 +233,60 @@ impl Prepared {
         if self.stale_claims > 0 {
             out.push(Concern::StaleClaims(self.stale_claims));
         }
-        if !self.left_off.is_empty() {
-            out.push(Concern::LeftOffCard(self.left_off.clone()));
+        let rejected = self.rejected_left_off();
+        if !rejected.is_empty() {
+            out.push(Concern::LeftOffCard(rejected));
+        }
+        let gone = self.gone_left_off();
+        if !gone.is_empty() {
+            out.push(Concern::GoneLeftOff(gone));
         }
         out
     }
 
-    /// 「放不进目标」那一栏的说明后头**接的那一句**：有变体没上卡时是 [`LEFT_OFF_NOTE`]，没有时不说。
+    /// 「放不进目标」那一栏的说明底下**另起一行的那一句**：有变体因为主文件放不进目标而没上卡时是 [`LEFT_OFF_NOTE`]，
+    /// 没有时不说。
     ///
-    /// 拿主意的人 2026-10-04 裁（挂单 `Q1877`）：屏上那一句摆进那一栏、接在「这些文件这一趟不会复制……」后头，
-    /// 不重复个数、不用警示色——是哪几份那一栏自己列着。「什么时候说」与「说什么」都在核心这一处：被拦下的只是附属
+    /// 拿主意的人 2026-10-04 裁（挂单 `Q1877`）：屏上那一句摆进那一栏、跟着「这些文件这一趟不会复制……」那句说明，
+    /// 不重复个数、不用警示色——是哪几份那一栏自己列着；2026-10-05 又裁：另起一行，不接在说明句末尾。「什么时候说」与「说什么」都在核心这一处：被拦下的只是附属
     /// 文件、媒体或元数据时变体照样上了卡，那时说「前端里也不列」是句假话。
     #[must_use]
     pub fn left_off_note(&self) -> Option<&'static str> {
-        (!self.left_off.is_empty()).then_some(LEFT_OFF_NOTE)
+        (!self.rejected_left_off().is_empty()).then_some(LEFT_OFF_NOTE)
+    }
+
+    /// 「设备上缺失」那一栏的说明底下**另起一行的那一句**：有变体因为设备上缺失、这一趟不补而没上卡时是 [`LEFT_OFF_NOTE`]，
+    /// 没有时不说（票 `verdict-store-and-sync/22`，照 [`Self::left_off_note`] 的做法）。
+    ///
+    /// 缺的只是媒体、元数据，或者勾上了补回，变体照样在卡上，那时不说。
+    #[must_use]
+    pub fn gone_note(&self) -> Option<&'static str> {
+        (!self.gone_left_off().is_empty()).then_some(LEFT_OFF_NOTE)
+    }
+
+    /// 主文件**放不进目标**而没上卡的那几个变体 → 拦下它的那一条。
+    fn rejected_left_off(&self) -> BTreeMap<String, RejectReason> {
+        self.left_off
+            .iter()
+            .filter_map(|(key, why)| match why {
+                LeftOff::Rejected(reason) => Some((key.clone(), *reason)),
+                LeftOff::Gone => None,
+            })
+            .collect()
+    }
+
+    /// **设备上缺失、这一趟不补**而没上卡的那几个变体。
+    fn gone_left_off(&self) -> BTreeSet<String> {
+        self.left_off
+            .iter()
+            .filter(|(_, why)| **why == LeftOff::Gone)
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 }
 
-/// 「放不进目标」那一栏的说明后头接的那一句（[`Prepared::left_off_note`]）：只说事实，几个、是哪几份那一栏自己列着。
+/// 「放不进目标」与「设备上缺失」那两栏的说明底下另起一行的那一句（[`Prepared::left_off_note`]、[`Prepared::gone_note`]）：
+/// 只说事实，几个、是哪几份那一栏自己列着。
 pub const LEFT_OFF_NOTE: &str = "前端里也不列它们。";
 
 /// 折期望状态时一件**要说出口**的怪事（[`Prepared::concerns`]）。
@@ -270,6 +311,10 @@ pub enum Concern {
     /// 票 `verdict-store-and-sync/21`）。带着是哪几个（变体的键）、各被哪一类拦下：命令行列出键、补上排除的命令。
     /// 那段话只说几个、各是哪一类。**界面不画这一条**，在「放不进目标」那一栏接 [`Prepared::left_off_note`]（挂单 `Q1877`）。
     LeftOffCard(BTreeMap<String, RejectReason>),
+    /// 有几个变体条目启动的那一份**设备上缺失、这一趟不补**，卡上的前端元数据里也不列它们（[`Prepared::left_off`]，
+    /// 票 `verdict-store-and-sync/22`）。带着是哪几个（变体的键）：命令行列出键、补上补回的命令。那段话只说几个。
+    /// **界面不画这一条**，在「设备上缺失」那一栏接 [`Prepared::gone_note`]（照 [`Self::LeftOffCard`] 的做法）。
+    GoneLeftOff(BTreeSet<String>),
 }
 
 impl std::fmt::Display for Concern {
@@ -327,6 +372,13 @@ impl std::fmt::Display for Concern {
                     几类.join("、"),
                 )
             }
+            // 「设备上缺失」照屏上那一栏的名字（`SurpriseKind::shown`）；不补是这一趟的默认，前端里不列是这一趟替人做了的事。
+            Self::GoneLeftOff(gone) => write!(
+                f,
+                "有 {} 个变体{}、这一趟不补，前端里也不列。",
+                thousands(gone.len() as u64),
+                super::SurpriseKind::Gone.shown(),
+            ),
         }
     }
 }
@@ -507,7 +559,7 @@ pub fn prepare(
 }
 
 /// **对着一份已经求过值的选择集排计划**：看一眼目标 → 读能力档案 → 折期望状态 →
-/// 按目标存储筛一遍（连多碟变体的播放列表）→ 铺媒体 → 折前端元数据 → 读清单 → 排计划。
+/// 按目标存储筛一遍（连多碟变体的播放列表）→ 读清单 → 铺媒体 → 折前端元数据 → 排计划。
 ///
 /// [`prepare`] 的后半截，也是「装得下吗」唯一的那条线（[`sublibrary::fit`]）。
 /// 收 [`Selected`] 而不是去库里读选择集，是因为问「装得下吗」的不止存着的那一套：
@@ -590,8 +642,6 @@ pub fn prepare_selected(
     step("按目标存储筛一遍")?;
     let prefix_chars = path::display(&root).encode_utf16().count();
     desired.screen(&profile.filesystem, prefix_chars);
-    // 生成物：相对子库根的路径 → 字节。多碟变体的播放列表先进来，前端元数据后进来。
-    let mut generated = BTreeMap::new();
     // **多碟变体的播放列表排在筛过之后**（`playlist` 模块文档）：它列的是卡上真落着的那几张碟，有一张放不进目标
     // 的那一套就不生成（用不上播放列表的前端一份都不生成）。折出来的那几份照同一份文件系统声明再筛一遍——它们自己也
     // 可能撞车、名字太长。
@@ -609,75 +659,179 @@ pub fn prepare_selected(
             prefix_chars,
         );
     }
-    // **选中的变体在卡上落成什么样**照筛过之后的期望状态定（[`super::Footprint::launching`]）：卡上有播放列表的启动它，
-    // 主文件转了格式的启动转出来那一份（票 `verdict-store-and-sync/20`）；主文件放不进目标的压根没上卡（票
-    // `verdict-store-and-sync/21`）。前端元数据照它写条目、不列没上卡的，媒体照它起名、不铺没上卡的。
-    let on_card = footprint.launching(&desired, &playlists);
-    generated.extend(playlists.bytes);
-    step("铺媒体")?;
-    let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, selected, &on_card)
-        .map_err(|error| format!("中立库读不动：{error}"))?;
-    step("折前端元数据")?;
-    let frontend = super::frontend::lay(
-        catalog,
-        adapter.as_ref(),
-        &priorities,
-        selected,
-        &media.assets,
-        &on_card,
-    )
-    .map_err(|error| format!("元数据折不出来：{error}"))?;
-    // 媒体与前端元数据最后进来、再筛一遍。ROM 与播放列表在这一遍里结论不变（`on_card` 因此不必重取）：它们落在平台目录里，
-    // 媒体落在 `downloaded_media/`、`media/` 下，元数据落在 `gamelists/` 下或子库根上，路径撞不到一起。
-    desired.add_and_screen(
-        media.files.iter().chain(&frontend.files).cloned(),
-        &profile.filesystem,
-        prefix_chars,
-    );
-    generated.extend(frontend.bytes);
-
+    // **读清单、与目标对一遍排在铺媒体之前**（票 `verdict-store-and-sync/22`）：哪几份「设备上缺失、这一趟不补」要对过
+    // 清单与目标才知道，而它们的条目与媒体不该进前端元数据。目标在头一步已经看过，这里原样拿那一份来对，不多读一遍；
+    // 判据与排计划那一步是同一处（[`super::stays_gone`]）。
     step("读清单")?;
     let manifest = catalog
         .manifest(&sublibrary.name)
         .map_err(|error| format!("中立库读不动：{error}"))?;
-    // **落点的目录段先与目标折齐**（`sync::align`）。卡上那个 `gb/` 与我们键里的
-    // `GB/`，在不分大小写的目标上是同一个目录：不折的话文件落进 `gb/`、清单记成
-    // `GB/`，第二趟起工具就认不出自己放的那一份。改名表要原样落到媒体与生成物那两张
-    // 以落点为键的表上——挪了这边不挪那边，执行时会报「在媒体池里找不到落点」。
-    let realign = super::align(&mut desired, &actual);
-    realign.apply(&mut media.from_pool);
-    realign.apply(&mut generated);
-    step("排计划")?;
-    let plan = super::plan(
-        &sublibrary,
-        &desired,
-        &manifest,
-        &actual,
-        Options {
-            restore_missing: request.restore_missing,
-        },
-    );
+    let options = Options {
+        restore_missing: request.restore_missing,
+    };
+    // **选中的变体在卡上落成什么样**照筛过之后的期望状态定（[`super::Footprint::launching`]）：卡上有播放列表的启动它，
+    // 主文件转了格式的启动转出来那一份（票 `verdict-store-and-sync/20`）；主文件放不进目标的（票
+    // `verdict-store-and-sync/21`）、条目启动的那一份设备上缺失而这一趟不补的（票 `verdict-store-and-sync/22`）没上卡。
+    // 前端元数据照它写条目、不列没上卡的，媒体照它起名、不铺没上卡的。
+    let 落成 = |options| {
+        footprint.launching(
+            &desired,
+            &playlists,
+            &super::stays_gone(&desired, &manifest, &actual, options),
+        )
+    };
+    let on_card = 落成(options);
+    // **「补回后新增变为 N 个」要的那一份**（[`Plan::adds_if_restored`]，挂单 `Q1888`）：没开补回、而勾上补回会有变体重新
+    // 上卡时，它们的媒体与条目跟着回来，得照补回的那一份把后半截再走一遍。要不要走先在这儿定——后半截会把期望状态吃掉。
+    // 补回不让任何变体重新上卡时（常态），两份媒体与元数据一模一样，排计划那一步自己答得出那个数，不多走这一遍。
+    let restore = Options {
+        restore_missing: true,
+    };
+    let if_restored = (!request.restore_missing)
+        .then(|| 落成(restore))
+        .filter(|restored| *restored != on_card)
+        .map(|restored| (restored, desired.clone()));
+    let back_half = BackHalf {
+        catalog,
+        adapter: adapter.as_ref(),
+        pool: &pool,
+        priorities: &priorities,
+        selected,
+        sublibrary: &sublibrary,
+        filesystem: &profile.filesystem,
+        prefix_chars,
+        manifest: &manifest,
+        actual: &actual,
+        playlists: &playlists.bytes,
+    };
+    let mut laid = back_half.run(desired, &on_card, options, step)?;
+    if let Some((restored, desired)) = if_restored {
+        // 这一遍不另报步数：它是排计划那一步的一部分，只为那一个数。也因此按停下要等它走完才生效——与「两步之间看一眼」
+        // 同一个粒度，最坏多等这一遍（铺媒体、折元数据、排计划，没有一样碰盘）。
+        laid.plan.adds_if_restored = back_half
+            .run(desired, &restored, restore, &|_| Ok(()))?
+            .plan
+            .adds
+            .files;
+    }
     Ok(Prepared {
         sublibrary,
         root,
         selected: selected.clone(),
-        desired,
+        desired: laid.desired,
         manifest,
         actual,
-        plan,
-        from_pool: media.from_pool,
-        generated,
+        plan: laid.plan,
+        from_pool: laid.media.from_pool,
+        generated: laid.generated,
         scratch: pool.scratch(),
         // 读不懂的规则几条是求值那半截的账：这里收的已经是求过值的选择集，由 [`prepare`] 填。
         broken: 0,
-        media_not_in_pool: media.not_in_pool,
-        media_unknown_kind: media.unknown_kind,
-        media_crowded_out: media.crowded_out,
-        entries: frontend.entries,
+        media_not_in_pool: laid.media.not_in_pool,
+        media_unknown_kind: laid.media.unknown_kind,
+        media_crowded_out: laid.media.crowded_out,
+        entries: laid.entries,
         left_off: on_card.left_off,
         missing_capability,
         stale_claims: profile.stale_claims(&today()),
     })
+}
+
+/// 排计划**后半截**那几步要的几样（[`BackHalf::run`]）：这一趟与「补回」那一份共用，两份走的是同一段代码（挂单 `Q1888`）。
+struct BackHalf<'a> {
+    catalog: &'a Catalog,
+    adapter: &'a dyn Adapter,
+    pool: &'a MediaPool,
+    priorities: &'a Priorities,
+    selected: &'a Selected,
+    /// 计划里要的那几格（名字、目标、容量上限、生效的能力档案）。
+    sublibrary: &'a Sublibrary,
+    /// 照哪一份文件系统声明筛（这个子库生效的能力档案里那一份）。
+    filesystem: &'a Filesystem,
+    /// 子库根那串路径有多长：路径上限比的是完整路径。
+    prefix_chars: usize,
+    manifest: &'a Manifest,
+    actual: &'a TargetState,
+    /// 多碟变体的播放列表：落点 → 字节。
+    playlists: &'a BTreeMap<String, Vec<u8>>,
+}
+
+/// 后半截走完交出来的那几样。
+struct Finished {
+    /// 媒体与前端元数据也并进来、筛过、与目标折齐之后的期望状态。
+    desired: Desired,
+    /// 铺出来的媒体（落点已与目标折齐）与它的几笔账。
+    media: super::media::Laid,
+    /// 生成物：播放列表与前端元数据，落点已与目标折齐。
+    generated: BTreeMap<String, Vec<u8>>,
+    /// 折出了几个前端条目。
+    entries: u64,
+    plan: Plan,
+}
+
+impl BackHalf<'_> {
+    /// 照 `on_card`（选中的变体在卡上落成什么样）把后半截走完：铺媒体 → 折前端元数据 → 两样并进期望状态再筛一遍 →
+    /// 与目标折齐 → 排计划。`desired` 是 ROM 与播放列表已经并进来、筛过的那一份。
+    fn run(
+        &self,
+        mut desired: Desired,
+        on_card: &OnCard,
+        options: Options,
+        step: &dyn Fn(&str) -> Result<(), Halted>,
+    ) -> Result<Finished, PlanCutoff> {
+        step("铺媒体")?;
+        let mut media = super::media::lay(
+            self.catalog,
+            self.adapter,
+            self.pool,
+            self.selected,
+            on_card,
+        )
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+        step("折前端元数据")?;
+        let frontend = super::frontend::lay(
+            self.catalog,
+            self.adapter,
+            self.priorities,
+            self.selected,
+            &media.assets,
+            on_card,
+        )
+        .map_err(|error| format!("元数据折不出来：{error}"))?;
+        // 媒体与前端元数据最后进来、再筛一遍。ROM 与播放列表在这一遍里结论不变（`on_card` 因此不必重取）：它们落在平台目录里，
+        // 媒体落在 `downloaded_media/`、`media/` 下，元数据落在 `gamelists/` 下或子库根上，路径撞不到一起。
+        desired.add_and_screen(
+            media.files.iter().chain(&frontend.files).cloned(),
+            self.filesystem,
+            self.prefix_chars,
+        );
+        // 生成物：相对子库根的路径 → 字节。多碟变体的播放列表先进来，前端元数据后进来。
+        let mut generated = self.playlists.clone();
+        generated.extend(frontend.bytes);
+
+        // **落点的目录段先与目标折齐**（`sync::align`）。卡上那个 `gb/` 与我们键里的
+        // `GB/`，在不分大小写的目标上是同一个目录：不折的话文件落进 `gb/`、清单记成
+        // `GB/`，第二趟起工具就认不出自己放的那一份。改名表要原样落到媒体与生成物那两张
+        // 以落点为键的表上——挪了这边不挪那边，执行时会报「在媒体池里找不到落点」。
+        let realign = super::align(&mut desired, self.actual);
+        realign.apply(&mut media.from_pool);
+        realign.apply(&mut generated);
+        step("排计划")?;
+        let plan = super::plan(
+            self.sublibrary,
+            &desired,
+            self.manifest,
+            self.actual,
+            options,
+        );
+        Ok(Finished {
+            desired,
+            media,
+            generated,
+            entries: frontend.entries,
+            plan,
+        })
+    }
 }
 
 impl Prepared {

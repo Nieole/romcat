@@ -195,7 +195,10 @@ impl 现场 {
             &platform_manifest,
         );
         desired.add_and_screen(playlists.files.iter().cloned(), &profile.filesystem, 0);
-        let on_card = footprint.launching(&desired, &playlists);
+        // 与 `sync::prepare` 同一个次序：铺媒体之前先拿清单与目标对一遍，设备上缺失、这一趟不补的那几个不上卡。
+        let actual = sync::observe(&RealFs, self.卡.path()).expect("看得见目标");
+        let gone = sync::stays_gone(&desired, manifest, &actual, sync::Options::default());
+        let on_card = footprint.launching(&desired, &playlists, &gone);
         let media = sync::media::lay(
             &self.catalog,
             adapter.as_ref(),
@@ -223,7 +226,6 @@ impl 现场 {
 
         let mut 子库 = Sublibrary::at("掌机", self.卡.path(), "Pegasus", None);
         子库.capability = Some(profile.name.clone());
-        let actual = sync::observe(&RealFs, self.卡.path()).expect("看得见目标");
         // 与 `sync::prepare` 同一条线：落点的目录段先与目标折齐，再排计划。
         let mut from_pool = media.from_pool;
         let realign = sync::align(&mut desired, &actual);
@@ -1599,11 +1601,19 @@ impl 现场 {
 
     /// 照真的那条线排一趟计划（`sync::prepare`），不落到卡上。
     fn 照真线排一趟(&self) -> sync::Prepared {
+        self.照真线排一趟_补回(false)
+    }
+
+    /// 同上，开不开**补回**由 `补回` 定（`sync::Request::restore_missing`）：清单说有、卡上没了的那几份这一趟补不补。
+    fn 照真线排一趟_补回(&self, 补回: bool) -> sync::Prepared {
         sync::prepare(
             &self.catalog,
             self.工作区.path(),
             "掌机",
-            &sync::Request::default(),
+            &sync::Request {
+                restore_missing: 补回,
+                ..sync::Request::default()
+            },
             &Handle::new(),
         )
         .expect("排得出计划")
@@ -1612,7 +1622,12 @@ impl 现场 {
     /// **照真的那条线**同步一趟：`sync::prepare` 排计划、`execute::run` 落到卡上、清单记回中立库
     /// ——命令行与界面走的就是这几步。下一趟排计划读的就是这一趟记回去的那份清单。
     fn 照真线同步一趟(&mut self) -> sync::Outcome {
-        let prepared = self.照真线排一趟();
+        self.照真线同步一趟_补回(false)
+    }
+
+    /// 同上，开不开**补回**由 `补回` 定（[`现场::照真线排一趟_补回`]）。
+    fn 照真线同步一趟_补回(&mut self, 补回: bool) -> sync::Outcome {
+        let prepared = self.照真线排一趟_补回(补回);
         let roots = Roots::single("库", &self.库根);
         let sources = Sources {
             library: &RealFs,
@@ -2773,7 +2788,7 @@ fn 主文件放不进目标的变体_卡上的前端元数据里不列_媒体也
             prepared.left_off,
             BTreeMap::from([(
                 放不下的变体.to_string(),
-                romcat_core::capability::RejectReason::TooBig
+                sync::LeftOff::Rejected(romcat_core::capability::RejectReason::TooBig)
             )]),
             "{格式}"
         );
@@ -2788,7 +2803,7 @@ fn 主文件放不进目标的变体_卡上的前端元数据里不列_媒体也
             ["有 1 个变体放不进目标、没上卡，前端里也不列：超过单文件上限 1 个。"],
             "{格式}"
         );
-        // 界面那一句接在「放不进目标」那一栏的说明后头，说不说也由核心答（挂单 `Q1877`）。
+        // 界面那一句写在「放不进目标」那一栏的说明底下，说不说也由核心答（挂单 `Q1877`）。
         assert_eq!(
             prepared.left_off_note(),
             Some("前端里也不列它们。"),
@@ -2964,5 +2979,337 @@ fn 导出到主库那一侧照旧全列_没有放不放得下这回事() {
         for (path, 原样) in &之前 {
             assert_eq!(之后.get(path), Some(原样), "{path} 被动过");
         }
+    }
+}
+
+// ── 设备上缺失、这一趟不补的变体，卡上的前端元数据里也不列（票 `verdict-store-and-sync/22`，挂单 `Q1880`）─────────
+
+/// [`建库`] 里 FC 那两份：同步过一趟之后，人在掌机上删掉了超级玛丽。
+const 删掉的变体: &str = "库/FC/超级玛丽.zip";
+const 留着的变体: &str = "库/FC/魂斗罗.zip";
+const 删掉的那一份: &str = "FC/超级玛丽.zip";
+
+/// 摆一台同步过一趟的卡：FC 两个变体都上了卡、都铺了封面，然后人在掌机上删掉了超级玛丽的主文件。
+fn 删过一个的卡(格式: &str, 元数据: &str) -> 现场 {
+    let mut 现场 = 现场::摆好();
+    现场.收一份媒体(删掉的变体, MediaKind::Cover, b"cover-of-mario");
+    现场.收一份媒体(留着的变体, MediaKind::Cover, b"cover-of-contra");
+    现场.建子库(格式, "平台=FC");
+    现场.照真线同步一趟();
+    // 前提：头一趟两个都上了卡、都列着、封面都铺了。
+    assert_eq!(
+        列着的变体(&卡上的条目(现场.卡.path(), 格式, 元数据)),
+        [删掉的变体, 留着的变体],
+        "{格式}：前提没摆对"
+    );
+    assert!(
+        卡上有这份字节(现场.卡.path(), b"cover-of-mario"),
+        "{格式}：前提没摆对"
+    );
+    fs::remove_file(现场.卡.path().join(删掉的那一份)).expect("删得掉");
+    现场
+}
+
+#[test]
+fn 设备上缺失_这一趟不补的变体_卡上的前端元数据里不列_媒体也不在_同一子库里别的照旧在_两家都是() {
+    // 挂单 `Q1880`：人在掌机上删掉一个游戏，下一趟它是「设备上缺失」、默认不补（ADR-0015）；从前卡上的前端元数据照旧
+    // 列着它，前端里多一条指着空处的条目。
+    for (格式, 元数据) in [
+        ("ES-Gamelist", "gamelists/FC/gamelist.xml"),
+        ("Pegasus", "FC.metadata.pegasus.txt"),
+    ] {
+        let mut 现场 = 删过一个的卡(格式, 元数据);
+
+        // 前提：这一趟它是「设备上缺失」，默认不补。
+        let prepared = 现场.照真线排一趟();
+        assert!(
+            prepared
+                .plan
+                .surprises
+                .iter()
+                .any(|one| one.kind == sync::SurpriseKind::Gone && one.path == 删掉的那一份),
+            "{格式}：前提没摆对：{:#?}",
+            prepared.plan.surprises
+        );
+        // 「这一个变体上没上卡」照旧只在 `Footprint::launching` 一处答（ADR-0024），设备上缺失、这一趟不补并进了那一处。
+        assert_eq!(
+            prepared.left_off,
+            BTreeMap::from([(删掉的变体.to_string(), sync::LeftOff::Gone)]),
+            "{格式}"
+        );
+        // 差量预览说一句：命令行印核心那件提示（只说几个、不带命令），界面在「设备上缺失」那一栏的说明底下写那一句；
+        // 「放不进目标」那一栏不接——这一趟没有放不进的。
+        let 那一句: Vec<String> = prepared
+            .concerns()
+            .iter()
+            .filter(|concern| matches!(concern, sync::Concern::GoneLeftOff(_)))
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            那一句,
+            ["有 1 个变体设备上缺失、这一趟不补，前端里也不列。"],
+            "{格式}"
+        );
+        assert_eq!(prepared.gone_note(), Some("前端里也不列它们。"), "{格式}");
+        assert_eq!(prepared.left_off_note(), None, "{格式}");
+
+        现场.照真线同步一趟();
+        assert!(
+            !现场.卡.path().join(删掉的那一份).exists(),
+            "{格式}：默认不补"
+        );
+        // ⭐ **元数据里没有它那一条**；同一份元数据里别的照旧在。
+        let 条目 = 卡上的条目(现场.卡.path(), 格式, 元数据);
+        assert_eq!(
+            列着的变体(&条目),
+            [留着的变体],
+            "{格式}：设备上缺失、这一趟不补的不该列：{条目:#?}"
+        );
+        // ⭐ **它的媒体也不在**：上一趟铺过去的那张封面清单记着，这一趟不再要它就删掉；别的照旧在。
+        assert!(
+            !卡上有这份字节(现场.卡.path(), b"cover-of-mario"),
+            "{格式}：设备上缺失、这一趟不补的，封面不该在：{:?}",
+            盘上有什么(现场.卡.path()).keys().collect::<Vec<_>>()
+        );
+        assert!(
+            卡上有这份字节(现场.卡.path(), b"cover-of-contra"),
+            "{格式}：别的封面照旧在"
+        );
+
+        // 再来一趟：清单里那一格已经记成「你删过、工具记着不补」，它不再报成意外——照旧不列。
+        let prepared = 现场.照真线排一趟();
+        assert_eq!(prepared.plan.withheld, 1, "{格式}：前提没摆对");
+        assert!(
+            prepared.plan.surprises.is_empty(),
+            "{格式}：前提没摆对：{:#?}",
+            prepared.plan.surprises
+        );
+        assert_eq!(
+            prepared.left_off,
+            BTreeMap::from([(删掉的变体.to_string(), sync::LeftOff::Gone)]),
+            "{格式}"
+        );
+        assert_eq!(prepared.gone_note(), Some("前端里也不列它们。"), "{格式}");
+        现场.照真线同步一趟();
+        assert_eq!(
+            列着的变体(&卡上的条目(现场.卡.path(), 格式, 元数据)),
+            [留着的变体],
+            "{格式}：记着不补的那一趟同样不该列"
+        );
+        assert!(!卡上有这份字节(现场.卡.path(), b"cover-of-mario"), "{格式}");
+    }
+}
+
+#[test]
+fn 设备上缺失的变体勾上补回_文件补回来_条目照旧列_封面也在_两家都是() {
+    // 补回是「明知故犯」（ADR-0015）：勾上它，那一份这一趟补回卡上，条目就不该被摘掉。两条路都走一遍：删掉之后头一趟就勾上
+    // （这一趟才发现没了），与先不补一趟、再勾上（清单里已经记着「你删过」）。
+    for (格式, 元数据) in [
+        ("ES-Gamelist", "gamelists/FC/gamelist.xml"),
+        ("Pegasus", "FC.metadata.pegasus.txt"),
+    ] {
+        for 先不补一趟 in [false, true] {
+            let mut 现场 = 删过一个的卡(格式, 元数据);
+            if 先不补一趟 {
+                现场.照真线同步一趟();
+            }
+
+            let prepared = 现场.照真线排一趟_补回(true);
+            assert!(
+                prepared
+                    .plan
+                    .steps
+                    .iter()
+                    .any(|step| step.restore && step.path == 删掉的那一份),
+                "{格式}（先不补一趟：{先不补一趟}）：前提没摆对：{:#?}",
+                prepared.plan.steps
+            );
+            assert!(
+                prepared.left_off.is_empty(),
+                "{格式}（先不补一趟：{先不补一趟}）：补回的那一个上了卡：{:?}",
+                prepared.left_off
+            );
+            assert_eq!(prepared.gone_note(), None, "{格式}");
+
+            现场.照真线同步一趟_补回(true);
+            assert!(
+                现场.卡.path().join(删掉的那一份).is_file(),
+                "{格式}（先不补一趟：{先不补一趟}）：勾上补回，文件该补回来"
+            );
+            assert_eq!(
+                列着的变体(&卡上的条目(现场.卡.path(), 格式, 元数据)),
+                [删掉的变体, 留着的变体],
+                "{格式}（先不补一趟：{先不补一趟}）：补回来的那一个条目照旧列"
+            );
+            assert!(
+                卡上有这份字节(现场.卡.path(), b"cover-of-mario"),
+                "{格式}（先不补一趟：{先不补一趟}）：它的封面也在"
+            );
+        }
+    }
+}
+
+#[test]
+fn 导出到主库那一侧照旧全列_卡上缺了哪一个与它无关() {
+    // ADR-0004：导出铺在主库上，没有目标设备、也没有清单（词表**导出**），设备上缺失这回事压根不存在。同一份主库同步到卡上、
+    // 卡上删掉一个、再同步一趟（卡上的元数据不再列它，上面那条），然后导出到主库：两个都列。钉子：「设备上缺失、这一趟不补」
+    // 只有同步那条线判（`sync::stays_gone` → `Footprint::launching`），导出交的是选中的全部变体。
+    for adapter in adapter::all() {
+        let 元数据 = match adapter.name() {
+            "ES-Gamelist" => "gamelists/FC/gamelist.xml",
+            _ => "FC.metadata.pegasus.txt",
+        };
+        let mut 现场 = 删过一个的卡(adapter.name(), 元数据);
+        现场.照真线同步一趟();
+        assert_eq!(
+            列着的变体(&卡上的条目(现场.卡.path(), adapter.name(), 元数据)),
+            [留着的变体],
+            "{}：前提没摆对",
+            adapter.name()
+        );
+
+        let 之前 = 盘上有什么(&现场.库根);
+        romcat_core::adapter::transfer::export(
+            &mut 现场.catalog,
+            adapter.as_ref(),
+            &Priorities::builtin(),
+            &romcat_core::adapter::transfer::ExportOptions {
+                out: 现场.库根.clone(),
+                dry_run: false,
+                force: false,
+                media: None,
+            },
+        )
+        .expect("导得出来");
+
+        let 条目 = 卡上的条目(&现场.库根, adapter.name(), 元数据);
+        assert_eq!(
+            列着的变体(&条目),
+            [删掉的变体, 留着的变体],
+            "{}：导出到主库该全列：{条目:#?}",
+            adapter.name()
+        );
+        // 主库里原来就在的每一份一个字节都没动。
+        let 之后 = 盘上有什么(&现场.库根);
+        for (path, 原样) in &之前 {
+            assert_eq!(之后.get(path), Some(原样), "{path} 被动过");
+        }
+    }
+}
+
+#[test]
+fn 卡上有播放列表的多碟变体_条目启动的那份播放列表设备上缺失_这一趟不补就不列_两家都是() {
+    // 条目启动的是播放列表（票 `verdict-store-and-sync/18`），看的就是它：人在前端里删掉这个游戏，删的是条目指着的那份
+    // `.m3u`。默认不补，条目连同藏起来的那几条碟一起不列；两张碟本身照旧在卡上（它们没缺）。
+    for (格式, 元数据) in [
+        ("ES-Gamelist", "gamelists/ps/gamelist.xml"),
+        ("Pegasus", "ps.metadata.pegasus.txt"),
+    ] {
+        let mut 现场 = 现场::摆在(建个多碟的库());
+        现场.建子库(格式, "平台=PS1");
+        现场.照真线同步一趟();
+        assert!(
+            列着的变体(&卡上的条目(现场.卡.path(), 格式, 元数据)).contains(&两碟变体.to_string()),
+            "{格式}：前提没摆对"
+        );
+        fs::remove_file(现场.卡.path().join(播放列表)).expect("删得掉");
+
+        let prepared = 现场.照真线排一趟();
+        assert_eq!(
+            prepared.left_off,
+            BTreeMap::from([(两碟变体.to_string(), sync::LeftOff::Gone)]),
+            "{格式}"
+        );
+        现场.照真线同步一趟();
+        assert!(!现场.卡.path().join(播放列表).exists(), "{格式}：默认不补");
+        for 碟 in ["游戏 (Disc 1).cue", "游戏 (Disc 2).cue"] {
+            assert!(
+                现场.卡.path().join("ps/某游戏").join(碟).is_file(),
+                "{格式}：{碟} 没缺，照旧在卡上"
+            );
+        }
+        let 条目 = if 现场.卡.path().join(元数据).is_file() {
+            卡上的条目(现场.卡.path(), 格式, 元数据)
+        } else {
+            Vec::new()
+        };
+        assert!(
+            列着的变体(&条目).is_empty(),
+            "{格式}：条目启动的那份播放列表设备上缺失、这一趟不补，那一套不该列：{条目:#?}"
+        );
+    }
+}
+
+#[test]
+fn 设备上缺失的变体_补回后新增变为几个_连跟着回来的媒体与元数据也算上_与勾上之后那一格对得上_两家都是()
+ {
+    // 挂单 `Q1888`（拿主意的人 2026-10-05 裁：并进票 `verdict-store-and-sync/22`）：默认不补的那几个变体这一趟不铺媒体、不列
+    // 条目，勾上补回它们就跟着回来。「补回后新增变为 N 个」答的是「勾上之后新增那一格是几个」，得把跟着回来的那几份也算上。
+    // 两趟都走：删掉之后头一趟（这一趟才发现没了，卡上那张封面还在），与先不补一趟之后（清单记着「你删过」，封面已经删了）。
+    for (格式, 元数据) in [
+        ("ES-Gamelist", "gamelists/FC/gamelist.xml"),
+        ("Pegasus", "FC.metadata.pegasus.txt"),
+    ] {
+        for 先不补一趟 in [false, true] {
+            let mut 现场 = 删过一个的卡(格式, 元数据);
+            if 先不补一趟 {
+                现场.照真线同步一趟();
+            }
+            let 不补 = 现场.照真线排一趟();
+            let 补 = 现场.照真线排一趟_补回(true);
+            if 先不补一趟 {
+                assert_eq!(不补.plan.withheld, 1, "{格式}：前提没摆对");
+                assert!(
+                    补.plan.adds.files > 补.plan.restorable,
+                    "{格式}：前提没摆对——勾上之后跟着回来的不止那一份 ROM：{:#?}",
+                    补.plan.steps
+                );
+            }
+            assert_eq!(
+                不补.plan.adds_if_restored, 补.plan.adds.files,
+                "{格式}（先不补一趟：{先不补一趟}）：「补回后新增变为 N 个」与勾上之后新增那一格对不上：{:#?}",
+                补.plan.steps
+            );
+            assert_eq!(
+                补.plan.adds_if_restored, 补.plan.adds.files,
+                "{格式}（先不补一趟：{先不补一趟}）：勾上之后它就是新增那一格"
+            );
+        }
+    }
+}
+
+#[test]
+fn 主文件转了格式的变体_卡上转出来的那一份设备上缺失_这一趟不补就不列_两家都是() {
+    // 条目启动的是转出来的那一份（票 `verdict-store-and-sync/20`），看的就是它：卡上那份 `.chd` 被人删了，默认不补，
+    // 那一条不列。主库里那份 `.zip` 卡上本来就没有，看它说明不了什么。
+    for (格式, 元数据) in [
+        ("ES-Gamelist", "gamelists/ps/gamelist.xml"),
+        ("Pegasus", "ps.metadata.pegasus.txt"),
+    ] {
+        let mut 现场 = 现场::摆在(建个要解开的库("最终幻想7.chd"));
+        现场.建子库(格式, "平台=PS1");
+        现场.换档案(只吃裸镜像);
+        现场.照真线同步一趟();
+        let 卡上那一份 = 现场.卡.path().join("ps/最终幻想7.chd");
+        assert!(卡上那一份.is_file(), "{格式}：前提没摆对");
+        fs::remove_file(&卡上那一份).expect("删得掉");
+
+        let prepared = 现场.照真线排一趟();
+        assert_eq!(
+            prepared.left_off,
+            BTreeMap::from([(要解开的变体.to_string(), sync::LeftOff::Gone)]),
+            "{格式}"
+        );
+        现场.照真线同步一趟();
+        assert!(!卡上那一份.exists(), "{格式}：默认不补");
+        let 条目 = if 现场.卡.path().join(元数据).is_file() {
+            卡上的条目(现场.卡.path(), 格式, 元数据)
+        } else {
+            Vec::new()
+        };
+        assert!(
+            列着的变体(&条目).is_empty(),
+            "{格式}：转出来的那一份设备上缺失、这一趟不补，不该列：{条目:#?}"
+        );
     }
 }

@@ -347,6 +347,61 @@ fn 主文件放不进目标的变体_差量预览底下说一句没上卡前端�
 }
 
 #[test]
+fn 设备上缺失这一趟不补的变体_差量预览底下说一句前端里也不列_命令行补上是哪几个与补回的命令() {
+    // 票 `verdict-store-and-sync/22`（挂单 `Q1880`）：设备上缺失、这一趟不补的变体卡上的前端元数据不列、媒体也不铺。
+    // 核心那句只说几个（`sync::Concern::GoneLeftOff`），是哪几个变体与补回的命令由命令行补；加上 `--restore` 就不说。
+    let (_library, workspace, target) = 现场();
+    let ws = workspace.path();
+    assert!(子库(ws, &["sync", "掌机"]).status.success());
+    fs::remove_file(target.path().join("FC/魂斗罗.zip")).expect("删得掉");
+
+    let out = 子库(ws, &["plan", "掌机"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    for (该有, 怎么回事) in [
+        (
+            "有 1 个变体设备上缺失、这一趟不补，前端里也不列。",
+            "那一句",
+        ),
+        ("\n  库/FC/魂斗罗.zip\n", "是哪一个"),
+        ("加上 `--restore` 补回，条目跟着回来", "补回的命令"),
+    ] {
+        assert!(text.contains(该有), "{怎么回事}没印出来：{text}");
+    }
+    assert!(
+        !text.contains("\n  库/FC/超级玛丽.zip\n"),
+        "卡上没缺的不该列进去：{text}"
+    );
+
+    let out = 子库(ws, &["plan", "掌机", "--restore"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        !text.contains("前端里也不列"),
+        "加上 `--restore` 那一个就补回来、照旧列，不该再说：{text}"
+    );
+
+    // 加了 `--restore` 也补不回的：落点上挡着一份清单之外的文件（只差大小写，折起来就是那条落点）。核心照旧说那一句
+    // （这一趟确实不补），命令行的去处就不能再是「加上 `--restore`」。
+    fs::write(target.path().join("FC/魂斗罗.ZIP"), "我自己拷进来的").expect("写得进");
+    let out = 子库(ws, &["plan", "掌机", "--restore"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("有 1 个变体设备上缺失、这一趟不补，前端里也不列。"),
+        "{text}"
+    );
+    assert!(
+        text.contains("加了 `--restore` 也补不回"),
+        "给了 `--restore` 还补不回时，去处该说是落点被占：{text}"
+    );
+    assert!(
+        !text.contains("这次加上 `--restore` 补回"),
+        "已经给了 `--restore`，不该再叫人加一遍：{text}"
+    );
+}
+
+#[test]
 fn 子库不在时说得清怎么建() {
     let (_library, workspace, _target) = 现场();
     let out = 子库(workspace.path(), &["plan", "备用卡"]);
