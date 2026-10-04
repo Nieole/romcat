@@ -1932,13 +1932,14 @@ impl Screen {
         let id = match site.catalog.read_only() {
             Ok(reader) => {
                 let of = name.clone();
+                let workspace = self.workspace.clone();
                 tasks.queue_quiet(title, move |task| {
-                    sync::prepare::footprint(&reader, &of, task)
+                    sync::prepare::footprint(&reader, &workspace, &of, task)
                         .map(|footprint| Product::Footprint(Box::new(footprint)))
                 })
             }
             Err(CatalogError::NotOnDisk { .. }) => tasks.run_here_quiet(title, |task| {
-                sync::prepare::footprint(&site.catalog, &name, task)
+                sync::prepare::footprint(&site.catalog, &self.workspace, &name, task)
                     .map(|footprint| Product::Footprint(Box::new(footprint)))
             }),
             Err(why) => {

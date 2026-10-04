@@ -23,6 +23,7 @@ use romcat_core::catalog::Catalog;
 use romcat_core::catalog::Roots;
 use romcat_core::catalog::scrape::{Harvested, HarvestedMedia};
 use romcat_core::fs::{DirEntry, LibraryFs, MemFs, ReadSeek, RealFs};
+use romcat_core::platform::Manifest as PlatformManifest;
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::measure::Measured;
 use romcat_core::scrape::pool::MediaPool;
@@ -31,6 +32,7 @@ use romcat_core::scrape::{AnchorKind, MediaKind};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
 use romcat_core::sync::{self, Act, FileKind, Manifest, Placement, Sources};
 use romcat_core::task::Handle;
+use romcat_core::testing::container::{ZipEntrySpec, zip_container};
 use romcat_core::testing::sample::zip;
 use romcat_core::testing::target::{self, Folding};
 use romcat_core::testing::{TempDir, temp_dir};
@@ -176,7 +178,10 @@ impl 现场 {
         let selected = 选中(&self.catalog, 规则);
         let adapter = adapter::find("Pegasus").expect("带着 Pegasus 适配器");
         let priorities = Priorities::builtin();
-        let footprint = sync::Footprint::gather(&self.catalog, &selected).expect("读得出脚印");
+        // 认碟与播放列表起名用同一份平台清单，与 `sync::prepare` 一样。
+        let platform_manifest = PlatformManifest::builtin();
+        let footprint = sync::Footprint::gather(&self.catalog, &selected, &platform_manifest)
+            .expect("读得出脚印");
         let mut desired = footprint.desired(profile);
         // 与 `sync::prepare` 同一个次序：先筛 ROM，多碟变体的播放列表排在筛过之后、再筛一遍；筛完还在的那几份
         // 交给媒体与前端元数据（条目改指它、封面照它的名字铺），最后几样一起再筛一遍。
@@ -186,7 +191,7 @@ impl 现场 {
             &desired,
             adapter.as_ref(),
             profile,
-            &romcat_core::platform::Manifest::builtin(),
+            &platform_manifest,
         );
         desired.add_and_screen(playlists.files.iter().cloned(), &profile.filesystem, 0);
         let launch = playlists.launching(&desired);
@@ -1591,17 +1596,22 @@ impl 现场 {
         self.catalog.put_sublibrary(&子库).expect("子库写得进");
     }
 
-    /// **照真的那条线**同步一趟：`sync::prepare` 排计划、`execute::run` 落到卡上、清单记回中立库
-    /// ——命令行与界面走的就是这几步。下一趟排计划读的就是这一趟记回去的那份清单。
-    fn 照真线同步一趟(&mut self) -> sync::Outcome {
-        let prepared = sync::prepare(
+    /// 照真的那条线排一趟计划（`sync::prepare`），不落到卡上。
+    fn 照真线排一趟(&self) -> sync::Prepared {
+        sync::prepare(
             &self.catalog,
             self.工作区.path(),
             "掌机",
             &sync::Request::default(),
             &Handle::new(),
         )
-        .expect("排得出计划");
+        .expect("排得出计划")
+    }
+
+    /// **照真的那条线**同步一趟：`sync::prepare` 排计划、`execute::run` 落到卡上、清单记回中立库
+    /// ——命令行与界面走的就是这几步。下一趟排计划读的就是这一趟记回去的那份清单。
+    fn 照真线同步一趟(&mut self) -> sync::Outcome {
+        let prepared = self.照真线排一趟();
         let roots = Roots::single("库", &self.库根);
         let sources = Sources {
             library: &RealFs,
@@ -2112,8 +2122,8 @@ fn 两套多碟游戏的播放列表撞在同一条路径上_一个都不放行_
 #[test]
 fn 两家前端都要读平台清单_那份清单写坏了照实说读不动() {
     // 认各张碟要平台清单（与扫描、成型同一条查法）。票 11 那时 Pegasus 用不上播放列表、连清单都不读；票 18 之后两家
-    // 都用得上，清单读不动时两家都照实说，而不是悄悄少生成几份播放列表（代码里「用不上的前端不读」那道闸还留着，
-    // 给答「用不上」的适配器——`Adapter::uses_playlists` 的默认）。
+    // 都用得上，清单读不动时两家都照实说，而不是悄悄少生成几份播放列表。票 19 之后哪个前端都要读：多碟变体每张碟都照
+    // 能力档案转格式，认各张碟要它，与前端用不用得上播放列表无关（「用不上的前端不读」那道闸随之拆了）。
     for 格式 in ["ES-Gamelist", "Pegasus"] {
         let mut 现场 = 现场::摆在(建个多碟的库());
         现场.建子库(格式, "平台=PS1");
@@ -2132,4 +2142,209 @@ fn 两家前端都要读平台清单_那份清单写坏了照实说读不动() {
         };
         assert!(why.to_string().contains("平台清单读不动"), "{格式}：{why}");
     }
+}
+
+// ───────────────────────── 多碟变体每张碟都照能力档案转格式（票 `verdict-store-and-sync/19`）
+//
+// 多碟同族合完之后，别的碟的主文件在变体里降成了附属文件；转格式那一步从前只判变体的主文件，于是只有头一张碟照档案转，
+// 第二张原样躺在卡上、模拟器读不了（挂单 `Q1650`）。这几条钉的是**每张碟的主文件各判一次**：认碟走成型那一份
+// （`shape::discs`），转得了的逐碟转、转不了的逐碟报；播放列表列的是转出来的那几份。
+
+/// 一张碟的裸镜像。每张碟长度不一样，转换账的大小才看得出是不是逐碟照转出来的算。
+fn 镜像(碟: u8) -> Vec<u8> {
+    vec![碟; 4096 + usize::from(碟)]
+}
+
+/// 一份主库：`ps/某游戏/` 里一套两碟的 PS1 游戏，每张碟是一份 `.zip`。`里头` 给每张碟的 zip 里装什么。
+fn 建个_zip_碟的库(里头: impl Fn(u8) -> Vec<ZipEntrySpec>) -> TempDir {
+    let dir = temp_dir("run-zip-discs-lib");
+    for 碟 in 1..=2u8 {
+        写(
+            &dir.path().join(format!("ps/某游戏/游戏 (Disc {碟}).zip")),
+            &zip_container(&里头(碟)),
+        );
+    }
+    dir
+}
+
+/// 每张碟的 zip 里只有那张碟的裸镜像（`.bin`）：只吃裸镜像的档案下，两张都解得开。
+fn 一张一份裸镜像(碟: u8) -> Vec<ZipEntrySpec> {
+    vec![ZipEntrySpec::deflated(
+        &format!("游戏 (Disc {碟}).bin"),
+        镜像(碟),
+    )]
+}
+
+/// 只吃裸镜像的那一份内置档案：DuckStation 那一行，透明容器一律不吃、转成裸文件。
+const 只吃裸镜像: &str = "独立模拟器-exfat";
+
+#[test]
+fn 两张_zip_碟在只吃裸镜像的档案下_同步后卡上两张都是解开的裸镜像_播放列表列的是这两份() {
+    let mut 现场 = 现场::摆在(建个_zip_碟的库(一张一份裸镜像));
+    现场.建子库("ES-Gamelist", "平台=PS1");
+    现场.换档案(只吃裸镜像);
+    let 主库之前 = 盘上有什么(&现场.库根);
+    let 碟之前: Vec<Vec<u8>> = (1..=2u8)
+        .map(|碟| {
+            fs::read(现场.库根.join(format!("ps/某游戏/游戏 (Disc {碟}).zip"))).expect("读得出")
+        })
+        .collect();
+
+    现场.照真线同步一趟();
+
+    for 碟 in 1..=2u8 {
+        let 解开的 = format!("ps/某游戏/游戏 (Disc {碟}).bin");
+        assert_eq!(
+            fs::read(现场.卡.path().join(&解开的)).unwrap_or_else(|_| panic!(
+                "卡上该有 {解开的}：{:?}",
+                盘上有什么(现场.卡.path()).keys().collect::<Vec<_>>()
+            )),
+            镜像(碟),
+            "碟 {碟} 解出来逐字节等于原镜像",
+        );
+        let 原样的 = format!("ps/某游戏/游戏 (Disc {碟}).zip");
+        assert!(
+            !现场.卡.path().join(&原样的).exists(),
+            "{原样的} 不该躺在卡上：转换换掉的是落点，不是多放一份"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(现场.卡.path().join(播放列表))
+            .unwrap_or_else(|_| panic!("卡上该有 {播放列表}")),
+        "游戏 (Disc 1).bin\n游戏 (Disc 2).bin\n",
+        "播放列表列的是转出来的那两份",
+    );
+
+    // ⭐ **主库一个字节不变**（ADR-0004）：转格式只发生在卡上那一份。每一份的大小与修改时间都没动、没多出一份，
+    // 两张碟的字节也原样。
+    assert_eq!(盘上有什么(&现场.库根), 主库之前);
+    for (碟, 之前) in (1..=2u8).zip(&碟之前) {
+        assert_eq!(
+            &fs::read(现场.库根.join(format!("ps/某游戏/游戏 (Disc {碟}).zip"))).expect("读得出"),
+            之前,
+            "主库里碟 {碟} 被动过",
+        );
+    }
+}
+
+#[test]
+fn 有一张碟转不了_差量预览里那张碟照转不了报出来_播放列表照旧不生成() {
+    // 第二张碟的 zip 里装着 `.cue` 加 `.bin` 两份：这一版只解只有一个内容条目的容器，它转不了。
+    let mut 现场 = 现场::摆在(建个_zip_碟的库(|碟| {
+        if 碟 == 1 {
+            一张一份裸镜像(碟)
+        } else {
+            vec![
+                ZipEntrySpec::deflated(
+                    "游戏 (Disc 2).cue",
+                    "FILE \"游戏 (Disc 2).bin\" BINARY\n".as_bytes().to_vec(),
+                ),
+                ZipEntrySpec::deflated("游戏 (Disc 2).bin", 镜像(碟)),
+            ]
+        }
+    }));
+    现场.建子库("ES-Gamelist", "平台=PS1");
+    现场.换档案(只吃裸镜像);
+    let 主库之前 = 盘上有什么(&现场.库根);
+    let prepared = 现场.照真线排一趟();
+
+    let 转不了: Vec<&str> = prepared
+        .plan
+        .unsupported
+        .iter()
+        .map(|row| row.path.as_str())
+        .collect();
+    assert_eq!(
+        转不了,
+        ["ps/某游戏/游戏 (Disc 2).zip"],
+        "那张碟照「转不了」报出来，转得了的那张不报"
+    );
+    let 那一行 = &prepared.plan.unsupported[0];
+    assert_eq!(
+        那一行.variant, "库/ps/某游戏/游戏 (Disc 1).zip",
+        "挂在那个多碟变体名下"
+    );
+    assert!(那一行.why.contains("2 个内容条目"), "{}", 那一行.why);
+    let 预览 = prepared.plan.render_text();
+    assert!(预览.contains("到了目标上打不开"), "{预览}");
+    assert!(预览.contains("ps/某游戏/游戏 (Disc 2).zip"), "{预览}");
+    // 转得了的那张照转。
+    assert!(
+        prepared
+            .plan
+            .steps
+            .iter()
+            .any(|step| step.path == "ps/某游戏/游戏 (Disc 1).bin" && step.convert.is_some()),
+        "{:?}",
+        prepared.plan.steps
+    );
+    // 播放列表照旧不生成：它第二行会指着一份模拟器读不了的文件。
+    assert!(
+        !prepared
+            .desired
+            .files
+            .iter()
+            .any(|file| file.kind == FileKind::Playlist),
+        "{:?}",
+        prepared.desired.files
+    );
+
+    现场.照真线同步一趟();
+    assert!(卡上的播放列表(现场.卡.path()).is_empty());
+    assert!(
+        现场.卡.path().join("ps/某游戏/游戏 (Disc 2).zip").is_file(),
+        "转不了的照搬"
+    );
+    assert!(现场.卡.path().join("ps/某游戏/游戏 (Disc 1).bin").is_file());
+    // 主库一个字节不变（ADR-0004）：转得了的那张也只在卡上多一份产物。
+    assert_eq!(盘上有什么(&现场.库根), 主库之前);
+}
+
+#[test]
+fn 期望状态与差量预览的转换账逐碟对得上_几张碟就是几笔_大小照转出来的算() {
+    let mut 现场 = 现场::摆在(建个_zip_碟的库(一张一份裸镜像));
+    现场.建子库("ES-Gamelist", "平台=PS1");
+    现场.换档案(只吃裸镜像);
+    let prepared = 现场.照真线排一趟();
+
+    // 期望状态：每张碟一笔转换，落点是解出来的那一份，大小是镜像本身（未压缩大小零解压就在容器头里，是准数）。
+    let 要转的: Vec<(&str, u64)> = prepared
+        .desired
+        .files
+        .iter()
+        .filter(|file| file.convert.is_some())
+        .map(|file| (file.path.as_str(), file.bytes))
+        .collect();
+    let 镜像大小 = |碟: u8| 镜像(碟).len() as u64;
+    assert_eq!(
+        要转的,
+        [
+            ("ps/某游戏/游戏 (Disc 1).bin", 镜像大小(1)),
+            ("ps/某游戏/游戏 (Disc 2).bin", 镜像大小(2)),
+        ]
+    );
+
+    // 差量预览：两笔、一个变体，大小照转出来的算；要读的源字节是两份 zip 本身。
+    assert_eq!(
+        prepared.plan.converts,
+        sync::Tally {
+            files: 2,
+            variants: 1,
+            bytes: 镜像大小(1) + 镜像大小(2),
+        }
+    );
+    let zip大小: u64 = (1..=2u8)
+        .map(|碟| {
+            fs::metadata(现场.库根.join(format!("ps/某游戏/游戏 (Disc {碟}).zip")))
+                .expect("读得到")
+                .len()
+        })
+        .sum();
+    assert_eq!(prepared.plan.convert_source_bytes, zip大小);
+    assert_eq!(prepared.plan.convert_estimated, 0, "解出来的大小是准数");
+    assert!(
+        prepared.plan.unsupported.is_empty(),
+        "{:?}",
+        prepared.plan.unsupported
+    );
 }

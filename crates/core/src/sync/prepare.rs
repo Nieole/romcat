@@ -29,6 +29,7 @@ use crate::capability::{Roster, today};
 use crate::catalog::{Catalog, Roots};
 use crate::fs::RealFs;
 use crate::path;
+use crate::platform::Manifest as PlatformManifest;
 use crate::scrape::Priorities;
 use crate::scrape::pool::MediaPool;
 use crate::sublibrary::target::{TargetRefusal, library_overlap};
@@ -314,11 +315,19 @@ pub fn priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, 
 /// 目标设置弹层打开时往任务台上排的就是这一趟（票 `gui-looks-like-the-design/21`）：折事实走一遍全库，
 /// 不能跑在画帧那条线程上。拿到之后换档案、改按平台覆盖都是纯的（[`Footprint::desired`](super::Footprint::desired)）。
 ///
+/// `workspace` 是工作目录：认多碟变体的各张碟要那里的平台清单（与 [`prepare_selected`] 同一份），弹层里说「放不下」
+/// 的那几张碟于是与差量预览逐碟对得上（票 `verdict-store-and-sync/19`）。
+///
 /// 整条只读；被叫停时停在哪儿都是干净的。
 ///
 /// # Errors
-/// 中立库读不动时返回 [`Cutoff::Failed`]，被叫停时返回 [`Cutoff::Halted`]。
-pub fn footprint(catalog: &Catalog, name: &str, task: &Handle) -> Result<super::Footprint, Cutoff> {
+/// 中立库或平台清单读不动时返回 [`Cutoff::Failed`]，被叫停时返回 [`Cutoff::Halted`]。
+pub fn footprint(
+    catalog: &Catalog,
+    workspace: &Path,
+    name: &str,
+    task: &Handle,
+) -> Result<super::Footprint, Cutoff> {
     task.steps(FOOTPRINT_STEPS);
     task.step("读选择集")?;
     let loaded = catalog
@@ -329,8 +338,24 @@ pub fn footprint(catalog: &Catalog, name: &str, task: &Handle) -> Result<super::
     task.step("求值选择集")?;
     let selected = sublibrary::select(&loaded.selection, &facts);
     task.step("读成员")?;
-    Ok(super::Footprint::gather(catalog, &selected)
-        .map_err(|error| format!("中立库读不动：{error}"))?)
+    Ok(gather(catalog, workspace, &selected)?.0)
+}
+
+/// 读平台清单、再读脚印：[`footprint`] 与 [`prepare_selected`] 两条路认各张碟用的都是工作目录里那同一份平台清单
+/// （票 `verdict-store-and-sync/19`）。清单交回去，给多碟变体的播放列表起名还要它。
+///
+/// **平台清单哪个前端都要读**：多碟变体每张碟都照能力档案转格式，认各张碟要它（`shape::discs`，与扫描、成型同一条
+/// 查法）——转格式问的是模拟器吃不吃，与前端用不用得上播放列表无关。
+fn gather(
+    catalog: &Catalog,
+    workspace: &Path,
+    selected: &Selected,
+) -> Result<(super::Footprint, PlatformManifest), String> {
+    let platform_manifest =
+        crate::sources::manifest(workspace).map_err(|error| format!("平台清单读不动：{error}"))?;
+    let footprint = super::Footprint::gather(catalog, selected, &platform_manifest)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
+    Ok((footprint, platform_manifest))
 }
 
 /// [`footprint`] 一共几步。**改了它里头的 `task.step` 就得改这个数。**
@@ -450,7 +475,7 @@ pub fn prepare(
 /// 是因为调用方要在步名前面加上是哪一台设备——把手自己不知道。
 ///
 /// # Errors
-/// 目标看不了、前端格式没有适配器、中立库读不动、用得上播放列表的前端而平台清单读不动时返回
+/// 目标看不了、前端格式没有适配器、中立库读不动、平台清单读不动时返回
 /// [`PlanCutoff::Unplanned`]；`step` 说停下时返回 [`PlanCutoff::Halted`]。
 pub fn prepare_selected(
     catalog: &Catalog,
@@ -505,9 +530,8 @@ pub fn prepare_selected(
     let pool = MediaPool::at(&workspace::media_pool_dir(workspace));
 
     step("折期望状态")?;
-    // 脚印留着（与 `super::desired` 是同一条线，ADR-0024）：给多碟变体折播放列表还要它的成员与平台。
-    let footprint = super::Footprint::gather(catalog, selected)
-        .map_err(|error| format!("中立库读不动：{error}"))?;
+    // 脚印留着（与 `super::desired` 是同一条线，ADR-0024）：给多碟变体折播放列表还要它认好的各张碟与平台。
+    let (footprint, platform_manifest) = gather(catalog, workspace, selected)?;
     let mut desired = footprint.desired(&profile);
     // **放不进目标存储的在这里就被拦下来**（ADR-0017 补充段）：FAT32 那 4 GiB 的
     // 单文件上限、文件名不收的字符、路径太长。拦在排计划**之前**，于是它们连成为一条
@@ -526,13 +550,8 @@ pub fn prepare_selected(
     // **多碟变体的播放列表排在筛过之后**（`playlist` 模块文档）：它列的是卡上真落着的那几张碟，有一张放不进目标
     // 的那一套就不生成。折出来的那几份照同一份文件系统声明再筛一遍——它们自己也可能撞车、名字太长；筛完还在的那几份
     // 才交给前端元数据与媒体（[`super::playlist::Laid::launching`]）：条目改指它、封面照它的名字铺。
-    //
-    // **用不上播放列表的前端连平台清单都不读**：认各张碟要它（`shape::discs`，与扫描、成型同一条查法），可一个用不上
-    // 播放列表的前端不该因为一份它用不上的清单读不动而排不出计划。内置的两家眼下都用得上（ES-DE 与 Pegasus）。
     let mut launch = BTreeMap::new();
     if adapter.uses_playlists() {
-        let platform_manifest = crate::sources::manifest(workspace)
-            .map_err(|error| format!("平台清单读不动：{error}"))?;
         let playlists = super::playlist::lay(
             &footprint,
             &desired,

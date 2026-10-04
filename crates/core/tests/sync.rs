@@ -16,6 +16,7 @@ use romcat_core::capability::Profile;
 use romcat_core::capability::{Filesystem, RejectReason};
 use romcat_core::catalog::{Catalog, Roots, roots};
 use romcat_core::fs::RealFs;
+use romcat_core::platform::Manifest as PlatformManifest;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
@@ -470,8 +471,13 @@ fn 期望状态是选中变体的文件成员_容量与变体那一层对得上(
     let dir = 建库();
     let catalog = 扫成库(dir.path());
     let selected = 选中(&catalog, "平台=FC,PSV");
-    let desired =
-        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
+    let desired = sync::desired(
+        &catalog,
+        &selected,
+        &Profile::unclaimed(),
+        &PlatformManifest::builtin(),
+    )
+    .expect("折得出期望状态");
 
     // 一个变体可以是好几个文件，而容量的账两层必须一致。
     assert!(
@@ -514,8 +520,13 @@ fn 头一次同步是全新增_一条删除也长不出来() {
     let 目标 = temp_dir("sync-target-empty");
     let catalog = 扫成库(dir.path());
     let selected = 选中(&catalog, "平台=FC");
-    let desired =
-        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
+    let desired = sync::desired(
+        &catalog,
+        &selected,
+        &Profile::unclaimed(),
+        &PlatformManifest::builtin(),
+    )
+    .expect("折得出期望状态");
     let actual = sync::observe(&RealFs::new(), 目标.path()).expect("目标在位");
     let plan = sync::plan(
         &子库(目标.path(), None),
@@ -569,8 +580,13 @@ fn 手动拷进目标的存档在整条链路上绝对安全() {
     );
 
     let selected = 选中(&catalog, "平台=PSV");
-    let desired =
-        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
+    let desired = sync::desired(
+        &catalog,
+        &selected,
+        &Profile::unclaimed(),
+        &PlatformManifest::builtin(),
+    )
+    .expect("折得出期望状态");
     let actual = sync::observe(&RealFs::new(), 目标.path()).expect("目标在位");
     let plan = sync::plan(
         &子库(目标.path(), None),
@@ -744,8 +760,13 @@ fn 超出目标容量时给出超出量与裁剪建议_一个都不砍() {
     let 目标 = temp_dir("sync-target-full");
     let catalog = 扫成库(dir.path());
     let selected = 选中(&catalog, "平台=FC,PSV");
-    let desired =
-        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
+    let desired = sync::desired(
+        &catalog,
+        &selected,
+        &Profile::unclaimed(),
+        &PlatformManifest::builtin(),
+    )
+    .expect("折得出期望状态");
     let 只装得下一半 = desired.bytes() / 2;
     let plan = sync::plan(
         &子库(目标.path(), Some(只装得下一半)),
@@ -936,8 +957,13 @@ fn 两个根里同一条相对路径落在卡上同一个文件上_排计划时�
     }
     let selected = 选中(&catalog, "平台=FC");
     assert_eq!(selected.picked.len(), 3, "两个根上一共三个变体");
-    let mut desired =
-        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
+    let mut desired = sync::desired(
+        &catalog,
+        &selected,
+        &Profile::unclaimed(),
+        &PlatformManifest::builtin(),
+    )
+    .expect("折得出期望状态");
     assert_eq!(desired.files.len(), 3, "折出来时三条都还在");
     desired.screen(&Filesystem::unlimited(), 0);
 
@@ -1159,11 +1185,13 @@ fn 脚印读一次库_换一份档案折期望状态不再碰库_与一口气折
     let dir = 建库();
     let catalog = 扫成库(dir.path());
     let selected = 选中(&catalog, "平台=FC,PSV");
-    let 脚印 = sync::Footprint::gather(&catalog, &selected).expect("读得动");
+    let 脚印 =
+        sync::Footprint::gather(&catalog, &selected, &PlatformManifest::builtin()).expect("读得动");
     for profile in romcat_core::capability::Roster::builtin().profiles() {
         assert_eq!(
             脚印.desired(profile),
-            sync::desired(&catalog, &selected, profile).expect("折得出期望状态"),
+            sync::desired(&catalog, &selected, profile, &PlatformManifest::builtin())
+                .expect("折得出期望状态"),
             "档案「{}」下两条路折出来的不一样",
             profile.name
         );
@@ -1176,7 +1204,8 @@ fn 脚印说得出这份档案的文件系统放不下哪几份_只看单文件�
     let dir = 建库();
     let catalog = 扫成库(dir.path());
     let selected = 选中(&catalog, "平台=FC");
-    let 脚印 = sync::Footprint::gather(&catalog, &selected).expect("读得动");
+    let 脚印 =
+        sync::Footprint::gather(&catalog, &selected, &PlatformManifest::builtin()).expect("读得动");
     let mut 小卡 = Profile::unclaimed();
     小卡.filesystem.name = "小卡".to_string();
     小卡.filesystem.max_file_bytes = Some(3000);
@@ -1207,14 +1236,42 @@ fn 按名字读一台设备的脚印_读选择集折事实求值读成员() {
     catalog
         .add_rule("掌机", &Rule::parse("平台=FC").expect("读得懂"), None)
         .expect("规则写得进");
-    let 脚印 =
-        sync::prepare::footprint(&catalog, "掌机", &Handle::new()).expect("读得出这一台的脚印");
+    let 工作区 = temp_dir("sync-footprint-ws");
+    let 脚印 = sync::prepare::footprint(&catalog, 工作区.path(), "掌机", &Handle::new())
+        .expect("读得出这一台的脚印");
     assert_eq!(脚印.platforms(), ["FC"]);
     assert_eq!(
         脚印.desired(&Profile::unclaimed()).files.len(),
         2,
         "FC 两个变体各一份文件"
     );
+}
+
+#[test]
+fn 读脚印认碟用的是工作目录里那份平台清单_写坏了照实说读不动() {
+    // 票 `verdict-store-and-sync/19`：多碟变体每张碟都照档案转格式，目标设置弹层里说「放不下」的那几张碟要与差量预览
+    // 逐碟对得上，于是读脚印认碟也用工作目录里那份平台清单（与排差量预览同一份）——读不动时照实说，不悄悄退回内置那份。
+    let dir = 建库();
+    let mut catalog = 扫成库(dir.path());
+    let 卡 = temp_dir("sync-footprint-bad-manifest-card");
+    catalog
+        .put_sublibrary(&子库(卡.path(), None))
+        .expect("子库写得进");
+    catalog
+        .add_rule("掌机", &Rule::parse("平台=FC").expect("读得懂"), None)
+        .expect("规则写得进");
+    let 工作区 = temp_dir("sync-footprint-bad-manifest-ws");
+    fs::write(
+        工作区.path().join("platforms.toml"),
+        "[[[ 写坏了".as_bytes(),
+    )
+    .expect("写得进");
+    let Err(romcat_core::task::Cutoff::Failed(why)) =
+        sync::prepare::footprint(&catalog, 工作区.path(), "掌机", &Handle::new())
+    else {
+        panic!("平台清单读不动，脚印该读不出来");
+    };
+    assert!(why.contains("平台清单读不动"), "{why}");
 }
 
 // ───────────────────────── 清单之外的文件只有一处数法（票 `gui-looks-like-the-design/21`）
@@ -1256,8 +1313,13 @@ fn 清单之外的文件只有一处数法_单独数的与计划里的一样() {
     assert_eq!((数的.count, 数的.bytes, 数的.unreadable), (1, 300, 0));
 
     let selected = 选中(&catalog, "平台=FC");
-    let desired =
-        sync::desired(&catalog, &selected, &Profile::unclaimed()).expect("折得出期望状态");
+    let desired = sync::desired(
+        &catalog,
+        &selected,
+        &Profile::unclaimed(),
+        &PlatformManifest::builtin(),
+    )
+    .expect("折得出期望状态");
     let plan = sync::plan(
         &子库(卡.path(), None),
         &desired,
@@ -1307,7 +1369,8 @@ fn 落点预览取头一个变体的真实落点_元数据位置照适配器_新
     let dir = 建库();
     let catalog = 扫成库(dir.path());
     let selected = 选中(&catalog, "平台=FC");
-    let 脚印 = sync::Footprint::gather(&catalog, &selected).expect("读得动");
+    let 脚印 =
+        sync::Footprint::gather(&catalog, &selected, &PlatformManifest::builtin()).expect("读得动");
     let pegasus = romcat_core::adapter::find("Pegasus").expect("带着 Pegasus");
     let es = romcat_core::adapter::find("ES-Gamelist").expect("带着 ES");
 

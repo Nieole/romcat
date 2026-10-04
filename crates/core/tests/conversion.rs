@@ -21,6 +21,7 @@ use romcat_core::catalog::Catalog;
 use romcat_core::catalog::Roots;
 use romcat_core::container::{self, ReadPlan};
 use romcat_core::fs::RealFs;
+use romcat_core::platform::Manifest as PlatformManifest;
 use romcat_core::scan::{self, Jobs, ScanOptions};
 use romcat_core::sublibrary::{self, Rule, Selection, Sublibrary};
 use romcat_core::sync::{self, Act, Manifest, Sources};
@@ -138,7 +139,13 @@ impl 现场 {
         manifest: &Manifest,
     ) -> (sync::Desired, sync::Plan) {
         let selected = self.选中(规则);
-        let mut desired = sync::desired(&self.catalog, &selected, profile).expect("折得出期望状态");
+        let mut desired = sync::desired(
+            &self.catalog,
+            &selected,
+            profile,
+            &PlatformManifest::builtin(),
+        )
+        .expect("折得出期望状态");
         desired.files.sort_by(|a, b| a.path.cmp(&b.path));
         desired.screen(&profile.filesystem, 0);
         let mut 子库 = Sublibrary::at("掌机", self.卡.path(), "Pegasus", None);
@@ -474,7 +481,8 @@ fn 目标吃不下而且转不了的照搬_但点名说出口() {
     };
     let facts = sublibrary::facts(&catalog).expect("折得出事实");
     let selected = sublibrary::select(&selection, &facts);
-    let desired = sync::desired(&catalog, &selected, &profile).expect("折得出期望状态");
+    let desired = sync::desired(&catalog, &selected, &profile, &PlatformManifest::builtin())
+        .expect("折得出期望状态");
 
     assert_eq!(desired.unsupported.len(), 1);
     assert_eq!(desired.unsupported[0].path, "SFC/魂斗罗.rar");
@@ -535,7 +543,13 @@ fn 默认不缓存_给了目录才落第三份而且第二趟直接命中() {
     // 第二台设备：同一份源、同一条配方，直接命中。
     let 卡二 = temp_dir("conv-card2");
     let selected = 现场.选中("平台=SFC");
-    let mut desired2 = sync::desired(&现场.catalog, &selected, &profile).expect("折得出期望状态");
+    let mut desired2 = sync::desired(
+        &现场.catalog,
+        &selected,
+        &profile,
+        &PlatformManifest::builtin(),
+    )
+    .expect("折得出期望状态");
     desired2.screen(&profile.filesystem, 0);
     let mut 子库二 = Sublibrary::at("备用卡", 卡二.path(), "Pegasus", None);
     子库二.capability = Some(profile.name.clone());

@@ -26,7 +26,8 @@
 //!
 //! ## 生不生成，三处各答一问
 //!
-//! - **这个变体是不是多碟、各张碟的主文件是哪几份、按什么次序**：成型那一处答（[`shape::discs`]）。
+//! - **这个变体是不是多碟、各张碟的主文件是哪几份、按什么次序**：成型那一处答（[`shape::discs`]），脚印里认一次
+//!   （[`Footprint`]），转格式逐碟判的也是这几份。
 //! - **这个前端用不用得上播放列表**：适配器答（[`Adapter::uses_playlists`]）。
 //! - **这个平台的模拟器吃不吃**：能力档案答，判的是「吃不吃这个扩展名」那同一处（[`Accepts::takes_key`]，
 //!   ADR-0017）——`.m3u` 本身要吃，列进去的每一张碟也要吃。档案对这个平台不作声称时照样生成：不作声称说的是
@@ -39,9 +40,9 @@
 //! 读不了的文件的播放列表，启动那一刻才报错，比没有更糟，于是两种都不生成：
 //!
 //! - 有一张碟**放不进目标**（太大、文件名不收、撞车）：那张碟本身照旧报在差量预览「放不进目标」那一栏里。
-//! - 有一张碟落到卡上是**档案说这个平台吃不下的形态**：多碟变体只有头一张碟照档案转格式，别的碟原样搬（挂单
-//!   `Q1650`），PS1 两张 `.zip` 碟在只吃裸镜像的档案下第二张就是这样（差量预览的「转不了」只判主文件，眼下
-//!   不报它，同一条挂单）。
+//! - 有一张碟落到卡上是**档案说这个平台吃不下的形态**：每张碟的主文件都照档案转（票 `verdict-store-and-sync/19`，
+//!   [`Footprint::desired`]），落到这一支的只剩**真转不了**的那张——比如 zip 里装着 `.cue` 加 `.bin` 两份，这一版
+//!   只解只有一个内容条目的容器。那张碟照搬，差量预览「转不了」那一块逐碟报出它。
 //!
 //! 只看每张碟的主文件：`.cue` 引的那几份 `.bin` 落没落下，是那张碟自己的事，与播放列表无关。
 
@@ -52,7 +53,7 @@ use crate::adapter::converge::Launch;
 use crate::capability::{Accepts, Profile};
 use crate::path;
 use crate::platform::Manifest as PlatformManifest;
-use crate::shape::{self, Role};
+use crate::shape;
 
 use super::{Desired, DesiredFile, FileKind, Footprint};
 
@@ -94,8 +95,9 @@ impl Laid {
 
 /// 给这个子库里的多碟变体各折一份播放列表（判据见模块文档）。
 ///
-/// `footprint` 是这份选择集在主库里的脚印（成员连身份、平台），`desired` 是**按目标存储筛过一遍之后**的期望状态
-/// ——碟在卡上落在哪取自它。`platform_manifest` 是平台清单：认各张碟走的是成型那一份规则。
+/// `footprint` 是这份选择集在主库里的脚印（平台、认好的各张碟），`desired` 是**按目标存储筛过一遍之后**的期望状态
+/// ——碟在卡上落在哪取自它。`platform_manifest` 是平台清单：播放列表叫什么（剥掉碟片标记，[`shape::disc_family`]）
+/// 照它那一套碟片标记，与脚印认碟用的是同一份。
 ///
 /// **纯函数**：不碰磁盘、不读库。
 #[must_use]
@@ -117,15 +119,12 @@ pub fn lay(
         .filter(|file| file.kind == FileKind::Rom)
         .map(|file| (file.source.as_str(), file.path.as_str()))
         .collect();
-    let mut by_variant: BTreeMap<&str, Vec<(String, Role)>> = BTreeMap::new();
-    for member in footprint.members.iter().filter(|member| member.is_file) {
-        by_variant
-            .entry(member.variant_key.as_str())
-            .or_default()
-            .push((member.key.clone(), member.role));
-    }
-    for (variant, members) in &by_variant {
-        let platform = footprint.platforms.get(*variant).and_then(Option::as_deref);
+    // 各张碟是哪几份、按什么次序，脚印里认过一次（`shape::discs`）：转格式逐碟判的也是这几份。
+    for (variant, discs) in &footprint.discs {
+        let platform = footprint
+            .platforms
+            .get(variant.as_str())
+            .and_then(Option::as_deref);
         // 档案对这个平台吃什么：没有那一条、或者不作声称，就当吃（`Accepts::Anything`）。
         let accepts = profile
             .matrix
@@ -134,7 +133,6 @@ pub fn lay(
         if !accepts.takes(EXTENSION) {
             continue;
         }
-        let discs = shape::discs(members, platform_manifest);
         let Some(paths) = discs
             .iter()
             .map(|key| landing.get(key.as_str()).copied())
@@ -155,11 +153,11 @@ pub fn lay(
             at.clone(),
             FileKind::Playlist,
             &bytes,
-            (*variant).to_string(),
+            variant.clone(),
         ));
         out.bytes.insert(at.clone(), bytes);
         out.launch.insert(
-            (*variant).to_string(),
+            variant.clone(),
             Launch {
                 file: at,
                 hidden: paths.iter().map(ToString::to_string).collect(),
@@ -212,13 +210,14 @@ mod tests {
     use super::*;
     use crate::adapter::gamelist::Gamelist;
     use crate::catalog::MemberFile;
+    use crate::shape::Role;
     use crate::sync::Stamp;
 
-    /// 一个变体的脚印：`(键, 身份)` 那几条成员，平台 PS1。
+    /// 一个变体的脚印：`(键, 身份)` 那几条成员，平台 PS1；各张碟照内置平台清单认（与 `gather` 同一处）。
     fn 脚印(variant: &str, members: &[(&str, Role)]) -> Footprint {
-        Footprint {
-            platforms: BTreeMap::from([(variant.to_string(), Some("PS1".to_string()))]),
-            members: members
+        Footprint::new(
+            BTreeMap::from([(variant.to_string(), Some("PS1".to_string()))]),
+            members
                 .iter()
                 .map(|(key, role)| MemberFile {
                     variant_key: variant.to_string(),
@@ -229,8 +228,8 @@ mod tests {
                     role: *role,
                 })
                 .collect(),
-            contents: BTreeMap::new(),
-        }
+            &PlatformManifest::builtin(),
+        )
     }
 
     /// 期望状态：每条成员原样落在剥掉根名的那条路径上；`落点` 里点了名的换成那条落点（转格式那一支）。
@@ -351,8 +350,9 @@ mod tests {
 
     #[test]
     fn 有一张碟落到卡上是档案说吃不下的形态_那一套不生成播放列表() {
-        // 只有头一张碟照档案转格式（挂单 `Q1650`）：两张 `.zip` 碟在只吃裸镜像的档案下，头一张解成裸文件，
-        // 第二张照旧是 `.zip`——播放列表第二行会指着一份模拟器读不了的文件，那就不如不生成。
+        // 第二张碟**转不了**（票 `verdict-store-and-sync/19` 之后每张碟都照档案转，落到这一支的只剩真转不了的）：
+        // 两张 `.zip` 碟在只吃裸镜像的档案下，头一张解成裸文件，第二张照搬还是 `.zip`——播放列表第二行会指着一份
+        // 模拟器读不了的文件，那就不如不生成。
         let footprint = 脚印(
             "库/ps/某游戏/游戏 (Disc 1).zip",
             &[
