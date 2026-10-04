@@ -54,7 +54,7 @@ use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sources::{self, Source, SourceState, SourceStatus};
 use romcat_core::stage::Stage;
-use romcat_core::task::{Caption, Cutoff, Ending};
+use romcat_core::task::{Caption, Cutoff, Ending, Live};
 
 use crate::clock::Clock;
 use crate::dialog::{Button, Dialog, Footer, Width};
@@ -76,6 +76,12 @@ const RESCAN: &str = "重新扫描";
 /// 根那一行上开「移除根」那一层的那颗按钮（设计稿 `dg:rmroot` 那颗写的就是带省略号的这三个字：
 /// 按下去开的是一层弹层，不是当场就移）。
 pub const REMOVE: &str = "移除…";
+
+/// 根那张表变体那一格在那个根正扫着时写的字（设计稿 `renderLib()` 根那张表的「扫描中」，挂单 `Q1519`）。
+pub const SCANNING: &str = "扫描中";
+
+/// 根那张表变体那一格在那个根的扫描还排着、没轮到时写的字（稿上数据源那张表排着的那一格就这么说，挂单 `Q1519`）。
+pub const QUEUED: &str = "排队中";
 
 /// 「移除根」那一层页脚上真按下去那一颗（设计稿 `.btn.danger`）。
 pub const REMOVE_ROOT: &str = "移除根";
@@ -728,7 +734,9 @@ impl Screen {
             return;
         }
         let workspace = self.workspace.clone();
-        let caption = Caption::new(format!("取回 · {}", source.label()))
+        // 名字照稿 `TASKS.fetch` 的 `name`（「下载数据源 · …」，挂单 `Q881` 已裁：不再用「取回」）：稿上一趟下两个源，这里一个源一趟，
+        // 点号后头是哪一个源。
+        let caption = Caption::new(format!("下载数据源 · {}", source.label()))
             .with_subtitle(fetch_subtitle(source));
         let id = tasks.queue(caption, move |task| {
             sources::refetch(source, &workspace, task).map(Product::Fetched)
@@ -799,11 +807,11 @@ impl Screen {
                 self.notice = Some(format!("{} 跑完了。", done.name));
             }
             // **停在半路**那一趟真跑起来过：停下来的地方是干净的，依据是那个**断点**
-            // 文件（[`Screen::scan`] 设的），再按一次「重扫」从那儿接着走，命令行
+            // 文件（[`Screen::scan`] 设的），再按工序段那一颗「继续扫描」从那儿接着走，命令行
             // `romcat scan --resume` 认的也是它。
             (Ending::Halfway { .. }, Job::Scan(_)) => {
                 self.notice = Some(format!(
-                    "{} {}。再按「重扫」从那儿接着跑。",
+                    "{} {}。再按「继续扫描」从那儿接着跑。",
                     done.name,
                     done.ended.render(),
                 ));
@@ -814,7 +822,7 @@ impl Screen {
             (Ending::Stopped, Job::Scan(_)) => {
                 self.notice = Some(format!(
                     "{} 还没轮到就被撤掉了。中立库与那块盘一个字节都没动，\
-                     再按一次「重扫」就是。",
+                     再按一次就是。",
                     done.name
                 ));
             }
@@ -830,6 +838,29 @@ impl Screen {
         // **被按停的那一趟照样要重读**：它写进中立库的那半份记录是真的。
         self.reload(site);
         true
+    }
+
+    /// 根那张表变体那一格画什么（挂单 `Q1519`，拿主意的人 2026-10-05 裁：照稿 `renderLib()` 根那张表）：那个根的扫描在台上时
+    /// 说那一趟——**跑着**写 [`SCANNING`]，底下一行走了几成（这一帧任务台那一份快照，与工序段那一行、状态栏同一个数、同一个
+    /// 排法 `task::percent`；说不出走了几成就不写那一行）；**还排着**写 [`QUEUED`]。别的时候是变体数。
+    ///
+    /// 那一行的「扫描」「移除…」在台上时灰着，那是早就有的（[`Self::busy_roots`]，票 `gui-looks-like-the-design/06`）；这一格让屏上
+    /// 一直看得见它在台上。排扫描那一个入口（[`Self::scan`]）撞上同一个根已经在台上时仍是不说话地不排——ADR-0005「再修订」要的
+    /// 「守卫拒下时带着理由」那一半没齐，记在挂单 `Q1520`。
+    fn variants_cell(&self, row: &RootRow, live: Option<&Live>) -> Vec<egui::WidgetText> {
+        let Some(id) = self.job_of(&row.root.name) else {
+            return vec![font::mono(thousands(row.stats.variants)).into()];
+        };
+        match live.filter(|那一趟| 那一趟.id == id) {
+            Some(那一趟) => {
+                let mut 那几段 = vec![egui::WidgetText::from(SCANNING)];
+                if let Some(fraction) = 那一趟.progress.fraction() {
+                    那几段.push(font::mono(crate::task::percent(fraction)).into());
+                }
+                那几段
+            }
+            None => vec![egui::WidgetText::from(QUEUED)],
+        }
     }
 
     /// 哪几个根上有活在跑。
@@ -911,11 +942,20 @@ impl Screen {
 
     /// 画一帧的**屏体**（`look::screen_body`：屏头底下剩下的整块，竖着滚，内边距取令牌 `screen-body-padding`）。
     /// 屏名、副标题与「添加根…」在窗口本体画的屏头里（[`Self::header_actions`]），这一屏正文里不再画一遍（挂单 `Q866`）。
-    pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
-        look::screen_body(ui, "库屏", |ui| self.body(ui, site, tasks));
+    ///
+    /// `live` 是这一帧任务台上正在跑的那一趟（任务屏那一份快照，`task::Screen::running`；状态栏读的是同一份）：工序段那一行
+    /// 走了几成、顶上「正在扫描 · 预计还需」、根那张表「扫描中 N%」都从它取，与状态栏、任务屏那张卡同一个数。
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        site: &mut Site,
+        tasks: &mut Tasks,
+        live: Option<&Live>,
+    ) {
+        look::screen_body(ui, "库屏", |ui| self.body(ui, site, tasks, live));
     }
 
-    fn body(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+    fn body(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks, live: Option<&Live>) {
         let 间距 = panel_gap();
         // 这一屏自己的错与回执（加根被拦下、扫完一个根……）：有才画，画在两栏上头。
         let 有话说 = self.error.is_some() || self.notice.is_some();
@@ -937,13 +977,13 @@ impl Screen {
                 // 左边那一整张卡（设计稿 `#stages-panel`）：卡里头的几块各自铺满卡宽、自己垫内边距（`stages::Section::ui`）。
                 panel_frame(ui).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    self.stages.ui(ui, site, tasks);
+                    self.stages.ui(ui, site, tasks, live);
                 });
             });
             ui.add_space((间距 - ui.spacing().item_spacing.x).max(0.0));
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
-                self.side_ui(ui, site, tasks);
+                self.side_ui(ui, site, tasks, live);
             });
         });
         // 两栏底下通栏的**库体检**那一块（设计稿 `data-panel="health"`，离两栏隔一个 `library-gap`）。
@@ -953,6 +993,11 @@ impl Screen {
         self.removal_ui(ui.ctx(), site);
         // 工序段扫描那一行按下去只留记号：这一屏自己那条扫描的路接着排（`Self::take_scan`）。
         self.take_scan(site, tasks);
+        // 工序段顶上「正在扫描」那一块的「下载数据源」也只留记号：走数据源那一块「全部下载」那一条（设计稿两颗按的是同一个
+        // `task:fetch`），排下载只有 [`Self::fetch`] 这一份实现。
+        if self.stages.take_fetch_asked() {
+            self.fetch_all(tasks);
+        }
     }
 
     /// 这个库有没有一个根**完整扫过一趟**（[`LibraryRoot::fully_scanned`]，ADR-0024）：数据源那一块「还没扫描」那一句、
@@ -1074,7 +1119,13 @@ impl Screen {
     }
 
     /// 右边那一栏：根、数据源、导出设置三块，**各自收得起来**（[`Fold`]），次序照设计稿。
-    fn side_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+    fn side_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        site: &mut Site,
+        tasks: &mut Tasks,
+        live: Option<&Live>,
+    ) {
         let 间距 = panel_gap();
         let mut 收着 = self.folded(FOLD_ROOTS);
         // 标题照稿只写「根」（挂单 `Q888` 已裁）：几个根写在左栏导航上（票 `gui-looks-like-the-design/32`）。
@@ -1084,7 +1135,7 @@ impl Screen {
             "同一个主库可以包含多块盘或多个目录",
             &mut 收着,
             None,
-            |ui| self.roots_ui(ui, site, tasks),
+            |ui| self.roots_ui(ui, site, tasks, live),
         );
         self.set_folded(FOLD_ROOTS, 收着);
         ui.add_space(间距);
@@ -1159,7 +1210,13 @@ impl Screen {
         }
     }
 
-    fn roots_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+    fn roots_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        site: &mut Site,
+        tasks: &mut Tasks,
+        live: Option<&Live>,
+    ) {
         let mut 要扫 = None;
         let mut 要点头 = None;
         // 画的时候不改自己：按下去的那几下先记下来，画完再动
@@ -1189,13 +1246,16 @@ impl Screen {
                         .map(|row| egui::WidgetText::from(row.root.name.as_str())),
                 ),
             );
-            let 变体宽 =
-                widest(
-                    ui,
-                    std::iter::once(egui::WidgetText::from(表头("变体"))).chain(roots.iter().map(
-                        |row| egui::WidgetText::from(font::mono(thousands(row.stats.variants))),
-                    )),
-                );
+            // 变体那一格画什么（[`Self::variants_cell`]）：那个根在台上时是「扫描中 N%」或「排队中」，别的时候是变体数。
+            let 变体那一格: Vec<Vec<egui::WidgetText>> = roots
+                .iter()
+                .map(|row| self.variants_cell(row, live))
+                .collect();
+            let 变体宽 = widest(
+                ui,
+                std::iter::once(egui::WidgetText::from(表头("变体")))
+                    .chain(变体那一格.iter().flatten().cloned()),
+            );
             let clock = self.clock;
             let 扫描宽 = widest(
                 ui,
@@ -1288,13 +1348,9 @@ impl Screen {
                                     .response
                                     .rect;
                                 // 变体数**不折行**。容量不在这一格（挂单 `Q828` 已裁：几个根一共多大在工序段扫描那一行的小字里）。
-                                let 变体格 = single_line_cell(
-                                    ui,
-                                    变体宽,
-                                    [egui::WidgetText::from(font::mono(thousands(
-                                        row.stats.variants,
-                                    )))],
-                                );
+                                // 那个根在台上时这一格换成「扫描中」与走了几成（两段各占一行，照稿那一格的样子）。
+                                let 变体格 =
+                                    single_line_cell(ui, 变体宽, 变体那一格[at].iter().cloned());
                                 let 扫描格 = ui
                                     .vertical(|ui| {
                                         // 这一格照最宽那一段量（那一刻、「显示上次扫描结果」都不折行）。
@@ -1831,7 +1887,8 @@ fn last_scan(row: &RootRow, clock: Clock) -> (String, Option<String>) {
         return ("还没扫过".to_string(), None);
     };
     let mut 其余 = format!("用时 {}", human_duration(scan.elapsed_ms));
-    if scan.interrupted {
+    // 「上次那一趟部分完成」只问核心那一句（`LibraryRoot::partially_scanned`），与工序段那颗「继续扫描」同一个判据。
+    if row.root.partially_scanned() {
         其余.push_str("（那一趟部分完成，数字是下界）");
     }
     (clock.short(scan.at), Some(其余))

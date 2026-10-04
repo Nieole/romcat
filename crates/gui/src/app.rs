@@ -764,6 +764,11 @@ impl App {
         {
             self.view = View::Queue;
         }
+        // **库屏工序段上在台上那一道的「查看任务」**（票 `gui-draws-the-rest-of-the-design/11`，挂单 `Q883` 照稿）：换到任务屏看
+        // 那一趟。库屏只留记号，与子库屏提示条上那颗「查看任务」同一条路。
+        if self.roots.stages_mut().take_tasks_jump() {
+            self.view = View::Tasks;
+        }
     }
 
     /// 变体表背后那扇窗，供测试查「内存里装了几行」。
@@ -847,8 +852,10 @@ impl App {
                 queue.ui(ui, site, 主区);
             }
             View::Library => {
+                // 这一帧任务台那一份快照（状态栏先取过，这里拿到的是同一份）：库屏上走了几成、还要多久与状态栏同一个数。
+                let 跑着的 = self.tasks.running(ui.ctx(), &self.board);
                 let (roots, site, board) = (&mut self.roots, &mut self.site, &mut self.board);
-                roots.ui(ui, site, board);
+                roots.ui(ui, site, board, 跑着的.as_ref());
                 // **库屏上刚落过一笔成型纠正**（票 `verdict-store-and-sync/12`）：作品详情那一面缓着的待生效
                 // 跟着作废，回到那一面时照沉淀库重读——那一处标的是「待生效」，不再给纠正的门。
                 if roots.take_fixed() {

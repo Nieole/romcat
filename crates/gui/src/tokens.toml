@@ -443,6 +443,7 @@ platforms-visible = 7     # 平台那一簇先摆几个，其余收进「更多�
 stage-columns     = [26, 64] # 工序那一行头两列的宽：圆点、工序名（设计稿 .stage 的 grid-template-columns:26px 64px 1fr auto）
 stage-dot         = 22    # 工序圆点的直径（设计稿 .stage .dot）
 stage-dot-stroke  = 1.5   # 工序圆点描边的宽（设计稿 .stage .dot 的 border:1.5px）
+stage-dot-spin    = 1     # 工序那一行在台上跑着时那枚空心圆点转一圈要多久，秒（设计稿 .stage.run .dot 的 animation:spin 1s）
 row-stripe        = 3     # 行左边那条状态竖条的宽（设计稿 .stage.next 与 .tbl td.st 的 inset 3px）
 fold-mark         = 7     # 面板标题栏那枚折叠标三角的宽（设计稿 .iconbtn 里 13px 字号的 ▾，照稿图量约 7px）
 format-select-width = 150 # 导出设置那一块前端格式下拉的宽（设计稿 select.input 的 width:150px）

@@ -68,7 +68,7 @@ use romcat_core::scrape::Gather;
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::site::Site;
 use romcat_core::stage::{Stage, StageRow, Stages};
-use romcat_core::task::{Caption, Cutoff, Ending, Finished, Handle};
+use romcat_core::task::{Caption, Cutoff, Ending, Finished, Handle, Live};
 use romcat_core::triage::{self, batch::Coverage};
 use romcat_core::{title, verdict, workspace};
 
@@ -78,6 +78,18 @@ use crate::{font, look};
 
 /// 裁决那一道的按钮上写的字（设计稿原话，挂单 `Q881` 已裁：照稿）：**它不排任务**，把人带去待确认队列屏（`Section::start`）。
 pub const TO_QUEUE: &str = "去处理";
+
+/// 这一道工序在台上（跑着或者排着）时那一行、与顶上「下一步」那颗按钮上写的字（设计稿 `stageRows()` 里 `st:'run'` 那一支的
+/// `act`，挂单 `Q883` 已裁：照稿）：**它不排任务**，把人带去任务屏看那一趟（[`Section::take_tasks_jump`]）。
+pub const VIEW_TASK: &str = "查看任务";
+
+/// 扫描在台上跑着时顶上那一块底下那句说明（设计稿 `renderLib()` 里 `S.running.key==='scan'` 那一支的原话，拿主意的人
+/// 2026-10-05 裁：照稿）。
+pub const SCANNING_HELP: &str = "扫描期间可以先下载数据源，识别时需要用到。其他页面可以正常使用。";
+
+/// 扫描在台上跑着、DAT 仓库还没下载时顶上那一块右边那颗主按钮（设计稿原话）：按下去走数据源那一块「全部下载」那一条
+/// （`roots::Screen::fetch_all`；稿上两颗按的是同一个 `task:fetch`）。
+pub const FETCH_SOURCES: &str = "下载数据源";
 
 /// 识别那一行还没做完、DAT 库也还没下载时底下那句小字（设计稿原话，挂单 `Q882`）。
 pub const IDENTIFY_NEEDS_DAT: &str = "需要先下载 DAT 仓库，否则只能按文件名识别";
@@ -160,7 +172,7 @@ pub struct Section {
     workspace: PathBuf,
     /// 每一道工序还差多少。**从核心库现折**（[`Stages::survey`]），不自己攒一份。
     stages: Stages,
-    /// 正在跑的那几趟活的任务号，用来禁掉重复按下。
+    /// 正在跑（或者排着）的那几趟活的任务号：同一道不排第二趟（[`Section::start`]），那一行照它画成在台上那一档。
     running: Vec<(u64, Stage)>,
     /// 记住的那套**导出**配置：往哪个前端格式、哪个目录写。
     /// **从中立库现读**（[`Catalog::export_setup`](romcat_core::catalog::Catalog::export_setup)），
@@ -216,7 +228,7 @@ pub struct Section {
     /// 库屏排上的那一趟**取回 DAT** 眼下在不在台上（`Section::set_dat_on_board`）。
     dat_on_board: bool,
     /// 台上头一趟**扫描**的任务号（`Section::set_scan_on_board`）。扫描不在这一段排，这一段只照它
-    /// 禁掉扫描那一行的按钮。
+    /// 把扫描那一行画成在台上那一档（「查看任务」、那一趟走到哪儿了）。
     scan_on_board: Option<u64>,
     /// 按下去了、却**不在这一段排**的那一道（扫描、裁决），等够得着的那一处取走
     /// （`Section::take_handoff`）。
@@ -224,6 +236,10 @@ pub struct Section {
     /// 裁决那一行底下那句「前几批可一次处理多少」要的数（`triage::head_coverage`）：**算一次存着**，只在队列可能变了时
     /// 重算（[`Section::recount_queue_head`]）；每次问完工序那几行把它交回去（`Stages::set_queue_head`）。
     queue_head: Option<Coverage>,
+    /// 「查看任务」按下去了（[`VIEW_TASK`]），等窗口把人送去任务屏（[`Section::take_tasks_jump`]）。
+    to_tasks: bool,
+    /// 顶上那一块「下载数据源」按下去了（[`FETCH_SOURCES`]），等库屏排下载（[`Section::take_fetch_asked`]）：排下载不在这一段。
+    fetch_asked: bool,
 }
 
 impl Section {
@@ -249,6 +265,8 @@ impl Section {
             scan_on_board: None,
             handoff: None,
             queue_head: None,
+            to_tasks: false,
+            fetch_asked: false,
         }
     }
 
@@ -442,7 +460,7 @@ impl Section {
     }
 
     /// 这道工序上有没有**任务**在台上（排着队也算）；有就是那一趟的任务号。
-    /// **测试拿它核对「按钮按不下去」那一条。**
+    /// **测试拿它核对「同一道不排第二趟」那一条**，那一行也照它画成在台上那一档。
     ///
     /// 名字不叫 `job_of`：词表**任务**那一条的 `_Avoid_` 里逐字列着 `job`
     /// （`CONTEXT.md`）。库屏那一侧的 `Job` 是这条账在旧代码里的欠款，不往新代码里扩。
@@ -487,7 +505,7 @@ impl Section {
     /// 这一段自己那颗「我看过了，照写」也不另起一份：它走的是同一个 `queue`
     /// （`Self::force_export`），而且不对外。
     ///
-    /// 同一道工序已经在跑就**什么都不做**——那一行的按钮本来就是禁着的，这一句是给
+    /// 同一道工序已经在台上就**什么都不做**——那时那一行的按钮写「查看任务」（[`VIEW_TASK`]）、不排活，这一句是给
     /// 别处的捷径兜底的。
     ///
     /// **扫描与裁决两道不在这一段排**（`Self::hand_over`）：扫描交给库屏自己那条扫描的路，
@@ -532,6 +550,18 @@ impl Section {
             self.handoff = None;
         }
         是它
+    }
+
+    /// 「查看任务」按下去了没有（[`VIEW_TASK`]：那一道在台上时那一行与顶上「下一步」那一颗）。**取走就清掉**：窗口每帧问一次
+    /// （`App::route`），换到任务屏只换一回——与子库屏提示条上那颗「查看任务」同一条路（`sublibrary::Screen::take_tasks_jump`）。
+    pub fn take_tasks_jump(&mut self) -> bool {
+        std::mem::take(&mut self.to_tasks)
+    }
+
+    /// 顶上那一块「下载数据源」按下去了没有（[`FETCH_SOURCES`]）。**取走就清掉**：库屏画完这一段就问一次，按下去就排上
+    /// （`roots::Screen::body` → `fetch_all`）——与扫描那一道留记号、库屏取走同一个办法（[`Self::take_handoff`]）。
+    pub(crate) fn take_fetch_asked(&mut self) -> bool {
+        std::mem::take(&mut self.fetch_asked)
     }
 
     /// 库屏排上、收掉扫描时拨（`roots::Screen::scan` / `settle`）：台上头一趟扫描的任务号。
@@ -820,7 +850,16 @@ impl Section {
 
     /// 画这一段：**库屏左边那一整张卡里头的东西**（设计稿 `#stages-panel`）——顶上「下一步」、「工序」那条标题栏、
     /// 六行工序，一块一块铺满卡宽，块与块之间一条分隔线。卡的底、描边与圆角由摆它的那一屏画（`roots::Screen`）。
-    pub fn ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
+    ///
+    /// `live` 是这一帧任务台上正在跑的那一趟（任务屏那一份快照，库屏递进来）：在台上那一行走了几成、顶上「正在扫描 · 预计
+    /// 还需」都读它，与状态栏、任务屏那张卡同一个数。
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        site: &mut Site,
+        tasks: &mut Tasks,
+        live: Option<&Live>,
+    ) {
         let tokens = Tokens::builtin();
         let 缝 = ui.spacing().item_spacing;
         // 块与块之间不留缝：分隔线就是缝。块里头照旧用原来的间距。
@@ -828,7 +867,7 @@ impl Section {
         let 圆角 = tokens.radius.large;
         let 四边 = tokens.space.panel_padding[1];
         // 顶上那一块「下一步」（设计稿 `.nextline`）：`panel-2` 底、四边一样的内边距。它贴着卡顶，上边两个角跟着卡圆。
-        let 下一步要跑 = egui::Frame::new()
+        let 下一步按了 = egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .corner_radius(egui::CornerRadius {
                 nw: 圆角,
@@ -840,7 +879,7 @@ impl Section {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = 缝;
                 ui.set_width(ui.available_width());
-                self.next_up_ui(ui)
+                self.next_up_ui(ui, live)
             })
             .inner;
         look::divider(ui);
@@ -874,7 +913,7 @@ impl Section {
                 });
             look::divider(ui);
         }
-        let mut 要跑 = 下一步要跑;
+        let mut 按了 = 下一步按了;
         // 画的时候不改自己：按下去的那一下先记下来，画完再动（借用检查器要的，
         // 也让「按一下发生什么」读起来是一条直线）。
         let rows: Vec<StageRow> = self.stages.rows().to_vec();
@@ -882,13 +921,18 @@ impl Section {
             if at > 0 {
                 look::divider(ui);
             }
-            if let Some(stage) = self.row_ui(ui, row, site, tasks) {
-                要跑 = Some(stage);
+            if let Some(press) = self.row_ui(ui, row, site, tasks, live) {
+                按了 = Some(press);
             }
         }
         ui.spacing_mut().item_spacing = 缝;
-        if let Some(stage) = 要跑 {
-            self.start(stage, site, tasks);
+        match 按了 {
+            Some(Press::Start(stage)) => self.start(stage, site, tasks),
+            // **只换屏，不碰那一趟**：去任务屏看它走到哪儿、要不要停，由那一屏办。
+            Some(Press::ViewTask) => self.to_tasks = true,
+            // 排下载不在这一段：留记号，库屏取走（`Self::take_fetch_asked`）。
+            Some(Press::FetchSources) => self.fetch_asked = true,
+            None => {}
         }
         if 要照写 {
             self.force_export(site, tasks);
@@ -933,7 +977,10 @@ impl Section {
     /// 这一行画成哪一种样子（[`RowLook`]）。**判断全在核心里**（`Stages::next_up`、`Stages::waiting_on`、
     /// `StageRow::settled`），这里只把那几个答案折成一种画法。
     fn row_look(&self, row: &StageRow) -> RowLook {
-        if self
+        // **这一道在台上压过别的几种**（设计稿 `stageRows()` 先问 `S.running`）：在台上时那一行说的是那一趟，不是还差多少。
+        if self.task_of(row.stage).is_some() {
+            RowLook::OnBoard
+        } else if self
             .stages
             .next_up()
             .is_some_and(|next| next.stage == row.stage)
@@ -948,10 +995,12 @@ impl Section {
         }
     }
 
-    /// 一道工序一行（设计稿 `.stage`）：四列——圆点、工序名、那一句（底下可能跟一行小字）、按钮。返回按下去的那一道。
+    /// 一道工序一行（设计稿 `.stage`）：四列——圆点、工序名、那一句（底下可能跟一行小字）、按钮。返回按下去的是哪一下。
     ///
     /// **列宽、圆点、竖条、字号取令牌**（`stage-columns`、`stage-dot`、`row-stripe`、`size-small-plus`、`size-caption-plus`）。
     /// 下一步那一行垫选中底色、左边一条强调色竖条（`.stage.next`）；在等的那几行名字与那一句都用弱色（`.stage.wait`）。
+    /// **在台上的那一行**（`.stage.run`）：圆点换成转着的空心圈，那一句换成台上那一趟走到哪儿了（[`on_board_line`]），不画
+    /// 小字——稿上那一支没有 `small`。
     /// **铺媒体那颗开关挂在导出那一行的第三列底下**：它是导出这一道**这一趟**的旋钮；导出往哪儿写不在这一段，是库屏
     /// 右边「导出设置」那一块（`roots::Screen`）。
     fn row_ui(
@@ -960,9 +1009,13 @@ impl Section {
         row: &StageRow,
         site: &Site,
         tasks: &mut Tasks,
-    ) -> Option<Stage> {
+        live: Option<&Live>,
+    ) -> Option<Press> {
         let tokens = Tokens::builtin();
         let 样子 = self.row_look(row);
+        // 在台上的那一趟：跑着的话那一句写它走到哪儿了、圆点转着；还排着的话说它在等。
+        let 台上那一趟 = self.task_of(row.stage);
+        let 跑着的 = 台上那一趟.and_then(|id| live.filter(|那一趟| 那一趟.id == id));
         let 序号 = self
             .stages
             .rows()
@@ -999,7 +1052,7 @@ impl Section {
             ui.horizontal(|ui| {
                 let (圆点格, _) =
                     ui.allocate_exact_size(egui::vec2(圆点列, 行高), egui::Sense::hover());
-                paint_stage_dot(ui, 圆点格, 序号, 样子);
+                paint_stage_dot(ui, 圆点格, 序号, 样子, 跑着的.is_some());
                 ui.allocate_ui_with_layout(
                     egui::vec2(名字列, 行高),
                     egui::Layout::left_to_right(egui::Align::Center),
@@ -1017,16 +1070,21 @@ impl Section {
                     按了 = self.row_button(ui, row, 样子);
                     ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                         ui.add_space(垫);
-                        let 主句 = egui::RichText::new(self.stages.line(row))
-                            .size(tokens.font.size_small_plus);
+                        // **在台上的那一行说的是那一趟**（[`on_board_line`]，设计稿 `#live-left`）：每帧现问任务台，跟着那一趟走。
+                        let 那一句话 = 台上那一趟
+                            .and_then(|id| on_board_line(tasks, id, 跑着的))
+                            .unwrap_or_else(|| self.stages.line(row));
+                        let 主句 = egui::RichText::new(那一句话).size(tokens.font.size_small_plus);
                         let 主句 = if 样子 == RowLook::Waiting {
                             主句.color(弱色)
                         } else {
                             主句
                         };
                         let 那一句 = ui.add(egui::Label::new(主句).wrap());
-                        // **口径也挂在那个数上**：指针停在数上就读得到它数的是什么。
-                        if let Some(basis) = row.stage.basis() {
+                        // **口径也挂在那个数上**：指针停在数上就读得到它数的是什么。在台上时那一句不是那个数，不挂。
+                        if 样子 != RowLook::OnBoard
+                            && let Some(basis) = row.stage.basis()
+                        {
                             那一句.on_hover_text(basis);
                         }
                         if let Some(小字) = self.row_detail(row, 样子) {
@@ -1080,7 +1138,12 @@ impl Section {
     ///   [`IDENTIFY_LOCAL`]）。「查一眼有没有」不是判断（ADR-0005 修订段），与按下去时那句拒绝（[`missing_dat`]）问的是
     ///   同一件事。
     /// - 别的几句：**数与措辞都在核心库**（`Stages::detail`，挂单 `Q882`），这里只画。
+    /// - **在台上**的那一行一句都不画（设计稿 `st:'run'` 那一支没有小字）。
     fn row_detail(&self, row: &StageRow, 样子: RowLook) -> Option<String> {
+        // **在台上的那一行不画小字**（设计稿 `st:'run'` 那一支 `small` 是空的）：那一句已经换成那一趟走到哪儿了。
+        if 样子 == RowLook::OnBoard {
+            return None;
+        }
         if let Some(basis) = row.stage.basis() {
             return Some(basis.to_string());
         }
@@ -1097,32 +1160,31 @@ impl Section {
         self.stages.detail(row)
     }
 
-    /// 一道工序那一行右边那颗按钮（设计稿 `stageRows()` 的第四列，小号按钮）；按下去就交回那一道（走 [`Self::start`]，
-    /// 与顶上「下一步」同一个入口）。
+    /// 一道工序那一行右边那颗按钮（设计稿 `stageRows()` 的第四列，小号按钮）；交回按下去的是哪一下。
     ///
-    /// - **在等前面那一道的不给按钮**（挂单 `Q827` 已裁：照稿）——那一趟真在台上的除外：那时按钮说「跑着呢」、按不下去。
-    /// - **下一步那一行是主按钮**，字与顶上那颗同一个（[`go_label`]）；**做完的那几行是弱化的「重新扫描」「重新运行」
+    /// - **在等前面那一道的不给按钮**（挂单 `Q827` 已裁：照稿）。
+    /// - **在台上的那一道写弱化的「查看任务」**（[`VIEW_TASK`]，挂单 `Q883` 已裁：照稿 `.btn.ghost`）：按下去把人带去任务屏，
+    ///   **不排活**——同一道工序排两遍的兜底在排活那一个入口里（[`Self::start`]）。
+    /// - **下一步那一行是主按钮**，字与顶上那颗同一个（[`Self::go_label`]）；**做完的那几行是弱化的「重新扫描」「重新运行」
     ///   「重新导出」**（设计稿 `.btn.ghost`）。按钮上的字照稿（挂单 `Q881` 已裁）。
     /// - **裁决不排任务**：那一行的按钮把人带去待确认队列屏（`Self::hand_over`）。
     /// - **刮削那颗按钮说清排的是哪一趟**：旋钮是固定的整库那一套，不是浏览屏刮削面板眼下拨到哪儿的那一套
     ///   （`crate::scrape::whole_library`）。
-    fn row_button(&self, ui: &mut egui::Ui, row: &StageRow, 样子: RowLook) -> Option<Stage> {
-        let 忙 = self.task_of(row.stage).is_some();
-        if 样子 == RowLook::Waiting && !忙 {
+    fn row_button(&self, ui: &mut egui::Ui, row: &StageRow, 样子: RowLook) -> Option<Press> {
+        if 样子 == RowLook::Waiting {
             return None;
         }
-        let 字 = if 忙 {
-            "跑着呢"
-        } else {
-            match (row.stage, 样子) {
-                (Stage::Triage, _) => TO_QUEUE,
-                (Stage::Scan, RowLook::Done) => "重新扫描",
-                (Stage::Export, RowLook::Done) => "重新导出",
-                (_, RowLook::Done) => "重新运行",
-                _ => go_label(row.stage),
-            }
+        let 字 = match (row.stage, 样子) {
+            (_, RowLook::OnBoard) => VIEW_TASK,
+            (Stage::Triage, _) => TO_QUEUE,
+            (Stage::Scan, RowLook::Done) => "重新扫描",
+            (Stage::Export, RowLook::Done) => "重新导出",
+            (_, RowLook::Done) => "重新运行",
+            _ => self.go_label(row.stage),
         };
-        let 悬停 = if row.stage == Stage::Triage {
+        let 悬停 = if 样子 == RowLook::OnBoard {
+            VIEW_TASK_HOVER.to_string()
+        } else if row.stage == Stage::Triage {
             "裁决在待确认队列屏上一批批做，不排到任务台上".to_string()
         } else {
             let mut 悬停 = "排到任务台上跑，期间照常用别的屏；\
@@ -1134,31 +1196,48 @@ impl Section {
             }
             悬停
         };
-        let 弱化字色 = ui.visuals().widgets.noninteractive.fg_stroke.color;
-        look::small_buttons(ui, |ui| match 样子 {
-            RowLook::Next if !忙 => {
+        let 按了 = look::small_buttons(ui, |ui| match 样子 {
+            RowLook::Next => {
                 ui.scope(|ui| {
                     look::primary_button(ui.visuals_mut());
                     ui.add(egui::Button::new(字))
                 })
                 .inner
             }
-            RowLook::Done if !忙 => ui.add(
-                egui::Button::new(egui::RichText::new(字).color(弱化字色))
-                    .frame_when_inactive(false),
-            ),
-            _ => ui.add_enabled(!忙, egui::Button::new(字)),
+            RowLook::Done | RowLook::OnBoard => ghost_button(ui, 字),
+            RowLook::Pending | RowLook::Waiting => ui.button(字),
         })
         .on_hover_text(悬停)
-        .clicked()
-        .then_some(row.stage)
+        .clicked();
+        按了.then_some(if 样子 == RowLook::OnBoard {
+            Press::ViewTask
+        } else {
+            Press::Start(row.stage)
+        })
+    }
+
+    /// 下一步那一行、与顶上「下一步」那颗按钮上写的字（设计稿 `stageRows()` 的 `act`，挂单 `Q881` 已裁：照稿）：扫描写
+    /// 「开始扫描」——**有根上次那一趟部分完成时写「继续扫描」**（设计稿 `S.half.scan`；判据在核心库
+    /// `Stages::has_partial_scan`，这一层不猜）——裁决写 [`TO_QUEUE`]，别的几道写「运行」。
+    ///
+    /// **两处同一个字**：顶上已经写着「下一步：某某」，按钮不必再带工序名。
+    fn go_label(&self, stage: Stage) -> &'static str {
+        match stage {
+            Stage::Scan if self.stages.has_partial_scan() => "继续扫描",
+            Stage::Scan => "开始扫描",
+            Stage::Triage => TO_QUEUE,
+            Stage::Identify | Stage::Scrape | Stage::FoldTitles | Stage::Export => "运行",
+        }
     }
 
     /// 顶上那一行「**下一步**」：核心库指着的那一道（`Stages::next_up`）、那一行说的话，与一颗
-    /// 一按就办的按钮。返回按下去的那一道——它与那一行自己的按钮走同一个入口（[`Self::start`]）。
+    /// 一按就办的按钮。返回按下去的是哪一下——它与那一行自己的按钮走同一个入口（[`Self::start`]）。
+    ///
+    /// **扫描在台上跑着时整块照稿换掉**（[`Self::scanning_ui`]，拿主意的人 2026-10-05 裁）。**别的工序在台上时，标题照旧，那颗按钮与
+    /// 那一行同一个字**（[`VIEW_TASK`]，弱化）：再按一次「开始扫描」「运行」没有意义，按下去去任务屏看那一趟。
     ///
     /// **指哪一道不在这儿判**（ADR-0005）：「哪一道算做完了」是核心库的事，这里只画它。
-    fn next_up_ui(&self, ui: &mut egui::Ui) -> Option<Stage> {
+    fn next_up_ui(&self, ui: &mut egui::Ui, live: Option<&Live>) -> Option<Press> {
         // **字号直接问令牌**（`size-title`），不走具名字号 `look::TITLE`：开窗头一帧交进来的 `Ui`
         // 还带着装基线之前那份样式，具名字号在那一帧查不到、egui 当场 panic。
         let 标题 = |ui: &egui::Ui, text: String| {
@@ -1166,6 +1245,13 @@ impl Section {
                 .size(Tokens::builtin().font.size_title)
                 .color(ui.visuals().strong_text_color())
         };
+        // **扫描真在跑**（不是还排着）：稿上这一支压过「下一步」——重新扫描时下一步指着别的工序，这一块照样说正在扫描。
+        if let Some(扫着的) =
+            live.filter(|那一趟| self.scan_on_board.is_some_and(|id| id == 那一趟.id))
+        {
+            let 标题字 = 标题(ui, scanning_title(扫着的));
+            return self.scanning_ui(ui, 标题字);
+        }
         let Some(row) = self.stages.next_up() else {
             ui.label(标题(ui, "所有工序都已完成".to_string()));
             // **哪几道只看跑没跑过由核心库照眼下那几行折**（`Stages::settled_by_running`），这里不写死。
@@ -1175,22 +1261,24 @@ impl Section {
             ui.weak("添加新的根之后，这里会再指出下一步。");
             return None;
         };
-        let 忙 = self.task_of(row.stage).is_some();
-        let 字 = if 忙 {
-            "跑着呢".to_string()
-        } else {
-            go_label(row.stage).to_string()
-        };
+        let 在台上 = self.task_of(row.stage).is_some();
         // **照稿横排**（设计稿 `.nextline`）：标题与那一句在左、主按钮在右。按钮先摆（从右往左），剩下的宽度
         // 交给左边那两行，那一句长了在里面折行。
         let mut 按了 = false;
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // **主按钮**：这一屏上最该按的就是它。颜色只从令牌来（`look::primary_button`），高、留白、字号是默认那一档
-                // （设计稿 `.btn.pri`，`look::buttons`）。
+                // （设计稿 `.btn.pri`，`look::buttons`）。那一道在台上时换成弱化的「查看任务」，与那一行同一个样子。
                 按了 = look::buttons(ui, |ui| {
-                    look::primary_button(ui.visuals_mut());
-                    ui.add_enabled(!忙, egui::Button::new(字)).clicked()
+                    if 在台上 {
+                        ghost_button(ui, VIEW_TASK)
+                            .on_hover_text(VIEW_TASK_HOVER)
+                            .clicked()
+                    } else {
+                        look::primary_button(ui.visuals_mut());
+                        ui.add(egui::Button::new(self.go_label(row.stage)))
+                            .clicked()
+                    }
                 });
                 ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                     ui.label(标题(ui, format!("下一步：{}", row.stage.label())));
@@ -1198,7 +1286,37 @@ impl Section {
                 });
             });
         });
-        按了.then_some(row.stage)
+        按了.then_some(if 在台上 {
+            Press::ViewTask
+        } else {
+            Press::Start(row.stage)
+        })
+    }
+
+    /// 扫描在台上跑着时顶上那一块（设计稿 `renderLib()` 里 `S.running.key==='scan'` 那一支，拿主意的人 2026-10-05 裁：照稿）：
+    /// 标题「正在扫描 · 预计还需 X」（[`scanning_title`]），底下那句说明（[`SCANNING_HELP`]），右边一颗主按钮
+    /// 「下载数据源」（[`FETCH_SOURCES`]）——**DAT 仓库还没下载、下载 DAT 那一趟也不在台上时才摆**（稿 `queued('fetch')||S.src.dat`
+    /// 为假）；摆不出时右边空着，照稿。「下载过没有」是查一眼有没有（[`missing_dat`]，ADR-0005 修订段），与识别那一行底下那句同一问。
+    fn scanning_ui(&self, ui: &mut egui::Ui, 标题字: egui::RichText) -> Option<Press> {
+        let 摆下载 = !self.dat_on_board && missing_dat(&self.workspace).is_some();
+        let mut 按了 = false;
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if 摆下载 {
+                    按了 = look::buttons(ui, |ui| {
+                        look::primary_button(ui.visuals_mut());
+                        ui.add(egui::Button::new(FETCH_SOURCES))
+                            .on_hover_text("把还没下载的数据源排到任务台上，排在这一趟扫描后面")
+                            .clicked()
+                    });
+                }
+                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.label(标题字);
+                    ui.add(egui::Label::new(egui::RichText::new(SCANNING_HELP).weak()).wrap());
+                });
+            });
+        });
+        按了.then_some(Press::FetchSources)
     }
 
     /// 导出那一支上那颗**铺媒体**开关（**默认关着**，[`Self::lay_media`]），与打开之后
@@ -1459,6 +1577,71 @@ fn subtitle(
     }
 }
 
+/// 工序段上按下去的是哪一下（[`Section::row_button`]、[`Section::next_up_ui`]）。画的时候先记下来，画完再动（`Section::ui`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Press {
+    /// 排这一道（走 [`Section::start`]，唯一的排活入口）。
+    Start(Stage),
+    /// 「查看任务」（[`VIEW_TASK`]）：去任务屏看台上那一趟，不排活。
+    ViewTask,
+    /// 扫描在台上跑着时顶上那颗「下载数据源」（[`FETCH_SOURCES`]）：排下载，走库屏那一条（`roots::Screen::fetch_all`）。
+    FetchSources,
+}
+
+/// 悬停在「查看任务」上读到的那一句。
+const VIEW_TASK_HOVER: &str = "去任务屏看这一趟：走到哪儿了、要不要停。";
+
+/// 弱化的那一档按钮（设计稿 `.btn.ghost`）：不垫底、不描边，字用弱色，指针停上去才显出底。做完那几行的「重新…」、在台上那一行
+/// 与顶上那一颗「查看任务」都是这一档。
+///
+/// **它没走 [`look::ghost_button`] 那一处配色**：做完那几行这一画法是票 06 照稿点过头的样子（原先就写在 `row_button` 里），
+/// 换成那一处的配色，库屏原有几张基线（`library/scanned-*`、`folded-*`、`remove-root-*`）的「重新…」跟着变——要拿主意的人
+/// 重新点头，不在本票（挂单 `Q1521`）。
+fn ghost_button(ui: &mut egui::Ui, 字: &str) -> egui::Response {
+    let 弱化字色 = ui.visuals().widgets.noninteractive.fg_stroke.color;
+    ui.add(egui::Button::new(egui::RichText::new(字).color(弱化字色)).frame_when_inactive(false))
+}
+
+/// 台上那一趟（任务号 `id`）在工序那一行上说的那一句（设计稿 `#live-left`）。`live` 是这一帧任务台那一份快照里**正是这一趟**
+/// 的那一份（不是就交 `None`）：
+///
+/// - **跑着**：走了几成（说得出才写）加上走到哪一步了——那一步的话由核心库折（`Progress::render`），与任务屏那张卡上「在做什么」
+///   同一句；百分比与卡上、状态栏上同一个排法（`task::percent`）、读同一份快照。**每帧现取**，所以那一句跟着那一趟走。按了停、
+///   还没停下来时说「正在停」（与那张卡同一句，[`crate::task::STOPPING`]）。
+/// - **还排着**：说它在等、前面还有几趟（与子库屏「排在任务台上等着」同一个说法）。
+/// - 都不是（这一帧里刚收了场、还没认领）：交 `None`，那一行照旧说它自己那一句。
+///
+/// **不写已用、剩余约**：那两样跟着挂钟走，任务屏那张卡与状态栏上都有；稿上这一格也只写走到哪儿了。
+fn on_board_line(tasks: &Tasks, id: u64, live: Option<&Live>) -> Option<String> {
+    if let Some(live) = live {
+        if live.stopping {
+            return Some(crate::task::STOPPING.to_string());
+        }
+        let 走到 = live.progress.render();
+        return Some(match live.progress.fraction() {
+            Some(fraction) => format!("{} · {走到}", crate::task::percent(fraction)),
+            None => 走到,
+        });
+    }
+    let 排在 = tasks.queued().iter().position(|waiting| waiting.id == id)?;
+    let 前面 = 排在 + usize::from(tasks.running().is_some());
+    Some(if 前面 == 0 {
+        "排在任务台上等着".to_string()
+    } else {
+        format!("排在任务台上等着，前面还有 {前面} 个任务")
+    })
+}
+
+/// 扫描在台上跑着时顶上那一块的标题（设计稿 `正在扫描 · 预计还需 ${dur(...)}`）：还要多久就是任务屏那张卡上「剩余约」那个数
+/// ——同一份快照（[`Live::remaining`]，算法在核心库）、同一个排法（`task::elapsed`）。**算不出来时只写「正在扫描」**：与那张卡
+/// 「算不出来就一格都不画」同一个口径（稿上没画这一档）。
+fn scanning_title(live: &Live) -> String {
+    match live.remaining() {
+        Some(left) => format!("正在扫描 · 预计还需 {}", crate::task::elapsed(left)),
+        None => "正在扫描".to_string(),
+    }
+}
+
 /// 工序那一行眼下画成哪一种样子（设计稿 `stageRows()` 的 `st`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowLook {
@@ -1470,6 +1653,9 @@ enum RowLook {
     Waiting,
     /// 没做完、不在等谁、又不是下一步：六道从上往下排走不到这儿，照平常的样子画。
     Pending,
+    /// 这一道在台上（`.stage.run`）：**跑着或者排着**。空心圆点（跑着时转），那一句写那一趟（[`on_board_line`]），弱化的
+    /// 「查看任务」。**压过别的几种**：在台上时那一行说的是那一趟，不是还差多少。
+    OnBoard,
 }
 
 /// 工序那一行头上那枚**圆点**（设计稿 `.stage .dot`）：直径、描边宽取令牌 `stage-dot` / `stage-dot-stroke`，序号用
@@ -1477,7 +1663,11 @@ enum RowLook {
 ///
 /// 做完的是 `hi-soft` 底、`hi` 描边与对勾；下一步是强调色实心、`on-accent` 的序号；别的是面板底、`line-2` 描边、弱色
 /// 序号。**对勾是画的两段线，不是字形**：打包的字形子集里没有 ✓。对勾三个点按圆的半径摆。
-fn paint_stage_dot(ui: &egui::Ui, 格: egui::Rect, 序号: usize, 样子: RowLook) {
+///
+/// **在台上的那一道**（设计稿 `.stage.run .dot`）：面板底、强调色描边、右边那四分之一不描（`border-right-color:transparent`），
+/// 不写序号；`转着`（那一趟真在跑，不是还排着）时照令牌 `stage-dot-spin` 一圈一圈转（`animation:spin`），转到哪儿只随
+/// egui 那一帧的时刻走，于是每一帧都要下一帧。还排着的那一趟停在缺口朝右那一下。
+fn paint_stage_dot(ui: &egui::Ui, 格: egui::Rect, 序号: usize, 样子: RowLook, 转着: bool) {
     let tokens = Tokens::builtin();
     let visuals = ui.visuals();
     let 调色板 = tokens
@@ -1520,18 +1710,33 @@ fn paint_stage_dot(ui: &egui::Ui, 格: egui::Rect, 序号: usize, 样子: RowLoo
             );
             序号字(visuals.weak_text_color());
         }
-    }
-}
-
-/// 下一步那一行、与顶上「下一步」那颗按钮上写的字（设计稿 `stageRows()` 的 `act`，挂单 `Q881` 已裁：照稿）：扫描写
-/// 「开始扫描」，裁决写 [`TO_QUEUE`]，别的几道写「运行」。
-///
-/// **两处同一个字**：顶上已经写着「下一步：某某」，按钮不必再带工序名。
-fn go_label(stage: Stage) -> &'static str {
-    match stage {
-        Stage::Scan => "开始扫描",
-        Stage::Triage => TO_QUEUE,
-        Stage::Identify | Stage::Scrape | Stage::FoldTitles | Stage::Export => "运行",
+        RowLook::OnBoard => {
+            use std::f32::consts::{FRAC_PI_4, TAU};
+            let 描边半径 = 半径 - 描边宽 / 2.0;
+            painter.circle_filled(圆心, 描边半径, visuals.window_fill);
+            // 转了几成圈：egui 这一帧的时刻除以转一圈要多久，取小数。
+            let 转角 = if 转着 {
+                let 一圈 = f64::from(tokens.layout.stage_dot_spin.max(f32::EPSILON));
+                ui.ctx().request_repaint();
+                ((ui.input(|input| input.time) / 一圈).fract() as f32) * TAU
+            } else {
+                0.0
+            };
+            // 缺口是右边那四分之一（从 -45° 到 45°），跟着转角一起转；描的是其余那四分之三。屏幕坐标 y 朝下，角度往大走是顺时针，
+            // 与 CSS `rotate` 同向。分段数只管弧够不够圆，不是设计稿的数。
+            const 段数: usize = 36;
+            let 起 = 转角 + FRAC_PI_4;
+            let 弧: Vec<egui::Pos2> = (0..=段数)
+                .map(|第几段| {
+                    let 角 = 起 + 0.75 * TAU * 第几段 as f32 / 段数 as f32;
+                    圆心 + 描边半径 * egui::vec2(角.cos(), 角.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::line(
+                弧,
+                egui::Stroke::new(描边宽, 调色板.accent),
+            ));
+        }
     }
 }
 

@@ -2775,7 +2775,19 @@ impl 库屏 {
     ///
     /// 两个根照设计稿库屏那张表：主库在位，元数据库那块盘没接上。
     fn 扫过两个根() -> Self {
-        let 工作区 = temp_dir("snapshot-库屏-扫过");
+        Self::两个根("snapshot-库屏-扫过", false)
+    }
+
+    /// 同 [`Self::扫过两个根`]，只是**元数据库上次那一趟部分完成**（票 `gui-draws-the-rest-of-the-design/11`，收挂单 `Q881`）：
+    /// 扫描那一行与顶上「下一步」照稿写「继续扫描」（设计稿 `S.half.scan`）。元数据库那块盘没接上，根那张表那一行照旧写「未连接 ·
+    /// 显示上次扫描结果」，看不见那一趟部分完成那句小字（它只画在在位的根上）。
+    fn 扫描部分完成() -> Self {
+        Self::两个根("snapshot-库屏-扫描部分完成", true)
+    }
+
+    /// [`Self::扫过两个根`] 与 [`Self::扫描部分完成`] 共用：两块盘各扫一趟，`元数据库部分完成` 时把元数据库那一趟记成部分完成。
+    fn 两个根(临时目录名: &str, 元数据库部分完成: bool) -> Self {
+        let 工作区 = temp_dir(临时目录名);
         let mut site = 开库(工作区.path());
         let 甲 = 摆一块盘(
             "snapshot-库屏-甲",
@@ -2812,6 +2824,7 @@ impl 库屏 {
                     &RootScan {
                         at: 扫于,
                         elapsed_ms: 用时,
+                        interrupted: 元数据库部分完成 && 根名 == "元数据库",
                         ..记下的
                     },
                 )
@@ -2847,6 +2860,62 @@ impl 库屏 {
             _工作区: 工作区,
             _盘: vec![甲, 乙],
         }
+    }
+
+    /// 一个根刚加上、**扫描正在台上跑**（票 `gui-draws-the-rest-of-the-design/11`，收挂单 `Q883` `Q1519`）：扫描那一行照稿是转圈的空心
+    /// 圆点、走到哪一步、弱化的「查看任务」；顶上那一块照稿换成「正在扫描 · 预计还需 X」、那句说明与「下载数据源」（拿主意的人
+    /// 2026-10-05 裁）；根那张表那一格「扫描中」底下走了几成。
+    ///
+    /// 扫描**隔着一道闸**读盘（`shared::一道闸`），停在头一个文件上——进度定在遍历那一步，不靠挂钟。连同闸口一起交回：拍完放行。
+    /// 根那一行的路径交成定值（同 [`Self::扫过两个根`]）；状态栏上跟着挂钟走的已用、剩余约钉死（`App::pin_task_clock`）。
+    fn 正在扫描() -> (Self, shared::闸口) {
+        let 工作区 = temp_dir("snapshot-库屏-正在扫描");
+        let site = 开库(工作区.path());
+        let 盘 = 摆一块盘(
+            "snapshot-库屏-正在扫描盘",
+            &[("SFC/幻想传说 汉化版.zip", 4_096)],
+        );
+        let mut app = App::new(site, 工作区.path().to_path_buf());
+        app.show_view(View::Library);
+        let 目录 = romcat_core::path::normalize_existing(盘.path());
+        {
+            let (屏, site, _) = app.roots_site_and_tasks();
+            屏.add_root(site, &目录.to_string_lossy(), "主库");
+        }
+        let (闸, 闸口) = shared::一道闸(1);
+        app.scan_through(std::sync::Arc::new(闸));
+        app.start_stage(romcat_core::stage::Stage::Scan);
+        闸口.等扫描走到闸上();
+        let (屏, _, _) = app.roots_site_and_tasks();
+        let 画的: Vec<RootRow> = 屏
+            .roots()
+            .iter()
+            .map(|row| RootRow {
+                root: LibraryRoot {
+                    path: "/Volumes/新加卷/Game".to_owned(),
+                    ..row.root.clone()
+                },
+                stats: row.stats,
+                mounted: true,
+            })
+            .collect();
+        屏.list_roots(画的);
+        屏.set_clock(库屏的钟());
+        app.set_workspace_label(工作目录().display().to_string());
+        app.pin_task_clock(romcat_gui::task::Clock {
+            elapsed: std::time::Duration::from_secs(192),
+            ended_at: 1_789_308_300,
+            utc_offset: 8 * 3_600,
+            now: 1_789_308_300,
+        });
+        (
+            Self {
+                app,
+                _工作区: 工作区,
+                _盘: vec![盘],
+            },
+            闸口,
+        )
     }
 
     /// 同一份扫过两个根的库，右边那三块都收着（验收第 3 条「可折叠」那一半的样子）。
@@ -3337,6 +3406,47 @@ fn 库屏_三块收起_浅色() {
 fn 库屏_三块收起_暗色() {
     let mut 现场 = 库屏::三块收起();
     拍("library/folded-dark", Theme::Dark, move |ui| {
+        现场.app.ui(ui)
+    });
+}
+
+/// **扫描正在台上跑**那一态（[`库屏::正在扫描`]）。台上有活时主窗口每一帧都要重画（圆点在转），跑不到「不要重画」，于是数帧：
+/// 头两帧装字体与观感（[`搭一个`]），再跑几帧把列宽摆稳——圆点转到哪儿只随帧数走（`Harness` 每帧推进同样的时长），
+/// 每一趟拍到的是同一个角度。拍完放闸，等台上空了再收拾临时目录。
+fn 拍正在扫描(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let (mut 现场, 闸口) = 库屏::正在扫描();
+    let mut harness = 搭一个(主题, |ui| 现场.app.ui(ui));
+    harness.run_steps(6);
+    拍下(harness, 名字);
+    闸口.放行();
+    等任务台空了(&mut 现场.app);
+}
+
+#[test]
+fn 库屏_正在扫描_浅色() {
+    拍正在扫描("library/running-light", Theme::Light);
+}
+
+#[test]
+fn 库屏_正在扫描_暗色() {
+    拍正在扫描("library/running-dark", Theme::Dark);
+}
+
+#[test]
+fn 库屏_扫描部分完成_浅色() {
+    let mut 现场 = 库屏::扫描部分完成();
+    拍("library/scan-halfway-light", Theme::Light, move |ui| {
+        现场.app.ui(ui)
+    });
+}
+
+#[test]
+fn 库屏_扫描部分完成_暗色() {
+    let mut 现场 = 库屏::扫描部分完成();
+    拍("library/scan-halfway-dark", Theme::Dark, move |ui| {
         现场.app.ui(ui)
     });
 }

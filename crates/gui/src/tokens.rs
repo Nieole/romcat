@@ -1034,6 +1034,8 @@ pub struct Layout {
     pub stage_dot: f32,
     /// 工序圆点描边的宽（设计稿 `.stage .dot` 的 `border`）。
     pub stage_dot_stroke: f32,
+    /// 工序那一行在台上跑着时那枚空心圆点转一圈要多久，秒（设计稿 `.stage.run .dot` 的 `animation:spin 1s`）。
+    pub stage_dot_spin: f32,
     /// 行左边那条状态竖条的宽（设计稿 `.stage.next`、`.tbl td.st` 的 `inset 3px`）。
     pub row_stripe: f32,
     /// 面板标题栏那枚折叠标三角的宽（设计稿 `.iconbtn` 里 13px 字号的 `▾`，照稿图量约 7 点）。
