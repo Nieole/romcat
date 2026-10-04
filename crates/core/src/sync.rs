@@ -78,6 +78,7 @@ use crate::capability::{BadName, Barred, Conversion, Decision, Filesystem, Profi
 use crate::catalog::{Catalog, CatalogError, MemberFile};
 use crate::container::Contents;
 use crate::path;
+use crate::platform::Manifest as PlatformManifest;
 use crate::sublibrary::{Selected, Sublibrary, Trim, over_capacity, trim_suggestions};
 
 pub use execute::{Outcome, Placement, Sources};
@@ -1667,15 +1668,20 @@ fn signed(bytes: u64) -> i64 {
 ///
 /// ## 格式转换在这一步定下来，而且**不解压一个字节**
 ///
-/// `profile` 是这个子库的**能力档案**。判的是每个变体的**主文件**——那是「用来交给
+/// `profile` 是这个子库的**能力档案**。判的是**每张碟的主文件**——主文件是「用来交给
 /// 模拟器启动的那一个」（`CONTEXT.md`），能力矩阵描述的正是模拟器启动得了什么。
 /// 判每一个成员的话，一个 PSV 目录树变体底下几千个**内部资源**会各自领一条「吃不下」。
+///
+/// **多碟变体每张碟各判一次**（票 `verdict-store-and-sync/19`，挂单 `Q1650`）：多碟同族合完之后，别的碟的主文件
+/// 在变体里降成了附属文件，只判变体的主文件的话，只有头一张碟照档案转，第二张原样躺在卡上、模拟器读不了，差量预览
+/// 也一个字不报。各张碟是哪几份由成型那一处答（[`shape::discs`](crate::shape::discs)，ADR-0024），
+/// 所以要平台清单（`platform_manifest`）——与扫描、成型同一份。
 ///
 /// 「转出来多大、转出来叫什么」全从中立库里那份零解压读进来的**内部构成**算出来
 /// （ADR-0014、[`Catalog::container_contents`]），于是**差量预览排得出来而外置盘可以
 /// 不在位**——与这一整层「折的时候读库、算的时候不读」是同一条缝。
 ///
-/// 转不了的落进 [`Desired::unsupported`]：**照搬，但点名说出口**。
+/// 转不了的落进 [`Desired::unsupported`]：**照搬，但点名说出口**，一张碟一行。
 ///
 /// # Errors
 /// 读中立库失败时返回错误。
@@ -1683,12 +1689,13 @@ pub fn desired(
     catalog: &Catalog,
     selected: &Selected,
     profile: &Profile,
+    platform_manifest: &PlatformManifest,
 ) -> Result<Desired, CatalogError> {
-    Ok(Footprint::gather(catalog, selected)?.desired(profile))
+    Ok(Footprint::gather(catalog, selected, platform_manifest)?.desired(profile))
 }
 
-/// 一份选择集在主库里的**脚印**：选中了哪些变体、各自属于哪个平台、它们的成员文件，以及主文件里透明容器的
-/// 内部构成。
+/// 一份选择集在主库里的**脚印**：选中了哪些变体、各自属于哪个平台、它们的成员文件、多碟变体的各张碟，以及每张碟的
+/// 主文件里透明容器的内部构成。
 ///
 /// 它是 [`desired`] 拆开的两半（票 `gui-looks-like-the-design/21`）：**读库**那一半是 [`Self::gather`]，全库量级，
 /// 要跑在任务台上；**按一份能力档案折期望状态**那一半是 [`Self::desired`]，纯的——目标设置弹层里换一份档案、改一行
@@ -1699,18 +1706,59 @@ pub struct Footprint {
     platforms: BTreeMap<String, Option<String>>,
     /// 选中变体的成员。
     members: Vec<MemberFile>,
-    /// 主文件里凡是透明容器的，它的内部构成（按主文件的键）。
+    /// 多碟变体（键）→ 各张碟的主文件，按碟序（[`shape::discs`](crate::shape::discs)）。不是多碟的变体不在里头。
+    ///
+    /// **认一次、两处用**：转格式逐碟判（[`Self::desired`]），播放列表逐碟列（[`playlist::lay`]）。两处各认一遍的话，
+    /// 一处转了、一处没列，播放列表就会指着一份卡上没有的文件。
+    discs: BTreeMap<String, Vec<String>>,
+    /// 每张碟的主文件里凡是透明容器的，它的内部构成（按那份主文件的键）。
     contents: BTreeMap<String, Contents>,
 }
 
 impl Footprint {
-    /// **读库那一半**：选中变体的成员，与主文件里透明容器的内部构成。
+    /// 选中变体的成员连平台，加上认出来的各张碟。内部构成还空着，由 [`Self::gather`] 照 [`Self::disc_mains`] 取回来。
+    fn new(
+        platforms: BTreeMap<String, Option<String>>,
+        members: Vec<MemberFile>,
+        platform_manifest: &PlatformManifest,
+    ) -> Self {
+        let mut by_variant: BTreeMap<&str, Vec<(String, crate::shape::Role)>> = BTreeMap::new();
+        for member in members.iter().filter(|member| member.is_file) {
+            by_variant
+                .entry(member.variant_key.as_str())
+                .or_default()
+                .push((member.key.clone(), member.role));
+        }
+        let discs = by_variant
+            .into_iter()
+            .map(|(variant, of)| {
+                (
+                    variant.to_string(),
+                    crate::shape::discs(&of, platform_manifest),
+                )
+            })
+            .filter(|(_, discs)| !discs.is_empty())
+            .collect();
+        Self {
+            platforms,
+            members,
+            discs,
+            contents: BTreeMap::new(),
+        }
+    }
+
+    /// **读库那一半**：选中变体的成员、多碟变体的各张碟，与每张碟的主文件里透明容器的内部构成。
     ///
     /// 内部构成早在扫描那一趟零解压读进中立库了（ADR-0014），这里只是取回来——主库可以不在位。
+    /// 认各张碟要平台清单（`platform_manifest`）：与扫描、成型同一份（[`shape::discs`](crate::shape::discs)）。
     ///
     /// # Errors
     /// 读中立库失败时返回错误。
-    pub fn gather(catalog: &Catalog, selected: &Selected) -> Result<Self, CatalogError> {
+    pub fn gather(
+        catalog: &Catalog,
+        selected: &Selected,
+        platform_manifest: &PlatformManifest,
+    ) -> Result<Self, CatalogError> {
         let picked: BTreeSet<String> = selected
             .picked
             .iter()
@@ -1721,23 +1769,38 @@ impl Footprint {
             .iter()
             .map(|variant| (variant.key.clone(), variant.platform.clone()))
             .collect();
-        let members = catalog.variant_files(&picked)?;
+        let mut out = Self::new(
+            platforms,
+            catalog.variant_files(&picked)?,
+            platform_manifest,
+        );
 
-        // 主文件里凡是**透明容器**的，把内部构成一次取回来。转换要不要得起、转出来多大，
+        // 每张碟的主文件里凡是**透明容器**的，把内部构成一次取回来。转换要不要得起、转出来多大，
         // 全看这一份——而它零解压就在中立库里躺着（调研第 5 部分 L4）。
-        let container_mains: BTreeSet<String> = members
-            .iter()
-            .filter(|member| member.is_main() && member.is_file)
+        let container_mains: BTreeSet<String> = out
+            .disc_mains()
             .filter(|member| {
                 crate::container::ContainerKind::for_path(Path::new(&member.key)).is_some()
             })
             .map(|member| member.key.clone())
             .collect();
-        let contents = catalog.container_contents(&container_mains)?;
-        Ok(Self {
-            platforms,
-            members,
-            contents,
+        out.contents = catalog.container_contents(&container_mains)?;
+        Ok(out)
+    }
+
+    /// **每张碟的主文件**：能力档案判的就是这几份（[`desired`] 的文档）。
+    ///
+    /// 单碟变体就是它的主文件；多碟变体是各张碟的主文件（[`Self::discs`]）——合完之后在变体里身份是附属文件的那几份
+    /// 也在里头，所以它不是 [`MemberFile::is_main`]（那一问只认变体自己那一份主文件）。
+    /// 只有文件：目录树变体的那个目录不是要搬的东西。
+    fn disc_mains(&self) -> impl Iterator<Item = &MemberFile> {
+        self.members.iter().filter(|member| {
+            member.is_file
+                && (member.is_main()
+                    || self
+                        .discs
+                        .get(&member.variant_key)
+                        .is_some_and(|discs| discs.contains(&member.key)))
         })
     }
 
@@ -1757,13 +1820,10 @@ impl Footprint {
     /// **按一份能力档案折期望状态**那一半：纯的，一个字节的库都不读。处置见 [`desired`] 的文档。
     #[must_use]
     pub fn desired(&self, profile: &Profile) -> Desired {
-        // 一个变体的主文件判出来的处置，全变体共用一份结论。
+        // **每张碟的主文件各判一次**（[`Self::disc_mains`]），按那份主文件的键记下结论。
         let mut verdicts: BTreeMap<&str, Decision> = BTreeMap::new();
         let mut out = Desired::default();
-        for member in &self.members {
-            if !member.is_main() || !member.is_file {
-                continue;
-            }
+        for member in self.disc_mains() {
             let platform = self
                 .platforms
                 .get(&member.variant_key)
@@ -1786,7 +1846,7 @@ impl Footprint {
                     why: why.clone(),
                 });
             }
-            verdicts.insert(member.variant_key.as_str(), decision);
+            verdicts.insert(member.key.as_str(), decision);
         }
 
         let mut has_file: BTreeSet<&str> = BTreeSet::new();
@@ -1796,12 +1856,10 @@ impl Footprint {
                 continue;
             }
             has_file.insert(member.variant_key.as_str());
-            // **只有主文件会被转**。附属文件与内部资源原样搬：它们不是交给模拟器启动的
-            // 那一份，转它们既没有依据也没有落点。
-            let conversion = match verdicts.get(member.variant_key.as_str()) {
-                Some(Decision::Convert(conversion)) if member.is_main() => {
-                    Some((**conversion).clone())
-                }
+            // **只有每张碟的主文件会被转**。别的附属文件（`.cue` 旁边的 `.bin`）与内部资源原样搬：它们不是交给
+            // 模拟器启动的那一份，转它们既没有依据也没有落点。
+            let conversion = match verdicts.get(member.key.as_str()) {
+                Some(Decision::Convert(conversion)) => Some((**conversion).clone()),
                 _ => None,
             };
             // **落点剥掉根名。** 子库里的布局照搬变体的键（挂账 D79），而键的第一段是
