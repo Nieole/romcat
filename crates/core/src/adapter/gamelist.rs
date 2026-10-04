@@ -438,10 +438,13 @@ impl Adapter for Gamelist {
     }
 
     /// **用得上。** ES 家族一个 `<game>` 只装得下一个文件，多碟游戏本来就靠 `.m3u` 这类容器文件绕过
-    /// （`docs/research/metadata-formats.md` §C.2 ②）；ES-DE 自己走一遍平台目录认游戏，多碟那几个系统的
-    /// 扩展名表里本来就有 `.m3u`（官方示例 `c64/Multidisk/Last Ninja 2/Last Ninja 2.m3u`），放在碟旁边它就列得出来
-    /// ——眼下列成单独一条、没有元数据，前端条目照旧启动头一张碟；开着「只显示 gamelist 里的游戏」时连这一条也看不见
-    /// （挂单 `Q1647`）。
+    /// （`docs/research/metadata-formats.md` §C.2 ②）；ES-DE 多碟那几个系统的扩展名表里本来就有 `.m3u`（官方示例
+    /// `c64/Multidisk/Last Ninja 2/Last Ninja 2.m3u`，用户指南「Multiple game files installation」：「It's then this
+    /// .m3u file that should be selected for launching the game」）。
+    ///
+    /// 同步到卡上时条目的 `<path>` 指它、封面照它的名字铺、几张碟各写一条藏起来的条目（票 `verdict-store-and-sync/18`，
+    /// [`Game::hidden_files`]）。碟不挪地方；用户指南里另一条路「Directories interpreted as files」（碟挪进一个叫
+    /// `游戏.m3u` 的目录）默认设置下就只剩一条，可它改卡上的目录形状——没走，留作换路的依据（挂单 `Q1827`）。
     fn uses_playlists(&self) -> bool {
         true
     }
@@ -1555,6 +1558,10 @@ fn render(doc: &Document, baseline: Option<(&Document, &Snapshot)>) -> Vec<u8> {
             }
             write_block(&mut out, game, index, prefix, &indent);
         }
+        // 带底本的那一趟是导出，而导出不生成播放列表（ADR-0004）——这里眼下一条都没有，照写是为了两条路说同一句话。
+        for file in &game.hidden_files {
+            write_hidden_block(&mut out, file, prefix, &indent);
+        }
     }
     while cursor < snapshot.nodes.len() {
         snapshot.nodes[cursor].render(&mut out);
@@ -1592,9 +1599,33 @@ fn render_fresh(doc: &Document, prefix: Option<&str>) -> Vec<u8> {
         for (index, _) in paths_of(game, prefix).iter().enumerate() {
             write_block(&mut out, game, index, prefix, INDENT);
         }
+        for file in &game.hidden_files {
+            write_hidden_block(&mut out, file, prefix, INDENT);
+        }
     }
     out.push_str("</gameList>\n");
     out.into_bytes()
+}
+
+/// 一条**藏起来的**条目：条目指着多碟变体的播放列表时，播放列表里列的那几张碟各一条（[`Game::hidden_files`]，
+/// 票 `verdict-store-and-sync/18`）。
+///
+/// ES-DE 自己走平台目录认游戏，gamelist 只是给它们补元数据——不写这一条，每张碟会各成一条没有元数据的条目。官方用户
+/// 指南「Show hidden games」那一节说的正是这个用法（只显示 `.m3u`、不显示一张张碟）。**ES-DE 的「Show hidden games」
+/// 默认开着**（源码 `Settings.cpp` 的 `ShowHiddenGames`），藏起来的条目默认只是变淡，要用户在 ES-DE 里关一次
+/// （挂单 `Q1827`）。
+///
+/// 只写 `<path>` 与 `<hidden>`：名字缺省时 ES-DE 拿文件名补（`GamelistFileParser.cpp`「Make sure a name gets set if
+/// one doesn't exist」），元数据都在指播放列表的那一条上。
+fn write_hidden_block(out: &mut String, file: &str, prefix: Option<&str>, indent: &str) {
+    let _ = writeln!(out, "{indent}<game>");
+    let _ = writeln!(
+        out,
+        "{indent}{INDENT}<path>{}</path>",
+        escape(&format!("./{}", relativize(file, prefix)))
+    );
+    let _ = writeln!(out, "{indent}{INDENT}<hidden>true</hidden>");
+    let _ = writeln!(out, "{indent}</game>");
 }
 
 /// 从头写一段。
@@ -1979,6 +2010,49 @@ mod tests {
         assert!(!text.contains("FC/"), "平台那一段不该出现：{text}");
         // 合集段自己不写出去——平台是由文件摆在哪个目录下说的。
         assert!(!text.contains("collection"), "{text}");
+    }
+
+    #[test]
+    fn 条目指着播放列表时_几张碟各写一条藏起来的条目() {
+        // 票 `verdict-store-and-sync/18`：ES-DE 自己走平台目录认游戏，不写这几条，每张碟会各成一条没有元数据的条目。
+        // 藏起来的那几条只有路径与 `<hidden>`——名字缺省时 ES-DE 拿文件名补，元数据都在指播放列表的那一条上。
+        let doc = Document {
+            entries: vec![
+                Entry::new(Body::Collection(Collection {
+                    name: "PS1".to_string(),
+                    directory: Some("ps".to_string()),
+                    ..Collection::default()
+                })),
+                Entry::new(Body::Game(Game {
+                    title: "某游戏".to_string(),
+                    files: vec!["ps/某游戏/游戏.m3u".to_string()],
+                    hidden_files: vec![
+                        "ps/某游戏/游戏 (Disc 1).cue".to_string(),
+                        "ps/某游戏/游戏 (Disc 2).cue".to_string(),
+                    ],
+                    ..Game::default()
+                })),
+            ],
+        };
+        let text = String::from_utf8(Gamelist.write(&doc, None).expect("写得出")).expect("UTF-8");
+        assert_eq!(
+            text,
+            "<?xml version=\"1.0\"?>\n\
+             <gameList>\n\
+             \x20   <game>\n\
+             \x20       <path>./某游戏/游戏.m3u</path>\n\
+             \x20       <name>某游戏</name>\n\
+             \x20   </game>\n\
+             \x20   <game>\n\
+             \x20       <path>./某游戏/游戏 (Disc 1).cue</path>\n\
+             \x20       <hidden>true</hidden>\n\
+             \x20   </game>\n\
+             \x20   <game>\n\
+             \x20       <path>./某游戏/游戏 (Disc 2).cue</path>\n\
+             \x20       <hidden>true</hidden>\n\
+             \x20   </game>\n\
+             </gameList>\n"
+        );
     }
 
     #[test]

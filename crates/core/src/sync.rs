@@ -1925,6 +1925,21 @@ impl Footprint {
 }
 
 impl Desired {
+    /// 把又折出来的几份并进期望状态，照同一份文件系统声明再筛一遍（[`Self::screen`]）。
+    ///
+    /// 同步那条线分几截折期望状态（ROM → 多碟变体的播放列表 → 媒体与前端元数据，[`prepare_selected`]），每进来一截
+    /// 都要再筛：它们自己也可能撞车、名字太长。已经筛过的那些再筛一遍结论不变——筛过的彼此不撞，单份的判据只看它自己。
+    pub fn add_and_screen(
+        &mut self,
+        files: impl IntoIterator<Item = DesiredFile>,
+        filesystem: &Filesystem,
+        prefix_chars: usize,
+    ) {
+        self.files.extend(files);
+        self.files.sort_by(|a, b| a.path.cmp(&b.path));
+        self.screen(filesystem, prefix_chars);
+    }
+
     /// 把**目标存储放不下**的那些从期望状态里挑出来，落进 [`Self::rejected`]。
     ///
     /// ADR-0017 补充段：**FAT32 有 4 GiB 单文件上限**，PS2 / PSP 的大 ISO 直接放不进去

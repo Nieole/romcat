@@ -178,21 +178,9 @@ impl 现场 {
         let priorities = Priorities::builtin();
         let footprint = sync::Footprint::gather(&self.catalog, &selected).expect("读得出脚印");
         let mut desired = footprint.desired(profile);
-        let media = sync::media::lay(&self.catalog, adapter.as_ref(), &self.pool, &selected)
-            .expect("铺得出媒体");
-        let frontend = sync::frontend::lay(
-            &self.catalog,
-            adapter.as_ref(),
-            &priorities,
-            &selected,
-            &media.assets,
-        )
-        .expect("折得出元数据");
-        desired.files.extend(media.files.iter().cloned());
-        desired.files.extend(frontend.files.iter().cloned());
-        desired.files.sort_by(|a, b| a.path.cmp(&b.path));
+        // 与 `sync::prepare` 同一个次序：先筛 ROM，多碟变体的播放列表排在筛过之后、再筛一遍；筛完还在的那几份
+        // 交给媒体与前端元数据（条目改指它、封面照它的名字铺），最后几样一起再筛一遍。
         desired.screen(&profile.filesystem, 0);
-        // 多碟变体的播放列表排在筛过之后、再筛一遍（同 `sync::prepare`）。Pegasus 用不上播放列表，这一步交空表。
         let playlists = sync::playlist::lay(
             &footprint,
             &desired,
@@ -200,11 +188,32 @@ impl 现场 {
             profile,
             &romcat_core::platform::Manifest::builtin(),
         );
-        desired.files.extend(playlists.files);
-        desired.files.sort_by(|a, b| a.path.cmp(&b.path));
-        desired.screen(&profile.filesystem, 0);
-        let mut generated = frontend.bytes;
-        generated.extend(playlists.bytes);
+        desired.add_and_screen(playlists.files.iter().cloned(), &profile.filesystem, 0);
+        let launch = playlists.launching(&desired);
+        let media = sync::media::lay(
+            &self.catalog,
+            adapter.as_ref(),
+            &self.pool,
+            &selected,
+            &launch,
+        )
+        .expect("铺得出媒体");
+        let frontend = sync::frontend::lay(
+            &self.catalog,
+            adapter.as_ref(),
+            &priorities,
+            &selected,
+            &media.assets,
+            &launch,
+        )
+        .expect("折得出元数据");
+        desired.add_and_screen(
+            media.files.iter().chain(&frontend.files).cloned(),
+            &profile.filesystem,
+            0,
+        );
+        let mut generated = playlists.bytes;
+        generated.extend(frontend.bytes);
 
         let mut 子库 = Sublibrary::at("掌机", self.卡.path(), "Pegasus", None);
         子库.capability = Some(profile.name.clone());
@@ -703,8 +712,14 @@ fn 导出铺媒体铺到一半按停_铺过的留在盘上_说得出铺了几份
     }
     let selected = 选中(&现场.catalog, "平台=FC");
     let adapter = adapter::find("Pegasus").expect("带着 Pegasus 适配器");
-    let laid = sync::media::lay(&现场.catalog, adapter.as_ref(), &现场.pool, &selected)
-        .expect("铺得出媒体");
+    let laid = sync::media::lay(
+        &现场.catalog,
+        adapter.as_ref(),
+        &现场.pool,
+        &selected,
+        &BTreeMap::new(),
+    )
+    .expect("铺得出媒体");
     assert_eq!(laid.from_pool.len(), 3, "{:?}", laid.from_pool);
     let 第二份 = laid.from_pool.keys().nth(1).expect("有第二份").clone();
 
@@ -1702,6 +1717,193 @@ fn 那套多碟游戏移出子库_播放列表跟着清单一起删掉() {
     assert!(现场.卡.path().join("FC/魂斗罗.zip").is_file());
 }
 
+// ───────────────────────── 多碟那一条前端条目改指播放列表（票 `verdict-store-and-sync/18`）
+//
+// 票 11 让卡上多了一份 `.m3u`，这几条钉的是**前端条目拿它启动**——前端里换碟不用手动（用户故事 27）：
+// ES-DE 的 `<path>` 指它、封面照它的名字铺、各张碟各写一条藏起来的条目；Pegasus 的 `files:` 指它。
+
+/// 两碟那套游戏那个变体的键：主文件是碟 1。
+const 两碟变体: &str = "库/ps/某游戏/游戏 (Disc 1).cue";
+
+/// 卡上一份前端元数据里的条目，照那个格式的适配器自己读回来。
+fn 卡上的条目(卡: &Path, 格式: &str, 元数据: &str) -> Vec<romcat_core::adapter::Game> {
+    let bytes = fs::read(卡.join(元数据)).unwrap_or_else(|_| panic!("卡上该有 {元数据}"));
+    adapter::find(格式)
+        .unwrap_or_else(|| panic!("带着 {格式} 适配器"))
+        .read(&bytes)
+        .expect("读得动")
+        .doc
+        .entries
+        .iter()
+        .filter_map(|entry| entry.game().cloned())
+        .collect()
+}
+
+/// 这一条在 ES-DE 里是不是藏起来的（`<hidden>true</hidden>`）。
+fn 藏着(game: &romcat_core::adapter::Game) -> bool {
+    game.unknown
+        .get("hidden")
+        .is_some_and(|values| values.iter().any(|value| value.trim() == "true"))
+}
+
+#[test]
+fn 两碟的变体同步到_es_de_的卡上_条目指播放列表_封面照播放列表的名字铺_各张碟藏起来() {
+    let mut 现场 = 现场::摆在(建个多碟的库());
+    现场.收一份媒体(两碟变体, MediaKind::Cover, b"cover-of-the-two-disc-game");
+    现场.建子库("ES-Gamelist", "平台=PS1");
+    现场.照真线同步一趟();
+
+    let 条目 = 卡上的条目(现场.卡.path(), "ES-Gamelist", "gamelists/ps/gamelist.xml");
+    // **条目指播放列表**：`<path>` 相对平台目录，带着元数据、不藏——前端里点它启动，模拟器才换得了碟。
+    let 指播放列表: Vec<_> = 条目
+        .iter()
+        .filter(|game| game.files == ["某游戏/游戏.m3u"])
+        .collect();
+    assert_eq!(指播放列表.len(), 1, "该有一条指播放列表：{条目:#?}");
+    assert!(!藏着(指播放列表[0]), "{:#?}", 指播放列表[0]);
+    assert!(!指播放列表[0].title.is_empty(), "{:#?}", 指播放列表[0]);
+    // **各张碟各一条、都藏起来**：ES-DE 自己走目录认游戏，不写的话两张碟会各成一条没有元数据的条目。
+    for 碟 in ["某游戏/游戏 (Disc 1).cue", "某游戏/游戏 (Disc 2).cue"] {
+        let 这张: Vec<_> = 条目.iter().filter(|game| game.files == [碟]).collect();
+        assert_eq!(这张.len(), 1, "{碟} 该有一条：{条目:#?}");
+        assert!(藏着(这张[0]), "{碟} 该藏起来：{:#?}", 这张[0]);
+    }
+    assert_eq!(条目.len(), 3, "一条指播放列表、两张碟各一条：{条目:#?}");
+
+    // **封面照播放列表的名字铺**：ES-DE 照 `<path>` 那份文件的名字找媒体（`游戏.m3u` → `游戏.png`）。
+    assert!(
+        现场
+            .卡
+            .path()
+            .join("downloaded_media/ps/covers/某游戏/游戏.png")
+            .is_file(),
+        "封面该照播放列表的名字铺：{:?}",
+        盘上有什么(现场.卡.path()).keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !现场
+            .卡
+            .path()
+            .join("downloaded_media/ps/covers/某游戏/游戏 (Disc 1).png")
+            .exists(),
+        "照头一张碟的名字铺的那一份 ES-DE 找不着它的主人"
+    );
+}
+
+#[test]
+fn 两碟的变体同步到_pegasus_的卡上_条目的_files_指播放列表_碟本身不列() {
+    // Pegasus 只列元数据里写着的条目，`files:` 指什么就拿什么交给启动命令（`{file.path}`）；只有一个文件时不弹挑选框。
+    let mut 现场 = 现场::摆在(建个多碟的库());
+    现场.建子库("Pegasus", "平台=PS1");
+    现场.照真线同步一趟();
+
+    assert_eq!(
+        fs::read_to_string(现场.卡.path().join(播放列表))
+            .unwrap_or_else(|_| panic!("Pegasus 的卡上也该有 {播放列表}")),
+        "游戏 (Disc 1).cue\n游戏 (Disc 2).cue\n",
+    );
+    let 条目 = 卡上的条目(现场.卡.path(), "Pegasus", "ps.metadata.pegasus.txt");
+    assert_eq!(条目.len(), 1, "{条目:#?}");
+    assert_eq!(
+        条目[0].files,
+        [播放列表],
+        "条目启动播放列表，两张碟本身不列进 `files:`：{条目:#?}"
+    );
+}
+
+#[test]
+fn 单碟变体的条目一个字不变_两家都是() {
+    // 同一份主库里那个单碟的 FC 游戏：条目照旧指它的主文件，没有藏起来的条目、没有播放列表——一个字都不因为
+    // 隔壁那套多碟游戏改指播放列表而变（字面量就是票 18 之前两家写出来的样子）。
+    for (格式, 元数据, 原样) in [
+        (
+            "ES-Gamelist",
+            "gamelists/FC/gamelist.xml",
+            "<?xml version=\"1.0\"?>\n\
+             <gameList>\n\
+             \x20   <game>\n\
+             \x20       <path>./魂斗罗.zip</path>\n\
+             \x20       <name>魂斗罗.zip</name>\n\
+             \x20       <x-romcat-variant>库/FC/魂斗罗.zip</x-romcat-variant>\n\
+             \x20   </game>\n\
+             </gameList>\n",
+        ),
+        (
+            "Pegasus",
+            "FC.metadata.pegasus.txt",
+            "collection: FC\n\
+             \n\
+             game: 魂斗罗.zip\n\
+             files: FC/魂斗罗.zip\n\
+             x-romcat-variant: 库/FC/魂斗罗.zip\n",
+        ),
+    ] {
+        let mut 现场 = 现场::摆在(建个多碟的库());
+        现场.建子库(格式, "平台=FC 或 平台=PS1");
+        现场.照真线同步一趟();
+        assert_eq!(
+            fs::read_to_string(现场.卡.path().join(元数据))
+                .unwrap_or_else(|_| panic!("卡上该有 {元数据}")),
+            原样,
+            "{格式}"
+        );
+    }
+}
+
+#[test]
+fn 多碟那套移出子库_条目_播放列表_媒体一起清干净() {
+    // 条目改指播放列表、封面照播放列表的名字铺之后，移出子库那一趟照样全归清单管：元数据里那一条没了（PS1 一个条目
+    // 都不剩，那份元数据文件整个删掉）、播放列表与封面跟着删、碟也走了。
+    for (格式, 元数据) in [
+        ("ES-Gamelist", "gamelists/ps/gamelist.xml"),
+        ("Pegasus", "ps.metadata.pegasus.txt"),
+    ] {
+        let mut 现场 = 现场::摆在(建个多碟的库());
+        let hash = 现场.收一份媒体(两碟变体, MediaKind::Cover, b"cover-of-the-two-disc-game");
+        let 封面 = match 格式 {
+            "ES-Gamelist" => "downloaded_media/ps/covers/某游戏/游戏.png".to_string(),
+            _ => format!("media/{}/{hash}.png", &hash[..2]),
+        };
+        let 规则号 = 现场.建子库(格式, "平台=PS1");
+        现场.照真线同步一趟();
+        for 该有 in [元数据, 播放列表, 封面.as_str()] {
+            assert!(
+                现场.卡.path().join(该有).is_file(),
+                "{格式}：头一趟该把 {该有} 放上去：{:?}",
+                盘上有什么(现场.卡.path()).keys().collect::<Vec<_>>()
+            );
+        }
+
+        assert!(
+            现场
+                .catalog
+                .remove_rule("掌机", 规则号)
+                .expect("删得掉规则")
+        );
+        现场
+            .catalog
+            .add_rule("掌机", &Rule::parse("平台=FC").expect("规则读得懂"), None)
+            .expect("规则写得进");
+        let outcome = 现场.照真线同步一趟();
+        for 该走 in [
+            元数据,
+            播放列表,
+            封面.as_str(),
+            "ps/某游戏/游戏 (Disc 1).cue",
+            "ps/某游戏/游戏 (Disc 2).cue",
+        ] {
+            assert!(
+                !现场.卡.path().join(该走).exists(),
+                "{格式}：移出子库之后 {该走} 该删掉"
+            );
+            assert!(
+                !outcome.manifest.files.iter().any(|file| file.path == 该走),
+                "{格式}：{该走} 不该还留在清单里"
+            );
+        }
+    }
+}
+
 /// 卡上所有 `.m3u` 的相对路径。
 fn 卡上的播放列表(卡: &Path) -> Vec<String> {
     盘上有什么(卡)
@@ -1712,38 +1914,29 @@ fn 卡上的播放列表(卡: &Path) -> Vec<String> {
 }
 
 #[test]
-fn 用不上播放列表的前端_同一套多碟游戏一份都不生成() {
-    // 同一份主库、同一条规则，只换前端格式：ES-DE 走目录认游戏，碟旁边那份 `.m3u` 它列得出来；
-    // Pegasus 只列元数据里写着的条目，卡上多一份没人指着的 `.m3u` 只是白占清单里的一行。
-    let mut 用得上 = 现场::摆在(建个多碟的库());
-    用得上.建子库("ES-Gamelist", "平台=PS1");
-    用得上.照真线同步一趟();
-    assert_eq!(卡上的播放列表(用得上.卡.path()), [播放列表]);
-
-    let mut 用不上 = 现场::摆在(建个多碟的库());
-    用不上.建子库("Pegasus", "平台=PS1");
-    let outcome = 用不上.照真线同步一趟();
-    assert!(
-        卡上的播放列表(用不上.卡.path()).is_empty(),
-        "Pegasus 的卡上一份播放列表都不该有"
-    );
-    assert!(
-        outcome
-            .manifest
-            .files
-            .iter()
-            .all(|file| file.kind.label() != "播放列表"),
-        "{:?}",
-        outcome.manifest.files
-    );
-    // 两张碟照旧都搬上去了——不生成的只是播放列表。
-    assert!(
-        用不上
-            .卡
-            .path()
-            .join("ps/某游戏/游戏 (Disc 2).cue")
-            .is_file()
-    );
+fn 两家前端都用得上播放列表_同一套多碟游戏两张卡上各一份_都进了清单() {
+    // 票 11 那时 Pegasus 答用不上（条目照旧指头一张碟，没人指着的 `.m3u` 它见不着）；票 18 让条目改指播放列表之后，
+    // 两家都用得上：同一份主库、同一条规则，ES-DE 的卡上与 Pegasus 的卡上各一份，清单照管。
+    for 格式 in ["ES-Gamelist", "Pegasus"] {
+        let mut 现场 = 现场::摆在(建个多碟的库());
+        现场.建子库(格式, "平台=PS1");
+        let outcome = 现场.照真线同步一趟();
+        assert_eq!(卡上的播放列表(现场.卡.path()), [播放列表], "{格式}");
+        assert!(
+            outcome
+                .manifest
+                .files
+                .iter()
+                .any(|file| file.path == 播放列表 && file.kind.label() == "播放列表"),
+            "{格式}：{:?}",
+            outcome.manifest.files
+        );
+        // 两张碟照旧都搬上去了。
+        assert!(
+            现场.卡.path().join("ps/某游戏/游戏 (Disc 2).cue").is_file(),
+            "{格式}"
+        );
+    }
 }
 
 #[test]
@@ -1790,6 +1983,28 @@ fn 导出到主库那一侧不生成播放列表_主库里只多出元数据文�
                 .iter()
                 .all(|path| path.ends_with(adapter.file_name())),
             "{} 导出到主库只该多出元数据文件：{多出来的:?}",
+            adapter.name()
+        );
+        // **条目也不改**（票 `verdict-store-and-sync/18`）：主库里没有播放列表，那套多碟游戏的条目照旧指碟 1，
+        // 也没有藏起来的条目——同步那一侧改指播放列表的事一个字都没漏到导出这边来。
+        let (元数据, 碟1) = match adapter.name() {
+            "ES-Gamelist" => ("gamelists/ps/gamelist.xml", "某游戏/游戏 (Disc 1).cue"),
+            _ => ("ps.metadata.pegasus.txt", "ps/某游戏/游戏 (Disc 1).cue"),
+        };
+        let 条目 = 卡上的条目(&现场.库根, adapter.name(), 元数据);
+        let 那一条: Vec<_> = 条目
+            .iter()
+            .filter(|game| {
+                game.extra
+                    .get("romcat-variant")
+                    .is_some_and(|keys| keys.iter().any(|key| key == 两碟变体))
+            })
+            .collect();
+        assert_eq!(那一条.len(), 1, "{}：{条目:#?}", adapter.name());
+        assert_eq!(那一条[0].files, [碟1], "{}", adapter.name());
+        assert!(
+            !条目.iter().any(藏着),
+            "{} 导出到主库不该写藏起来的条目：{条目:#?}",
             adapter.name()
         );
     }
@@ -1895,36 +2110,26 @@ fn 两套多碟游戏的播放列表撞在同一条路径上_一个都不放行_
 }
 
 #[test]
-fn 用不上播放列表的前端连平台清单都不读_那份清单写坏了也排得出计划() {
-    // 认各张碟要平台清单（与扫描、成型同一条查法），可 Pegasus 的子库一份播放列表都不生成，
-    // 不该因为一份它用不上的清单读不动而排不出计划。
-    let mut 现场 = 现场::摆在(建个多碟的库());
-    现场.建子库("Pegasus", "平台=PS1");
-    写(
-        &现场.工作区.path().join("platforms.toml"),
-        b"[[[ \xe5\x86\x99\xe5\x9d\x8f\xe4\xba\x86",
-    );
-    let 排 = |现场: &现场| {
-        sync::prepare(
+fn 两家前端都要读平台清单_那份清单写坏了照实说读不动() {
+    // 认各张碟要平台清单（与扫描、成型同一条查法）。票 11 那时 Pegasus 用不上播放列表、连清单都不读；票 18 之后两家
+    // 都用得上，清单读不动时两家都照实说，而不是悄悄少生成几份播放列表（代码里「用不上的前端不读」那道闸还留着，
+    // 给答「用不上」的适配器——`Adapter::uses_playlists` 的默认）。
+    for 格式 in ["ES-Gamelist", "Pegasus"] {
+        let mut 现场 = 现场::摆在(建个多碟的库());
+        现场.建子库(格式, "平台=PS1");
+        写(
+            &现场.工作区.path().join("platforms.toml"),
+            b"[[[ \xe5\x86\x99\xe5\x9d\x8f\xe4\xba\x86",
+        );
+        let Err(sync::PlanCutoff::Unplanned(why)) = sync::prepare(
             &现场.catalog,
             现场.工作区.path(),
             "掌机",
             &sync::Request::default(),
             &Handle::new(),
-        )
-    };
-    assert!(排(&现场).is_ok(), "Pegasus 不读平台清单");
-
-    // 用得上播放列表的前端照实说读不动。
-    let mut 子库 = 现场
-        .catalog
-        .sublibrary("掌机")
-        .expect("读得出子库")
-        .expect("子库在");
-    子库.format = "ES-Gamelist".to_string();
-    现场.catalog.put_sublibrary(&子库).expect("子库写得进");
-    let Err(sync::PlanCutoff::Unplanned(why)) = 排(&现场) else {
-        panic!("ES-DE 那一侧要读平台清单，读不动该排不出");
-    };
-    assert!(why.to_string().contains("平台清单读不动"), "{why}");
+        ) else {
+            panic!("{格式} 要读平台清单，读不动该排不出");
+        };
+        assert!(why.to_string().contains("平台清单读不动"), "{格式}：{why}");
+    }
 }
