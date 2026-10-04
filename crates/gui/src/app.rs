@@ -965,33 +965,25 @@ impl App {
     /// 摆在窗口这一层而不在某一屏里，理由与 [`Self::start_stage`] 同一条：**只有这儿够得着
     /// 「看的是哪一屏」**（ADR-0005：屏与屏之间不该互相拿着对方）。浏览屏那几下
     /// （`↑` `↓` / `Enter` / `空格` / `⌘ A` / `F` / `E`）因此也接在这儿，不在那一屏里另开一个
-    /// 键盘入口——**一件事一个判据**（ADR-0024）：「这一下算不算快捷键」的那三道门只有一份。
+    /// 键盘入口。
     ///
     /// ## 三道门
     ///
-    /// 前两道抄的是逐条那一处（`queue::Screen::keyboard`）：
-    ///
-    /// 1. **有一层弹层开着不接**（[`crate::dialog::screen_has_keys`]）——egui 的 `Modal`
-    ///    拦得住指针、拦不住键盘。
-    /// 2. **光标在文本框里不接**——那一栏里正打着中文，`F` 是用户要的字母不是命令。
-    /// 3. **有一层浮层摊着不接**（[`egui::Popup::is_any_open`]）——右键菜单、下拉都算。
-    ///    菜单摊着时 `Esc` 该收的是菜单，那一下归 egui 那一层收（`browse::menu`）；这里再接
-    ///    一遍，就成了一下退两层。
+    /// 有弹层、有浮层、键盘焦点在某个控件上（光标在输入框里，或者 Tab 走到了一颗按钮、一行、一张卡）
+    /// 就一个键都不接——**一件事一个判据**（ADR-0024）：三处键盘入口问的是同一个函数
+    /// （[`crate::keys::allowed`]，挂单 `Q1143`），这里给 `None`：窗口这一层不是控件，焦点在谁手上都不接。
     ///
     /// ## `Esc` 一层一层退
     ///
     /// 这里**一个 `Esc` 都不接**。那一下收的是**浮起来的那两层**，各自收各自的：
     /// 右键菜单由 `egui::Popup` 自己收（`browse::menu`），弹层由 [`crate::dialog`] 那一处
-    /// `consume_key` 收。**一下只退一层**，因为上面那两层开着时这一处压根不跑（门 1 与门 3），
+    /// `consume_key` 收。**一下只退一层**，因为上面那两层开着时这一处压根不跑（[`crate::keys::allowed`] 的门 1 与门 2），
     /// 而两层叠着时 `dialog` 自己只退最上面那一层。
     ///
     /// 屏与屏之间**不归 `Esc` 管**：作品详情页回三栏走的是它顶上那颗「← 返回浏览」，
     /// 屏上那张表里 `Esc` 那一条写的也是「关闭对话框或菜单」（[`crate::keys`]）。
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if !crate::dialog::screen_has_keys(ctx)
-            || egui::Popup::is_any_open(ctx)
-            || ctx.egui_wants_keyboard_input()
-        {
+        if !crate::keys::allowed(ctx, None) {
             return;
         }
         self.switch_view_keys(ctx);
@@ -1049,14 +1041,10 @@ impl App {
     /// **只在浏览屏、而且作品详情页没开着时才接**（设计稿 `S.screen!=='browse'||S.wd`）：
     /// 详情页盖住整块屏，那时 `F` 与 `E` 说的是另一件事。
     ///
-    /// **摆着卡片墙时，跟高亮走的那六下一下都不接**（挂单 `Q1142`）：高亮是表格背后那扇窗的
-    /// **行序号**，而卡片墙背后是另一扇窗——在卡上按空格会勾中人看不见的另一行，比什么都不
-    /// 发生坏得多。卡片墙自己那条路照旧走得通：Tab 走到一张卡，`Enter` / `空格` 由那张卡
-    /// 自己接（`browse::Screen::card_grid`）。设计稿拿
+    /// **表格与卡片墙一样接**（挂单 `Q1142`）：高亮存的是作品身份，两种视图共用一个（设计稿 `S.sel`）；
+    /// `↑` `↓` 照眼下摆着的那一种视图的次序挪。一张卡拿着键盘焦点时这里整个不跑（[`Self::shortcuts`]
+    /// 那三道门），`Enter` / `空格` 由那张卡自己接（`browse::Screen::card_grid`）——设计稿拿
     /// `if(e.target.closest('.gcard'))return` 挡的是同一件事。
-    ///
-    /// **`⌘/Ctrl+A` 不在这道门里头**：全选的是**当前这个筛选**（ADR-0016），与光标落在哪一行
-    /// 无关，两种视图上说的是同一件事。
     fn browse_keys(&mut self, ctx: &egui::Context) {
         if self.view != View::Browse || self.browse.page().is_some() {
             return;
@@ -1064,9 +1052,6 @@ impl App {
         let 全选 = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::A);
         if ctx.input_mut(|input| input.consume_shortcut(&全选)) {
             self.browse.select_all();
-        }
-        if self.browse.showing_cards() {
-            return;
         }
         let (往上, 往下, 打开, 勾选, 收藏, 编辑) = (
             单键按下(ctx, egui::Key::ArrowUp),

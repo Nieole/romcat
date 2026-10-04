@@ -256,13 +256,18 @@ impl Screen {
         self.fixer.close();
     }
 
-    /// 换到表上的**下一个**（`forward`）或**上一个**作品：照表眼下的次序，首尾相接（设计稿 `stepWD`）。
+    /// 换到**下一个**（`forward`）或**上一个**作品：照底下那一种视图（表格或卡片墙）眼下的次序，首尾相接
+    /// （设计稿 `stepWD`）。
     ///
-    /// 走的是表格点开一行那一条路：高亮挪到那一行、侧边详情跟着换过去——详情页摆的就是那一份。
-    /// 表上一行都没点中过（或者表是空的）时什么都不做。
+    /// 走的是点开一行那一条路：高亮挪到那一部、侧边详情跟着换过去——详情页摆的就是那一份。
+    /// 一部都没高亮过（或者高亮那一部不在底下那一种视图里、视图是空的）时什么都不做。
     pub fn step_page(&mut self, catalog: &Catalog, forward: bool) {
-        let total = self.window.total();
-        let Some(at) = self.focused.filter(|_| total > 0) else {
+        let Some(from) = self.highlight.clone() else {
+            return;
+        };
+        let window = self.shown_window();
+        let total = window.total();
+        let Some(at) = window.find(catalog, &from).filter(|_| total > 0) else {
             return;
         };
         let next = if forward {
@@ -270,10 +275,13 @@ impl Screen {
         } else {
             (at + total - 1) % total
         };
-        let Some(anchor) = self.window.row(catalog, next).map(|row| row.anchor.clone()) else {
+        let Some(anchor) = window.row(catalog, next).map(|row| row.anchor.clone()) else {
             return;
         };
-        self.focused = Some(next);
+        self.highlight = Some(table::Highlight {
+            anchor: anchor.clone(),
+            near: next,
+        });
         self.open_work(catalog, &anchor);
         // 换了作品，上一个作品的编辑态收掉（设计稿 `openWD` 把 `medit` 置回去）。
         if let Some(page) = self.page.as_mut() {
@@ -809,10 +817,17 @@ impl Screen {
                                 强,
                             ),
                         );
-                        // 右头「第几个 / 共几个」（设计稿 `.help.num`）：表上这一行排第几，照表眼下的筛选与次序。
-                        let 位置 = self.focused.map(|at| {
-                            format!("{} / {}", thousands(at + 1), thousands(self.window.total()))
-                        });
+                        // 右头「第几个 / 共几个」（设计稿 `.help.num`）：高亮那一部排第几，照底下那一种视图
+                        // 眼下的筛选与次序。**只认窗里缓着的那一段里找得着的**（每帧问，不读库）：找不着就不印，
+                        // 不拿上一回记下的那个下标凑——那可能是另一扇窗里的数。
+                        let 底下 = self.shown();
+                        let 位置 = self
+                            .highlight
+                            .as_ref()
+                            .and_then(|it| 底下.held(&it.anchor))
+                            .map(|at| {
+                                format!("{} / {}", thousands(at + 1), thousands(底下.total()))
+                            });
                         let 说明字号 = look::font_size(ui.ctx(), tokens.font.size_small);
                         let 走 = ui
                             .with_layout(Layout::right_to_left(Align::Center), |ui| {

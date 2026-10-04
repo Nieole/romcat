@@ -845,6 +845,30 @@ fn 逐条键盘流切候选通过拒绝跳过撤销上一条() {
     assert_eq!(app.queue().queue().pending(), 原有 - 1);
 }
 
+/// **有一层浮层摊着时逐条那几下也不接**（挂单 `Q1143`）：左栏「排序」那个下拉摊着时按 `空格`，光标不往下走。
+///
+/// 这一屏从前只问两道门（有弹层、光标在框里），没问浮层——三处键盘入口如今问的是同一个函数
+/// （`keys::allowed`），浮层摊着时 `空格` 该归浮层，不该替人「先放着」一条。
+#[test]
+fn 排序下拉摊着时逐条那几下不接() {
+    let ctx = headless::context();
+    let mut app = 界面(demo::QUEUE_ROWS);
+    {
+        let (screen, _) = app.queue_and_site();
+        screen.show_one_by_one();
+    }
+    跑(&ctx, &mut app, 2);
+    assert_eq!(app.queue().at(), 0);
+    let 摊开了 = shared::点一下(&ctx, "▲", |ui| app.ui(ui));
+    assert!(
+        摊开了.contains("候选 · 置信度"),
+        "排序那个下拉该摊开了：\n{摊开了}"
+    );
+    按(&ctx, &mut app, egui::Key::Space);
+    跑(&ctx, &mut app, 1);
+    assert_eq!(app.queue().at(), 0, "下拉摊着时空格不该把光标往下推一条");
+}
+
 #[test]
 fn 逐条时屏上真的摆着文件名路径与候选的完整依据() {
     // 验收第 8 条：人按下去之前该看见的全部。**断言看的是这一帧真的画出来的字**

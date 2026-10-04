@@ -23,6 +23,13 @@
 //! 是同一个函数。**一份数据配一份画法**——分两处画的话，两处的列宽、虚线、那句注脚迟早
 //! 各是各的，而屏上摆着的还是同一张表。
 //!
+//! ## 这一下算不算快捷键，也只有一处
+//!
+//! 键盘入口有三处：窗口那一层的全局快捷键（`App::shortcuts`）、待确认屏逐条那几下
+//! （`queue::Screen::keyboard`）、卡片墙上拿着焦点的那张卡自己接的 `Enter` / `空格`。
+//! 「有弹层、有浮层、焦点在别的控件上就不接」那三道门三处问的是同一个函数（[`allowed`]，挂单 `Q1143`）——
+//! 从前前两处各抄一份，第三处一道都没问。
+//!
 //! ## 修饰键两种写法
 //!
 //! macOS 上是 `⌘`，Windows 与 Linux 上是 `Ctrl`（[`MODIFIER`]）。这一份跟着跑的这台机器写，
@@ -60,6 +67,24 @@ pub const NOTE: &str = "在 macOS 上用 ⌘，在 Windows 和 Linux 上用 Ctrl
 
 /// **设置屏「快捷键」那一节底下那句话**（设计稿 `t==='keys'` 那一支的 `.help`）。
 pub const SEE_SHEET: &str = "随时按 ? 查看这张表。";
+
+/// **这一帧这一处键盘入口接不接键**：三道门，有一道关着就不接。三处键盘入口都问它（见模块文档）。
+///
+/// 1. **有一层弹层开着**（[`crate::dialog::screen_has_keys`]）——egui 的 `Modal` 拦得住指针、拦不住键盘。
+/// 2. **有一层浮层摊着**（[`egui::Popup::is_any_open`]）——右键菜单、下拉都算。那时 `Esc` 该收的是浮层，
+///    那一下归 egui 那一层收；这里再接一遍就成了一下退两层。
+/// 3. **键盘焦点在别的控件上**——光标在输入框里时那一栏正打着中文，`F` 是要打的字母不是命令；
+///    焦点落在一颗按钮、一行、一张卡上时，`Enter` / `空格` 归那个控件自己（Tab + Enter 那条无障碍路）。
+///
+/// `owner` 是问这句话的那个控件：卡片墙上拿着焦点的那张卡问的是「我自己那两下接不接」，焦点在它手上
+/// 不算「别的控件」。窗口那一层与待确认屏不是控件，给 `None`——那时任何控件拿着焦点都不接。
+#[must_use]
+pub fn allowed(ctx: &egui::Context, owner: Option<egui::Id>) -> bool {
+    let 焦点在别处 = ctx
+        .memory(egui::Memory::focused)
+        .is_some_and(|focused| Some(focused) != owner);
+    crate::dialog::screen_has_keys(ctx) && !egui::Popup::is_any_open(ctx) && !焦点在别处
+}
 
 /// 表上一条：`(这个键管什么, 键怎么写)`。
 pub type Key = (&'static str, String);
