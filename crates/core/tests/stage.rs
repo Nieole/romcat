@@ -652,6 +652,44 @@ fn 扫描那一行数的是还没完整扫过一趟的根_加一个根那个数�
 }
 
 #[test]
+fn 有根上次那一趟扫描部分完成时_工序段答得出_完整扫过一趟就答没有() {
+    // 票 `gui-draws-the-rest-of-the-design/11`（收挂单 `Q881`）：库屏扫描那颗按钮照稿分出「继续扫描」（设计稿
+    // `S.half.scan`）。「这个根上次那一趟部分完成」问核心库（`LibraryRoot::partially_scanned`），界面不自己猜。
+    let 甲 = 建库("stage-继续-甲", 2);
+    let 乙 = 建库("stage-继续-乙", 1);
+    let mut 现场 = 现场::摆好();
+    for (名字, 目录) in [("甲", 甲.path()), ("乙", 乙.path())] {
+        roots::add_root(&现场.catalog, None, 名字, 目录).expect("加得上");
+    }
+    let 有部分完成 =
+        |现场: &现场| Stages::survey(&现场.catalog, &现场.store, 主库标识).has_partial_scan();
+    // **从没扫过的不算**：两个根都还没扫过。
+    assert!(!有部分完成(&现场), "一个根都没扫过，却说有根部分完成");
+
+    // **真扫一趟、扫到一半被按停**：把手开跑之前就按了停，遍历头一圈就收手，交出产物、记一笔部分完成。
+    现场.扫("甲", 甲.path());
+    let 按了停 = Handle::new();
+    按了停.stop();
+    let mut options = ScanOptions::named(乙.path(), "乙");
+    options.jobs = Jobs::Fixed(1);
+    let outcome = scan::scan(&RealFs::new(), &mut 现场.catalog, &options, &按了停)
+        .expect("按停的那一趟照旧交出产物");
+    assert!(outcome.interrupted, "前提：乙那一趟部分完成");
+    let 乙那个根 = 现场.catalog.root("乙").expect("读得出根").expect("乙在");
+    assert!(乙那个根.partially_scanned(), "乙那一趟部分完成，却问不出来");
+    assert!(!乙那个根.fully_scanned(), "部分完成的那一趟算成了完整扫过");
+    let 甲那个根 = 现场.catalog.root("甲").expect("读得出根").expect("甲在");
+    assert!(!甲那个根.partially_scanned(), "甲完整扫过，却说部分完成");
+    assert!(有部分完成(&现场), "乙上次那一趟部分完成，工序段却答没有");
+    // 那一行的数照旧：部分完成的那个根还差着（与上一条同一个口径）。
+    assert_eq!(现场.那一行(Stage::Scan).behind, Behind::Left(1));
+
+    // **完整扫过一趟就没有了**：断点没设，这一趟从头扫完，记下的不再是部分完成。
+    现场.扫("乙", 乙.path());
+    assert!(!有部分完成(&现场), "乙完整扫过了，工序段还答有根部分完成");
+}
+
+#[test]
 fn 裁决那一行的数与待确认队列说的是同一个_裁过的不再算() {
     // 挂单 `Q822`：裁决那一行说的是待确认队列里还有几个变体等着裁决，与待确认队列屏
     // （`Queue::pending`）是**同一个数**。钉在路径上的裁决只记在沉淀库里——只问中立库的话，

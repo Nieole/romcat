@@ -398,6 +398,11 @@ fn 点一下(ctx: &egui::Context, app: &mut App, 按钮上的字: &str) {
             画出来的字(&稳了)
         );
     };
+    点在(ctx, app, pos);
+}
+
+/// 在窗口上 `pos` 那一点**真点一下**：指针挪过去、按下、松开，各一帧（[`点一下`]、[`点最后一处`] 共用）。
+fn 点在(ctx: &egui::Context, app: &mut App, pos: egui::Pos2) {
     let 按 = |pressed: bool| egui::Event::PointerButton {
         pos,
         button: egui::PointerButton::Primary,
@@ -1210,11 +1215,13 @@ fn 识别跑到一半按停在任务台历史上记成部分完成() {
 }
 
 #[test]
-fn 这一趟正在跑的时候那一行的按钮按不下去() {
-    // 不禁掉的话同一趟活会被排两遍——而两趟识别在同一份中立库上互相清对方的结论。
+fn 这一趟在台上的时候那一行写查看任务_再按一次不排第二趟() {
+    // 同一趟活不许被排两遍——两趟识别在同一份中立库上互相清对方的结论。从前那一行写禁着的「跑着呢」；票
+    // `gui-draws-the-rest-of-the-design/11` 照稿换成「查看任务」（按下去去任务屏，收挂单 `Q883`），那颗按钮不再排活，
+    // 兜底仍在排活那一个入口里（`Section::start`：同一道工序已经在台上就什么都不做）。
     //
     // **台上先摆一趟别的活**：任务台一次只跑一趟，于是排上去的识别稳稳地停在队列里。
-    // 这一条要验的是「那一行的按钮按不下去」，不该靠「识别恰好还没跑完」这种挂钟彩票
+    // 这一条不该靠「识别恰好还没跑完」这种挂钟彩票
     // （挂单 `Q196` / `Q349` 说的正是那种测试）——那样机器一忙它就绿得莫名其妙。
     let 库 = 建库("gui-stages-按不下去");
     let ctx = headless::context();
@@ -1233,13 +1240,29 @@ fn 这一趟正在跑的时候那一行的按钮按不下去() {
         .task_of(Stage::Identify)
         .expect("这一趟排上任务台了");
 
-    // 屏上那一行写着「跑着呢」，那颗按钮是禁着的。
-    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
-        现场.app.ui(ui)
-    }));
+    // 屏上那一行写着「查看任务」，不再是「运行」。
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    assert_eq!(
+        那一行的按钮(&这一帧, "识别").as_deref(),
+        Some(romcat_gui::stages::VIEW_TASK),
+        "这一趟还在台上，那一行的按钮不是「查看任务」：{:?}",
+        工序那一行(&这一帧, "识别"),
+    );
+    // **顶上「下一步」标题照旧、按钮同一个字**（拿主意的人 2026-10-05 裁：只有扫描在台上时顶上那一块照稿换成「正在扫描」，
+    // 别的工序在台上时标题照旧、弱化「查看任务」）。
+    let 屏上 = 画出来的字(&这一帧);
     assert!(
-        屏上.lines().any(|line| line.trim() == "跑着呢"),
-        "这一趟还在台上，那一行的按钮却还写着「运行」：\n{屏上}",
+        屏上.lines().any(|line| line.trim() == "下一步：识别"),
+        "识别在台上，顶上那一块的标题变了：\n{屏上}",
+    );
+    assert_eq!(
+        屏上
+            .lines()
+            .filter(|line| line.trim() == romcat_gui::stages::VIEW_TASK)
+            .count(),
+        2,
+        "顶上那一颗与识别那一行该都写「查看任务」：\n{屏上}",
     );
 
     // 再按一次（别处的捷径走的也是这个入口）：**什么都不该发生**。
@@ -1330,12 +1353,14 @@ fn 还没取回那份弹药时按识别_屏上说清为什么与去哪儿取_任
 }
 
 #[test]
-fn 取回_dat_那一趟已经排在台上时按识别_排在它后面而不是当场拒() {
-    // 票 `gui-looks-like-the-design/07` 只拒**按下去之前就判得出**的前提。取回 DAT 那一趟已经排在
-    // 台上，「还没有 DAT 库」就判不出来了：轮到识别时它多半已经取回来了（改之前识别就这样排在它
-    // 后面跑成）。当场拒的话，人得干等取回跑完再按一次。
+fn 下载_dat_那一趟已经排在台上时按识别_排在它后面而不是当场拒() {
+    // 票 `gui-looks-like-the-design/07` 只拒**按下去之前就判得出**的前提。下载 DAT 那一趟已经排在
+    // 台上，「还没有 DAT 库」就判不出来了：轮到识别时它多半已经下载下来了（改之前识别就这样排在它
+    // 后面跑成）。当场拒的话，人得干等下载跑完再按一次。
     //
-    // 取回那一趟**从头到尾排着、一次都不开跑**：台上先摆一趟占位活占着位子——一个网络请求都不发。
+    // 下载那一趟**从头到尾排着、一次都不开跑**：台上先摆一趟占位活占着位子——一个网络请求都不发。
+    // 那一趟在台上叫「下载数据源 · DAT 仓库」（照稿 `TASKS.fetch`，票 `gui-draws-the-rest-of-the-design/11` 收挂单 `Q881`：
+    // 不再叫「取回」）。
     let 库 = 建库("gui-stages-弹药在路上");
     let mut 现场 = 现场::摆好();
     现场.加根(库.path(), "主库");
@@ -1345,14 +1370,14 @@ fn 取回_dat_那一趟已经排在台上时按识别_排在它后面而不是�
         let (screen, _, tasks) = 现场.app.roots_site_and_tasks();
         screen.fetch(tasks, Source::Dat);
     }
-    let 取回 = 现场
+    let 下载 = 现场
         .app
         .tasks()
         .queued()
         .into_iter()
-        .find(|waiting| waiting.name.starts_with("取回"))
+        .find(|waiting| waiting.name == "下载数据源 · DAT 仓库")
         .map(|waiting| waiting.id)
-        .expect("取回 DAT 那一趟排上了");
+        .expect("下载 DAT 仓库那一趟排上了，名字照稿（不再叫「取回」）");
 
     现场.app.start_stage(Stage::Identify);
     let 识别 = 现场
@@ -1360,25 +1385,25 @@ fn 取回_dat_那一趟已经排在台上时按识别_排在它后面而不是�
         .roots()
         .stages()
         .task_of(Stage::Identify)
-        .expect("取回 DAT 已经排在台上，识别该排在它后面，而不是当场拒");
+        .expect("下载 DAT 已经排在台上，识别该排在它后面，而不是当场拒");
     assert!(
         现场.app.roots().stages().error().is_none(),
         "排上了却还挂着一句拒绝：{:?}",
         现场.app.roots().stages().error(),
     );
 
-    // 收拾：排着的两趟撤掉，再按停占位活——取回那一趟一次都没开跑。
-    现场.app.tasks_mut().stop(取回);
+    // 收拾：排着的两趟撤掉，再按停占位活——下载那一趟一次都没开跑。
+    现场.app.tasks_mut().stop(下载);
     现场.app.tasks_mut().stop(识别);
     占位.按停(现场.app.tasks_mut());
     现场.等任务跑完();
 
-    // 取回那一趟撤掉了，DAT 库仍不在：这时再按识别就当场拒，任务历史不多一条。
+    // 下载那一趟撤掉了，DAT 库仍不在：这时再按识别就当场拒，任务历史不多一条。
     let 历史几条 = 现场.app.tasks().history().len();
     现场.app.start_stage(Stage::Identify);
     assert!(
         现场.app.roots().stages().task_of(Stage::Identify).is_none(),
-        "取回撤掉之后还没有 DAT 库，识别却排上了",
+        "下载撤掉之后还没有 DAT 库，识别却排上了",
     );
     let 说的 = 现场.app.roots().stages().error().expect("该当场说清");
     assert!(说的.contains("还没有 DAT 库"), "{说的}");
@@ -1761,6 +1786,617 @@ fn 工序六行齐_次序照设计稿_每行报得出数或退回时刻() {
 fn 库屏上的字(ctx: &egui::Context, app: &mut App) -> String {
     跑一帧(ctx, app);
     画出来的字(&headless::frame(ctx, headless::input(), |ui| app.ui(ui)))
+}
+
+/// 一扇**高高的**窗（1280×1600）跑稳之后的那一帧：工序段六行连同上头那几句回执都落在视口里。
+///
+/// 默认窗口 800 高：每跑完一道工序，工序段顶上那几句回执（「识别跑完了：……」）就把底下几行往下推，导出那一行落到
+/// 视口外——egui 不画视口外的字，那时逐行读按钮读到的是「没画」，不是「没按钮」。
+fn 高高的一帧(ctx: &egui::Context, app: &mut App) -> egui::FullOutput {
+    let 高高的 = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 1600.0),
+        )),
+        ..Default::default()
+    };
+    headless::frame(ctx, 高高的(), |ui| app.ui(ui));
+    headless::frame(ctx, 高高的(), |ui| app.ui(ui))
+}
+
+/// 这一帧里画出来的每一段字连同它的外框，按画出来的次序。
+fn 每一段字(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+    fn 收(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => out.push((
+                text.galley.text().to_string(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+            )),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        收(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// 库屏右栏的左沿：右栏头一块的标题「根」的左沿。工序段那几行在它左边，根那张表、数据源那张表在它右边。
+fn 右栏左沿(各段: &[(String, egui::Rect)]) -> f32 {
+    各段
+        .iter()
+        .find(|(字, _)| 字 == "根")
+        .map(|(_, 框)| 框.min.x)
+        .expect("右栏头一块的标题「根」画出来了")
+}
+
+/// 库屏工序段上某一道工序那一行**从左往右**画着的那几段字：工序名、那一句、按钮上的字（有按钮的话在最右）。
+///
+/// 认法：先找工序名那一段（正好是那几个字、落在左栏里的头一处），再收它的竖直中线穿过的每一段左栏里的字——工序那一行
+/// 四列对着这一行的高竖着居中（`stages::Section::row_ui`）。左栏右沿取右栏头一块的标题「根」的左沿：右栏里同一高度上
+/// 也有字（根那张表、数据源那张表），不划这条线就混进来了。
+fn 工序那一行(output: &egui::FullOutput, 工序名: &str) -> Vec<String> {
+    let 各段 = 每一段字(output);
+    let 右栏左沿 = 右栏左沿(&各段);
+    let 名 = 各段
+        .iter()
+        .find(|(字, 框)| 字 == 工序名 && 框.max.x < 右栏左沿)
+        .map(|(_, 框)| *框)
+        .unwrap_or_else(|| panic!("工序段上没画出「{工序名}」那一行"));
+    let 中线 = 名.center().y;
+    let mut 那一行: Vec<(String, egui::Rect)> = 各段
+        .into_iter()
+        .filter(|(_, 框)| 框.max.x < 右栏左沿 && 框.min.x >= 名.min.x)
+        .filter(|(_, 框)| 框.min.y <= 中线 && 中线 <= 框.max.y)
+        .collect();
+    那一行.sort_by(|甲, 乙| 甲.1.min.x.total_cmp(&乙.1.min.x));
+    那一行.into_iter().map(|(字, _)| 字).collect()
+}
+
+/// 工序那一行右边那颗按钮上写的字；这一行不给按钮（在等前面那一道）时是 `None`。
+///
+/// 读的是那一行最右边那一段字，认得出是哪一颗按钮才算（[`工序那一行`]）——不给按钮的那一行最右边是那一句话。
+fn 那一行的按钮(output: &egui::FullOutput, 工序名: &str) -> Option<String> {
+    /// 工序那几行按钮上会写的字：照稿的那几个，连从前几版写过的「跑着呢」「开跑」「开跑某某」「去待确认队列」与稿上缺 DAT 时那颗
+    /// 「下载数据源」——认得出它们，退回旧字时那一格读出来是那个旧字、断言红得说得清，而不是读成「没按钮」。
+    const 按钮上会写的: &[&str] = &[
+        "开始扫描",
+        "继续扫描",
+        "重新扫描",
+        "运行",
+        "重新运行",
+        "重新导出",
+        romcat_gui::stages::TO_QUEUE,
+        romcat_gui::stages::VIEW_TASK,
+        "跑着呢",
+        "开跑",
+        "开跑识别",
+        "开跑刮削",
+        "开跑整理标题",
+        "开跑导出",
+        "去待确认队列",
+        romcat_gui::stages::FETCH_SOURCES,
+    ];
+    工序那一行(output, 工序名)
+        .pop()
+        .filter(|字| 按钮上会写的.contains(&字.as_str()))
+}
+
+/// 在窗口上**真点一下**屏上**最后画出来**的那一处 `按钮上的字`（其余同 [`点一下`]）。
+///
+/// 同一个字屏上摆着两处、要点的是**底下**那一处时用它：工序段那一行在台上跑着时，顶上「下一步」那颗与那一行自己那颗
+/// 都写「查看任务」，顶上那一颗先画。
+fn 点最后一处(ctx: &egui::Context, app: &mut App, 按钮上的字: &str) {
+    跑一帧(ctx, app);
+    let 稳了 = headless::frame(ctx, headless::input(), |ui| app.ui(ui));
+    let Some(pos) = 每一段字(&稳了)
+        .into_iter()
+        .filter(|(字, _)| 字 == 按钮上的字)
+        .map(|(_, 框)| 框.center())
+        .next_back()
+    else {
+        panic!(
+            "屏上没有「{按钮上的字}」这颗按钮，没处点：\n{}",
+            画出来的字(&稳了)
+        );
+    };
+    点在(ctx, app, pos);
+}
+
+/// 一直问任务台，直到 `id` 那一趟**真开跑了**（占着台子的那一趟收了场，它顶上来）。等的是这件事本身，六秒还没开跑就当它
+/// 卡住了。
+fn 等它开跑(app: &mut App, id: u64) {
+    for _ in 0..6_000 {
+        app.poll_tasks();
+        if app.tasks().running().is_some_and(|live| live.id == id) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("第 {id} 号迟迟没开跑");
+}
+
+#[test]
+fn 排一趟扫描_那一行写查看任务_按下去换到任务屏() {
+    // 票 `gui-draws-the-rest-of-the-design/11`（收挂单 `Q883`）：正在台上跑的那一行照稿是转圈的空心圆点、实时进度、弱化的
+    // 「查看任务」，按下去去任务屏看那一趟（设计稿 `stageRows()` 的 `st:'run'`、`go:task`）。改之前那一行写的是禁着的
+    // 「跑着呢」，按不动。
+    //
+    // 扫描**隔着一道闸**读盘（`shared::一道闸`）：停在头一个文件上，那一趟稳稳地在跑，不靠挂钟。
+    let 库 = 建库("gui-stages-查看任务");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    let (闸, 闸口) = shared::一道闸(1);
+    现场.app.scan_through(std::sync::Arc::new(闸));
+    点一下(&ctx, &mut 现场.app, "开始扫描");
+    闸口.等扫描走到闸上();
+
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    assert_eq!(
+        那一行的按钮(&这一帧, "扫描").as_deref(),
+        Some(romcat_gui::stages::VIEW_TASK),
+        "扫描在台上跑着，那一行的按钮不是「查看任务」：{:?}",
+        工序那一行(&这一帧, "扫描"),
+    );
+    // **顶上那一块扫描在台上时照稿换成「正在扫描」**（拿主意的人 2026-10-05 裁，下一条钉着），那里不摆「查看任务」：
+    // 屏上只有扫描那一行这一颗。
+    let 屏上 = 画出来的字(&这一帧);
+    assert_eq!(
+        屏上
+            .lines()
+            .filter(|line| line.trim() == romcat_gui::stages::VIEW_TASK)
+            .count(),
+        1,
+        "扫描在台上，该只有那一行写「查看任务」：\n{屏上}",
+    );
+    assert!(
+        !屏上.lines().any(|line| line.trim() == "跑着呢"),
+        "还画着禁着的「跑着呢」：\n{屏上}",
+    );
+
+    点最后一处(&ctx, &mut 现场.app, romcat_gui::stages::VIEW_TASK);
+    跑一帧(&ctx, &mut 现场.app);
+    assert_eq!(
+        现场.app.view(),
+        View::Tasks,
+        "按了那一行的「查看任务」，却没换到任务屏"
+    );
+    // **去任务屏只是去看**：那一趟照旧在跑，一下都没停。
+    assert!(
+        现场
+            .app
+            .tasks()
+            .running()
+            .is_some_and(|live| live.name == "扫描 · 主库" && !live.stopping),
+        "按「查看任务」动了台上那一趟",
+    );
+    闸口.放行();
+    现场.等任务跑完();
+}
+
+/// 钉死任务屏与状态栏上跟着挂钟走的那几个数（`App::pin_task_clock`）：已用 192 秒。走了 25% 时照线性外推还要 576 秒，
+/// 也就是「9 分 36 秒」——库屏顶上「预计还需」与状态栏「剩余约」读的是同一份快照，钉死了才断言得了那个数。
+fn 钉死已用(app: &mut App) {
+    app.pin_task_clock(romcat_gui::task::Clock {
+        elapsed: Duration::from_secs(192),
+        ended_at: 1_789_308_300,
+        utc_offset: 8 * 3_600,
+        now: 1_789_308_300,
+    });
+}
+
+#[test]
+fn 扫描在台上跑着时_顶上照稿写正在扫描与预计还需_缺_dat_时那颗下载数据源排下载() {
+    // 拿主意的人 2026-10-05 裁（票 `gui-draws-the-rest-of-the-design/11` 选择题 2 选 B）：扫描在台上跑着时，顶上那一块照稿
+    // （设计稿 `renderLib()` 里 `S.running.key==='scan'` 那一支）——标题「正在扫描 · 预计还需 X」，X 就是任务屏那张卡上
+    // 「剩余约」那个数（同一份快照，不另算）；底下那句说明；DAT 没下载、下载也没在台上时一颗主按钮「下载数据源」，按下去走
+    // 数据源那一块「全部下载」那一条（`roots::Screen::fetch_all`，稿上两颗按的是同一个 `task:fetch`）。
+    let 库 = 建库("gui-stages-正在扫描");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    钉死已用(&mut 现场.app);
+    let (闸, 闸口) = shared::一道闸(1);
+    现场.app.scan_through(std::sync::Arc::new(闸));
+    现场.app.start_stage(Stage::Scan);
+    闸口.等扫描走到闸上();
+
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "正在扫描 · 预计还需 9 分 36 秒"),
+        "扫描在台上跑着，顶上没照稿写正在扫描与还要多久：\n{屏上}",
+    );
+    assert!(
+        屏上.contains("剩余约 9 分 36 秒"),
+        "顶上「预计还需」与状态栏「剩余约」该是同一个数：\n{屏上}",
+    );
+    assert!(
+        屏上.lines().any(|line| line.trim()
+            == "扫描期间可以先下载数据源，识别时需要用到。其他页面可以正常使用。"),
+        "顶上没照稿写那句说明：\n{屏上}",
+    );
+    assert!(
+        !屏上.lines().any(|line| line.trim() == "下一步：扫描"),
+        "扫描在台上跑着，顶上还写着下一步：\n{屏上}",
+    );
+
+    // **按「下载数据源」**：排的是还没下载的那几个源，一个源一趟，排在扫描后面——一趟都不开跑、一个网络请求都不发。
+    点一下(&ctx, &mut 现场.app, "下载数据源");
+    let 排着的: Vec<(u64, String)> = 现场
+        .app
+        .tasks()
+        .queued()
+        .into_iter()
+        .map(|waiting| (waiting.id, waiting.name))
+        .collect();
+    assert_eq!(
+        排着的.first().map(|(_, 名字)| 名字.as_str()),
+        Some("下载数据源 · DAT 仓库"),
+        "按了「下载数据源」，DAT 仓库那一趟没排上：{排着的:?}",
+    );
+    assert!(
+        排着的
+            .iter()
+            .all(|(_, 名字)| 名字.starts_with("下载数据源 · ")),
+        "排上去的不全是下载数据源那几趟：{排着的:?}",
+    );
+    // **下载 DAT 已经排在台上，那颗按钮就不画了**（稿 `queued('fetch')`）。
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    assert!(
+        !屏上.lines().any(|line| line.trim() == "下载数据源"),
+        "下载已经排在台上，顶上还摆着「下载数据源」：\n{屏上}",
+    );
+
+    // 收拾：撤掉排着的那几趟，再放闸。
+    for (id, _) in 排着的 {
+        现场.app.tasks_mut().stop(id);
+    }
+    闸口.放行();
+    现场.等任务跑完();
+}
+
+#[test]
+fn 扫描在台上跑着时_dat_已下载就不摆下载数据源() {
+    // 同上一条，DAT 已经下载过（稿 `S.src.dat` 为真那一档）：顶上照样写正在扫描与那句说明，右边不摆按钮。
+    let 库 = 建库("gui-stages-正在扫描-有弹药");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(库.path(), "主库");
+    钉死已用(&mut 现场.app);
+    let (闸, 闸口) = shared::一道闸(1);
+    现场.app.scan_through(std::sync::Arc::new(闸));
+    现场.app.start_stage(Stage::Scan);
+    闸口.等扫描走到闸上();
+
+    let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
+    assert!(
+        屏上
+            .lines()
+            .any(|line| line.trim() == "正在扫描 · 预计还需 9 分 36 秒"),
+        "{屏上}",
+    );
+    assert!(
+        !屏上.lines().any(|line| line.trim() == "下载数据源"),
+        "DAT 已经下载过，顶上还摆着「下载数据源」：\n{屏上}",
+    );
+    闸口.放行();
+    现场.等任务跑完();
+}
+
+/// 库屏右栏里画着的每一段字（左沿不在左栏里的那些），按画出来的次序。右栏左沿的认法同 [`工序那一行`]。
+fn 右栏里的字(output: &egui::FullOutput) -> Vec<String> {
+    let 各段 = 每一段字(output);
+    let 右栏左沿 = 右栏左沿(&各段);
+    各段
+        .into_iter()
+        .filter(|(_, 框)| 框.min.x >= 右栏左沿)
+        .map(|(字, _)| 字)
+        .collect()
+}
+
+#[test]
+fn 那个根在台上时根那张表照稿写扫描中与走了几成_排着时写排队中() {
+    // 挂单 `Q1519`（拿主意的人 2026-10-05 裁：并进票 11 做掉）：那个根正扫着时，根那张表变体那一格照稿写「扫描中 N%」
+    // （设计稿 `renderLib()` 根那张表），N 与工序段扫描那一行同一处来源（这一帧任务台那一份快照）。排着还没轮到时写「排队中」
+    // （稿上数据源那张表排着的那一格的说法）。那一行的「扫描」「移除…」在台上时灰着是早就有的（`roots::Screen::busy_roots`），
+    // 灰没灰读字读不出来，由截图基线 `library/running-*` 钉着。
+    let 库 = 建库("gui-roots-扫描中");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    let (闸, 闸口) = shared::一道闸(1);
+    现场.app.scan_through(std::sync::Arc::new(闸));
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "占着台子");
+    现场.app.start_stage(Stage::Scan);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Scan)
+        .expect("扫描排上任务台了");
+
+    // **排着**。
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    let 右栏 = 右栏里的字(&这一帧);
+    assert!(
+        右栏.iter().any(|字| 字 == "排队中"),
+        "那个根的扫描排在台上，根那张表没说它在排队：{右栏:?}",
+    );
+
+    // **跑着**：「扫描中」与走了几成，那个数与工序段那一行同一个。
+    占位.按停(现场.app.tasks_mut());
+    等它开跑(&mut 现场.app, id);
+    闸口.等扫描走到闸上();
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    let 右栏 = 右栏里的字(&这一帧);
+    assert!(
+        右栏.iter().any(|字| 字 == "扫描中") && 右栏.iter().any(|字| 字 == "25%"),
+        "那个根正扫着，根那张表没照稿写「扫描中 25%」：{右栏:?}",
+    );
+    assert!(
+        工序那一行(&这一帧, "扫描")
+            .iter()
+            .any(|字| 字 == "25% · 2/4 遍历"),
+        "前提：工序段那一行说的是同一个 25%",
+    );
+    assert!(
+        !右栏.iter().any(|字| 字 == "排队中"),
+        "跑起来了还说在排队：{右栏:?}"
+    );
+
+    // **跑完**：两句都收掉，变体那一格回到变体数。
+    闸口.放行();
+    现场.等任务跑完();
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    let 右栏 = 右栏里的字(&这一帧);
+    assert!(
+        !右栏.iter().any(|字| 字 == "扫描中" || 字 == "排队中"),
+        "扫完了根那张表还说在扫：{右栏:?}",
+    );
+}
+
+#[test]
+fn 那一行的进度跟着台上那一趟走_排着时说前面还有几个_跑起来写走到哪一步_跑完换回还差多少() {
+    // 票 11：正在跑的那一行照稿写**实时进度**（设计稿 `#live-left` 那一格），不再是还差多少。那一句由核心库折
+    // （`Progress::render`），与任务屏那张卡上「在做什么」同一句；走了几成说得出就在前头写百分比。
+    // 台上先摆一趟占位活：扫描排在它后面，先验「排着」那一档；按停占位活，扫描顶上来、停在闸上，再验「跑着」那一档。
+    let 库 = 建库("gui-stages-进度");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    let (闸, 闸口) = shared::一道闸(1);
+    现场.app.scan_through(std::sync::Arc::new(闸));
+    let 占位 = 占位活::排上(现场.app.tasks_mut(), "占着台子");
+    现场.app.start_stage(Stage::Scan);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Scan)
+        .expect("扫描排上任务台了");
+
+    // **排着**：说它在等、前面还有几趟；按钮照样是「查看任务」。
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    let 那一行 = 工序那一行(&这一帧, "扫描");
+    assert!(
+        那一行
+            .iter()
+            .any(|字| 字 == "排在任务台上等着，前面还有 1 个任务"),
+        "扫描排在占位活后面，那一行没说它在等：{那一行:?}",
+    );
+    assert_eq!(
+        那一行的按钮(&这一帧, "扫描").as_deref(),
+        Some(romcat_gui::stages::VIEW_TASK),
+        "{那一行:?}",
+    );
+
+    // **跑起来**：写台上那一趟走到哪儿了。
+    占位.按停(现场.app.tasks_mut());
+    等它开跑(&mut 现场.app, id);
+    闸口.等扫描走到闸上();
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    let 进度 = 现场.app.tasks().live(id).expect("扫描在台上跑着").progress;
+    assert_eq!(
+        进度.render(),
+        "2/4 遍历",
+        "前提：扫描停在遍历那一步的头一个文件上"
+    );
+    let 那一行 = 工序那一行(&这一帧, "扫描");
+    assert!(
+        那一行.iter().any(|字| 字 == "25% · 2/4 遍历"),
+        "扫描跑到遍历那一步，那一行没写走到哪儿了：{那一行:?}",
+    );
+    assert!(
+        !那一行.iter().any(|字| 字 == "1 个根还没完整扫过一趟"),
+        "跑着的那一行还写着还差多少：{那一行:?}",
+    );
+
+    // **跑完**：换回那一行自己那一句，按钮换回做完那一档的字。
+    闸口.放行();
+    现场.等任务跑完();
+    let 这一帧 = 高高的一帧(&ctx, &mut 现场.app);
+    let 那一行 = 工序那一行(&这一帧, "扫描");
+    assert!(
+        那一行.iter().any(|字| 字 == "每个根都完整扫过一趟了"),
+        "扫描跑完了，那一行没换回还差多少：{那一行:?}",
+    );
+    assert_eq!(
+        那一行的按钮(&这一帧, "扫描").as_deref(),
+        Some("重新扫描"),
+        "{那一行:?}"
+    );
+}
+
+#[test]
+fn 按了停_那一行跟着说正在停_停下之后换回还差多少并写继续扫描() {
+    // 票 11：那一行写的是**台上那一趟此刻的样子**，每帧现取——按下「停止」到真的停之间，那一行跟着任务屏那张卡说「正在停……」；
+    // 停下之后那个根上次那一趟部分完成，那一行换回还差多少、按钮写「继续扫描」（收挂单 `Q881`）。
+    // 扫描停在闸上时按停：停下的信号先落下，放闸之后它走到下一个分界就收手（`scan::scan` 起手看叫停）。
+    let 库 = 建库("gui-stages-按停");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.加根(库.path(), "主库");
+    let (闸, 闸口) = shared::一道闸(1);
+    现场.app.scan_through(std::sync::Arc::new(闸));
+    现场.app.start_stage(Stage::Scan);
+    let id = 现场
+        .app
+        .roots()
+        .stages()
+        .task_of(Stage::Scan)
+        .expect("扫描排上任务台了");
+    闸口.等扫描走到闸上();
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    assert!(
+        工序那一行(&这一帧, "扫描")
+            .iter()
+            .any(|字| 字 == "25% · 2/4 遍历"),
+        "前提：扫描停在遍历那一步",
+    );
+
+    // **按停**（任务屏那颗「停止」走的同一个入口）：那一趟还卡在闸上，没停下来——那一行跟着说正在停。
+    现场.app.tasks_mut().stop(id);
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    let 那一行 = 工序那一行(&这一帧, "扫描");
+    assert!(
+        那一行.iter().any(|字| 字 == romcat_gui::task::STOPPING),
+        "按了停、那一趟还没停下来，那一行没跟着说正在停：{那一行:?}",
+    );
+    assert_eq!(
+        那一行的按钮(&这一帧, "扫描").as_deref(),
+        Some(romcat_gui::stages::VIEW_TASK),
+        "{那一行:?}",
+    );
+
+    // **停下来了**：部分完成，那一行换回还差多少，按钮写「继续扫描」。
+    闸口.放行();
+    现场.等任务跑完();
+    assert!(
+        现场.app.roots().roots()[0].root.partially_scanned(),
+        "前提：那一趟记成部分完成",
+    );
+    let 这一帧 = 高高的一帧(&ctx, &mut 现场.app);
+    let 那一行 = 工序那一行(&这一帧, "扫描");
+    assert!(
+        那一行.iter().any(|字| 字 == "1 个根还没完整扫过一趟"),
+        "停下之后那一行没换回还差多少：{那一行:?}",
+    );
+    assert_eq!(
+        那一行的按钮(&这一帧, "扫描").as_deref(),
+        Some("继续扫描"),
+        "{那一行:?}",
+    );
+}
+
+#[test]
+fn 工序那几行按钮上的字照稿_逐行_上次扫描部分完成的写继续扫描() {
+    // 票 11（收挂单 `Q881`）：照稿 `stageRows()` 每行的 `act`——没扫过「开始扫描」，上次那一趟部分完成「继续扫描」
+    // （`S.half.scan`），做完「重新扫描」；下一步与还没做完的「运行」，做完「重新运行」，导出做完「重新导出」；裁决
+    // 「去处理」；在等前面那一道的不给按钮。台上跑着的那一行写「查看任务」，钉在上面两条里。
+    //
+    // 「上次那一趟部分完成」问核心库（`Stages::has_partial_scan` ← `LibraryRoot::partially_scanned`），这一层不猜。
+    let 库 = 建大库("gui-stages-按钮字");
+    let 导出到 = temp_dir("gui-stages-按钮字-导出");
+    let ctx = headless::context();
+    let mut 现场 = 现场::摆好();
+    现场.装上弹药();
+    现场.加根(库.path(), "主库");
+    现场.选一次导出去哪儿("Pegasus", 导出到.path());
+    let 六行 = ["扫描", "识别", "刮削", "整理标题", "裁决", "导出"];
+    let 逐行 = |现场: &mut 现场| -> Vec<Option<String>> {
+        let 这一帧 = 高高的一帧(&ctx, &mut 现场.app);
+        六行.iter().map(|名| 那一行的按钮(&这一帧, 名)).collect()
+    };
+    let 照稿 = |字: [Option<&str>; 6]| -> Vec<Option<String>> {
+        字.iter().map(|字| 字.map(str::to_string)).collect()
+    };
+
+    // 加了根还没扫：扫描「开始扫描」，别的几行都在等前面那一道。
+    assert_eq!(
+        逐行(&mut 现场),
+        照稿([Some("开始扫描"), None, None, None, None, None]),
+        "加了根还没扫",
+    );
+
+    // **扫到一半按停**：那个根上次那一趟部分完成，扫描写「继续扫描」——按下去从断点接着走。
+    现场.扫了就停("主库");
+    assert!(
+        现场.app.roots().roots()[0].root.partially_scanned(),
+        "前提：那一趟部分完成（fixture 小到扫得完的话这一档测不到）",
+    );
+    assert_eq!(
+        逐行(&mut 现场),
+        照稿([Some("继续扫描"), None, None, None, None, None]),
+        "上次扫描部分完成",
+    );
+
+    // 扫完：扫描做完「重新扫描」，识别是下一步「运行」。
+    现场.扫("主库");
+    assert_eq!(
+        逐行(&mut 现场),
+        照稿([Some("重新扫描"), Some("运行"), None, None, None, None]),
+        "扫完了",
+    );
+
+    // 识别跑完：识别「重新运行」，刮削是下一步「运行」；裁决不等刮削，「去处理」；整理标题与导出还在等。
+    现场.跑识别();
+    assert_eq!(
+        逐行(&mut 现场),
+        照稿([
+            Some("重新扫描"),
+            Some("重新运行"),
+            Some("运行"),
+            None,
+            Some(romcat_gui::stages::TO_QUEUE),
+            None,
+        ]),
+        "识别跑完了",
+    );
+
+    // 刮削、整理标题跑完：两行「重新运行」；导出不再等，还没跑过「运行」。
+    现场.跑刮削();
+    现场.折标题();
+    assert_eq!(
+        逐行(&mut 现场),
+        照稿([
+            Some("重新扫描"),
+            Some("重新运行"),
+            Some("重新运行"),
+            Some("重新运行"),
+            Some(romcat_gui::stages::TO_QUEUE),
+            Some("运行"),
+        ]),
+        "整理标题跑完了",
+    );
+
+    // 导出跑完：「重新导出」。
+    现场.导出();
+    assert_eq!(
+        逐行(&mut 现场),
+        照稿([
+            Some("重新扫描"),
+            Some("重新运行"),
+            Some("重新运行"),
+            Some("重新运行"),
+            Some(romcat_gui::stages::TO_QUEUE),
+            Some("重新导出"),
+        ]),
+        "导出跑完了",
+    );
 }
 
 #[test]
@@ -2353,8 +2989,9 @@ fn 点一下把刮削排上任务台_跑完那一行的数跟着变_主库一个
 }
 
 #[test]
-fn 刮削这一趟正在跑的时候那一行的按钮按不下去() {
-    // 验收第 6 条，照识别那一行的先例：不禁掉的话同一趟刮削会被排两遍。
+fn 刮削这一趟在台上的时候那一行写查看任务_再按一次不排第二趟() {
+    // 验收第 6 条，照识别那一行的先例：同一趟刮削不许被排两遍。那一行照稿写「查看任务」（票
+    // `gui-draws-the-rest-of-the-design/11`），不再是禁着的「跑着呢」。
     let 库 = 建库("gui-stages-刮削按不下去");
     let ctx = headless::context();
     let mut 现场 = 现场::摆好();
@@ -2370,20 +3007,22 @@ fn 刮削这一趟正在跑的时候那一行的按钮按不下去() {
         .task_of(Stage::Scrape)
         .expect("这一趟排上任务台了");
 
-    let 屏上 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| {
-        现场.app.ui(ui)
-    }));
-    assert!(
-        屏上.lines().any(|line| line.trim() == "跑着呢"),
-        "刮削还在台上，那一行的按钮却还写着「运行」：\n{屏上}",
+    跑一帧(&ctx, &mut 现场.app);
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| 现场.app.ui(ui));
+    let 屏上 = 画出来的字(&这一帧);
+    assert_eq!(
+        那一行的按钮(&这一帧, "刮削").as_deref(),
+        Some(romcat_gui::stages::VIEW_TASK),
+        "刮削还在台上，那一行的按钮不是「查看任务」：{:?}",
+        工序那一行(&这一帧, "刮削"),
     );
-    // **只禁它自己那一行**：下一步那一行照旧按得下去。票 `gui-looks-like-the-design/06` 第二段照稿之后（挂单
+    // **只换它自己那一行**：下一步那一行照旧按得下去。票 `gui-looks-like-the-design/06` 第二段照稿之后（挂单
     // `Q827`、`Q881`），在等前面那一道的几行不给按钮、做完的扫描那一行写「重新扫描」，于是写着「运行」的只剩
     // 两颗：顶上「下一步」那一颗，与下一步识别那一行自己那一颗。
     assert_eq!(
         屏上.lines().filter(|line| line.trim() == "运行").count(),
         2,
-        "禁掉的不只是刮削那一行：\n{屏上}",
+        "换掉的不只是刮削那一行：\n{屏上}",
     );
 
     // 再按一次：**什么都不该发生**。
@@ -3180,7 +3819,7 @@ fn 队列屏那颗捷径排的是与库屏工序段完全同一趟识别() {
 
 #[test]
 fn 台上已经有一趟识别时再按队列屏那颗捷径_不会排第二趟() {
-    // **捷径按不禁**：工序段那一行跑着时会写「跑着呢」并禁掉按钮（规格 34），可队列屏
+    // **捷径按不禁**：工序段那一行在台上时写「查看任务」、不再排活（票 `gui-draws-the-rest-of-the-design/11`），可队列屏
     // 够不着工序段，那颗捷径不知道台上有没有活。兜底在 `Section::start` 那句「同一道
     // 工序已经在跑就什么都不做」——这一条走的是**真的那条路**：留记号、`App::route`
     // 取走、交给 `App::start_stage`。两趟识别在同一份中立库上互相清对方的结论。

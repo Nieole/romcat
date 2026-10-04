@@ -330,6 +330,9 @@ if m := literal(r"\.stage\{[^}]*?grid-template-columns:(\d+)px (\d+)px 1fr auto;
 if m := literal(r"\.stage \.dot\{width:(\d+)px;[^}]*?border:([\d.]+)px", ".stage .dot 的 width 与 border"):
     same(m[1], tokens["layout"]["stage-dot"], "stage-dot")
     same(m[2], tokens["layout"]["stage-dot-stroke"], "stage-dot-stroke")
+# 在台上的那一行圆点转一圈要多久（票 gui-draws-the-rest-of-the-design/11）：设计稿 .stage.run .dot 的 animation:spin 1s。
+if m := literal(r"\.stage\.run \.dot\{[^}]*?animation:spin ([\d.]+)s", ".stage.run .dot 的 animation"):
+    same(m[1], tokens["layout"]["stage-dot-spin"], "stage-dot-spin")
 if m := literal(r"\.stage \.left\{font-size:([\d.]+)px", ".stage .left 的 font-size"):
     same(m[1], tokens["font"]["size-small-plus"], "size-small-plus（.stage .left）")
 if m := literal(r"\.stage \.left small\{[^}]*?font-size:([\d.]+)px", ".stage .left small 的 font-size"):

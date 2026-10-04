@@ -88,7 +88,21 @@ impl LibraryRoot {
     /// 按钮排的也是这几个——判据只有这一句，两处各写一遍迟早数的与排的对不上。
     #[must_use]
     pub fn fully_scanned(&self) -> bool {
-        self.scan.is_some_and(|scan| !scan.interrupted)
+        self.scan.is_some() && !self.partially_scanned()
+    }
+
+    /// 这个根上次那一趟扫描**部分完成**没有：扫到一半被按停（扫描被叫停时交出产物、记一笔中断，
+    /// `scan::scan` 的文档），记下的数字只是个下界。从没扫过的不算。
+    ///
+    /// **「这个根上次扫到一半」只问这一句**（ADR-0024）：库屏工序段扫描那颗按钮写不写「继续扫描」
+    /// （`stage::Stages::has_partial_scan`）、根那张表上次扫描那一格说不说「那一趟部分完成」，都从这儿取。
+    ///
+    /// 它答的是**上次那一趟怎么收的场**，不是「下一趟接不接得上」：界面排的扫描一律写断点、开着续跑，
+    /// 部分完成的那一趟断点就留在工作目录里，下一趟从断点接着走（`roots::Screen::scan`）。命令行带
+    /// `--no-checkpoint` 扫到一半的那一趟没留断点，下一趟照样从头扫——这一问分不出那一种。
+    #[must_use]
+    pub fn partially_scanned(&self) -> bool {
+        self.scan.is_some_and(|scan| scan.interrupted)
     }
 }
 

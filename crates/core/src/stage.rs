@@ -32,7 +32,7 @@
 //! ——三处都取 [`Catalog::not_run_count`]，没有第二份算法。
 
 use crate::catalog::identify::IdentifyTally;
-use crate::catalog::roots::LibraryTotals;
+use crate::catalog::roots::{LibraryRoot, LibraryTotals};
 use crate::catalog::title::TitleTally;
 use crate::catalog::{Catalog, ExportSetup};
 use crate::path;
@@ -68,7 +68,7 @@ pub enum Stage {
     /// [`Catalog::roots`]）。一句查询，不碰盘——外置盘不在位时照样数得出来。
     ///
     /// 它**不数**「盘上变了多少」：那要把整棵树再走一遍才知道，**算这个数就是跑这道工序**
-    /// （真库一趟 37.1 分钟）。所以扫完一趟之后这一行归零，往根里再拷东西它不会自己涨；
+    /// （真库一趟半个多小时，见台账 `docs/library-facts.md`）。所以扫完一趟之后这一行归零，往根里再拷东西它不会自己涨；
     /// 加一个根会（挂单 `Q821`）。
     ///
     /// **一个根都没有时交不出数**：那时说「每个根都扫过了」是一句空话，下一步明明是添加根
@@ -154,15 +154,15 @@ pub enum Stage {
     ///
     /// **实测有两处，一处就在真库上**：
     ///
-    /// - **真机**（`docs/library-facts.md`，2026-09-01）：一趟 `romcat export` 是
-    ///   **2.7 秒**——46,444 个变体作品级收敛成 28,529 个条目、22 份文件、14 MiB。
+    /// - **真机**（见台账 `docs/library-facts.md`，2026-09-01）：一趟 `romcat export` **不到 3 秒**——
+    ///   四万多个变体作品级收敛成近三万个条目、二十来份文件、十几 MiB。
     /// - **合成库**（`crates/core/tests/magnitude.rs` 那条挂着 `#[ignore]` 的量级测量，
     ///   debug 构建，4,000 个变体摊在 10 个平台上、每个都认出了作品并整理过标题，
     ///   2026-09-13 与 14 日）：[`converge::run`](crate::adapter::converge::run) 一趟
     ///   **174–212 毫秒**，整趟 [`transfer::export`](crate::adapter::transfer::export)
     ///   （`dry_run`，一个字节都不写盘）**312–350 毫秒**（同一天另一趟机器更忙，两项
     ///   慢到 539 与 945 毫秒）；照真库变体数的量级（5 万）线性折算是 **2.2–2.7 秒与
-    ///   3.9–4.4 秒**——与真机那 2.7 秒同一个量级。复核就跑那份文件里的 `导出一趟的量级`。
+    ///   3.9–4.4 秒**——与真机那不到 3 秒同一个量级。复核就跑那份文件里的 `导出一趟的量级`。
     ///
     /// 而 [`Stages::survey`] 跑在**画帧那条线程**上、每次重读库屏都要跑一遍
     /// ——一帧的预算是 16 毫秒，差了两个数量级。
@@ -355,6 +355,8 @@ struct Facts {
     exported_media: Option<bool>,
     /// 前几批盖住多少：**不在 [`Stages::survey`] 里问**，由调用方算一次交进来（[`Stages::set_queue_head`]）。
     queue_head: Option<Coverage>,
+    /// 有没有根上次那一趟扫描**部分完成**（[`Stages::has_partial_scan`]）。读不动根那张表时是 `false`。
+    partial_scan: bool,
 }
 
 impl Stages {
@@ -381,8 +383,26 @@ impl Stages {
                 exported_entries: catalog.exported_entries().ok().flatten(),
                 exported_media: catalog.exported_with_media().ok().flatten(),
                 queue_head: None,
+                partial_scan: catalog
+                    .roots()
+                    .is_ok_and(|roots| roots.iter().any(LibraryRoot::partially_scanned)),
             },
         }
+    }
+
+    /// 有没有根**上次那一趟扫描部分完成**（[`LibraryRoot::partially_scanned`]，判据只在那一处）。库屏工序段扫描那一行与
+    /// 顶上「下一步」那颗按钮照它写「继续扫描」还是「开始扫描」（设计稿 `stageRows()` 的 `S.half.scan`，挂单 `Q881`）。
+    ///
+    /// **它只答上次那一趟怎么收的场，不答下一趟接不接得上**：接不接得上是扫描自己开工时照断点判的（`scan::scan`，断点在不在、
+    /// 对不对得上这个根最后那一趟）；界面排的扫描一律写断点、开着续跑，两者在界面这条路上说的是一件事——命令行带
+    /// `--no-checkpoint` 扫到一半的那一趟例外（挂单 `Q1517`）。
+    ///
+    /// **有一个根部分完成就算**：按下去排的是还没完整扫过一趟的每个根（`roots::Screen::take_scan`），部分完成的那几个
+    /// 从断点接着走，从没扫过的几个从头扫——写「开始扫描」会把接着走的那几个说成从头来。读不动根那张表时答「没有」，
+    /// 那一行自己已经退回了说读不动的那一句。
+    #[must_use]
+    pub fn has_partial_scan(&self) -> bool {
+        self.facts.partial_scan
     }
 
     /// 一道工序一行，与 [`Stage::ALL`] 同序。

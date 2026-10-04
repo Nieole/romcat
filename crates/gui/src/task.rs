@@ -149,6 +149,10 @@ pub type Tasks = Board<Product>;
 /// （拿主意的人 2026-10-04 裁，票 `gui-draws-the-rest-of-the-design/02`；收口时 `Q836` 的「不画」随之作废一半）。
 pub const RESUMABLE_NOTE: &str = "停止后已完成的部分会保留，下次从中断的位置继续。";
 
+/// 按下「停止」到那一趟真的停之间，正在跑那张卡上说的那一句：**如实说出来**，不然人会以为按钮没反应。库屏工序段正在跑的
+/// 那一行（`stages::Section`）说的是同一句。
+pub const STOPPING: &str = "正在停……走到下一步就停";
+
 /// **截图那一路定死的钟**：任务屏上跟着挂钟走的那几个数——正在跑那一趟的已用（约剩由它折）、
 /// 历史里每一趟的耗时与收场时刻——一律画成这里给的值。
 ///
@@ -196,7 +200,10 @@ impl Screen {
     }
 
     /// 这一帧正在跑的那一趟：这一帧头一回问时从任务台取，之后同一帧里都给这同一份。
-    fn running(&mut self, ctx: &egui::Context, tasks: &Tasks) -> Option<Live> {
+    ///
+    /// **库屏也读这一份**（`App::ui` 交给 `roots::Screen::ui`）：工序段那一行走了几成、顶上「正在扫描 · 预计还需」、根那张表
+    /// 「扫描中 N%」与状态栏、任务屏那张卡是同一个数——各问一次任务台的话，同一帧里会印出两个不一样的「剩余约」。
+    pub(crate) fn running(&mut self, ctx: &egui::Context, tasks: &Tasks) -> Option<Live> {
         let pass = ctx.cumulative_pass_nr();
         if let Some((taken, live)) = &self.snapshot
             && *taken == pass
@@ -751,8 +758,8 @@ fn meta(ui: &mut egui::Ui, name: &str, value: &str) {
     ui.label(job);
 }
 
-/// 走了几成排成百分比，四舍五入到整数，如 `38%`。卡上与状态栏上走的是这同一个。
-fn percent(fraction: f32) -> String {
+/// 走了几成排成百分比，四舍五入到整数，如 `38%`。卡上、状态栏上与库屏工序段正在跑的那一行（`stages::Section`）走的是这同一个。
+pub(crate) fn percent(fraction: f32) -> String {
     format!("{:.0}%", (fraction * 100.0).round())
 }
 
@@ -802,7 +809,7 @@ fn running_ui(ui: &mut egui::Ui, live: &Live) -> bool {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if live.stopping {
                 // 按下停下到真的停之间隔着一步——**如实说出来**，不然人会以为按钮没反应。
-                ui.colored_label(ui.visuals().warn_fg_color, "正在停……走到下一步就停");
+                ui.colored_label(ui.visuals().warn_fg_color, STOPPING);
             } else if look::buttons(ui, |ui| {
                 ui.scope(|ui| {
                     // 设计稿 `.btn.warn`：白底、红字、红描边，与库屏「移除」同一档（拿主意的人裁，挂单 `Q834`）。
@@ -934,7 +941,7 @@ fn tone(ending: &Ending<()>) -> Tone {
 }
 
 /// 一段时长排成人看得懂的样子。**与报告那一侧同一个算法**
-/// （[`human_duration`]），免得同一趟活在两处印出不一样的数。
-fn elapsed(elapsed: Duration) -> String {
+/// （[`human_duration`]），免得同一趟活在两处印出不一样的数。库屏顶上「正在扫描 · 预计还需」也走它（`stages::Section`）。
+pub(crate) fn elapsed(elapsed: Duration) -> String {
     human_duration(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
 }
