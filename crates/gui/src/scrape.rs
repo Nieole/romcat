@@ -64,7 +64,7 @@ use romcat_core::scrape::online::{self, Credentials, Limits, Net};
 use romcat_core::scrape::{self, Field, Gather, Options, Profile, local};
 use romcat_core::site::Site;
 use romcat_core::sources::Source;
-use romcat_core::task::{Cutoff, Finished, Handle};
+use romcat_core::task::{Caption, Cutoff, Finished, Handle};
 use romcat_core::{verdict, workspace, zh};
 
 use crate::dialog::{Button, Dialog, Footer, Width};
@@ -104,6 +104,21 @@ pub const QUOTA_NOTE: &str = "将消耗 ScreenScraper 配额。配额按账号�
 
 /// 预估框右边那句（只用本地源时），照稿。
 pub const LOCAL_NOTE: &str = "仅使用本地数据源，不会产生网络请求。";
+
+/// 刮削那一趟副标题里说用了哪几样源（只用本地源时），照稿 `TASKS.scrape` / `TASKS.scrapeOne` 的 `sub`。
+const LOCAL_SOURCES: &str = "仅使用本地数据源";
+
+/// 同上，勾着联网源时。**稿没画联网那一趟**（稿上那句写死了本地），照本地那句的说法补上 ScreenScraper。
+const ONLINE_SOURCES: &str = "使用本地数据源与 ScreenScraper";
+
+/// 刮削那一趟副标题里那半句「一个请求都不发」，照稿 `TASKS.scrape` 的 `sub`。
+const NO_REQUESTS: &str = "不产生网络请求";
+
+/// 只用本地源那一趟在任务台上名字底下那一行副标题：「仅使用本地数据源 · 不产生网络请求」（设计稿 `TASKS.scrape` /
+/// `TASKS.scrapeSel` 的 `sub` 原话）。库屏工序段刮削那一行排的那一趟也是这一句：那一套只用本地源（[`whole_library`]）。
+pub(crate) fn local_subtitle() -> String {
+    format!("{LOCAL_SOURCES} · {NO_REQUESTS}")
+}
 
 /// 预估框右边那句（勾了联网，却一个可查的条目都没有时）：不警示（拿主意的人 2026-10-02 裁 `F-12`）——
 /// 汉化版在 ScreenScraper 眼里是「未识别 ROM」，整批都是没确认的条目时这一态很常见，警示一个零请求的趟是狼来了。
@@ -615,31 +630,61 @@ impl Panel {
             None
         };
         let workspace = self.workspace.clone();
-        let title = format!(
-            "刮削 · {} 个变体（{} · {}）",
-            thousands(self.scope_total()),
-            self.sweep.label(),
-            if self.online {
-                "含联网源"
-            } else {
-                "仅本地源"
-            },
-        );
+        let caption = self.caption();
         self.error = None;
         self.notice = None;
         self.running = Some(match site.catalog.file().map(Path::to_path_buf) {
-            Some(file) => tasks.queue(title, move |task| {
+            Some(file) => tasks.queue(caption, move |task| {
                 let mut site = Site::open_file(&workspace, &file, None)
                     .map_err(|error| format!("这份库在后台开不出来：{error}"))?;
                 run(&mut site, &workspace, &options, credentials, task)
             }),
             // 只活在内存里的库（合成数据走这条）分不出第二份连接：**就地跑完**。
             // 那时窗口确实会僵一下，但那份库小到几毫秒就走完——真库一律走上面那条。
-            None => tasks.run_here(title, |task| {
+            None => tasks.run_here(caption, |task| {
                 run(site, &workspace, &options, credentials, task)
             }),
         });
         self.close();
+    }
+
+    /// 这一趟在任务台上叫什么（差距 `S-21`，照设计稿 `TASKS.scrapeSel` 与 `TASKS.scrapeOne`）。
+    ///
+    /// - **名字说范围与采法**：勾选与筛选那两路是「刮削 · N 个作品（补缺）」——单位是作品，与标头那句、浏览屏「已选
+    ///   N 个作品」同一个数；「刮削此作品」那一路是「刮削 · 作品名」。
+    /// - **用了哪几样源、发不发请求交给副标题**，不塞进名字的括号里：只用本地源时照稿「仅使用本地数据源 · 不产生网络
+    ///   请求」；「刮削此作品」那一路照稿把采法挪到副标题头上（「补缺 · 仅使用本地数据源」）。勾着联网源时说清还用了
+    ///   ScreenScraper，请求数取预估框里那一格（[`estimate_face`]：与按下之前屏上写着的是同一个数）。
+    /// - **补缺那一趟续得上**（[`Caption::resumable`]）：停下之前采完的那些落进了中立库，下一趟补缺照输入指纹跳过它们。
+    ///   **重采那一趟不说**：再按一次重采绕过输入指纹全部重来，停下之前采完的也再采一遍。
+    fn caption(&self) -> Caption {
+        let sweep = self.sweep.label();
+        let caption = match &self.reach {
+            Reach::Filtered { works } | Reach::Picked { works } => {
+                let subtitle = match (self.online, &self.estimate) {
+                    (false, _) => local_subtitle(),
+                    (true, Some(account)) if account.requests > 0 => format!(
+                        "{ONLINE_SOURCES} · {} 个网络请求",
+                        estimate_face(account, true).requests
+                    ),
+                    (true, _) => format!("{ONLINE_SOURCES} · {NO_REQUESTS}"),
+                };
+                Caption::new(format!("刮削 · {} 个作品（{sweep}）", thousands(*works)))
+                    .with_subtitle(subtitle)
+            }
+            Reach::Work { name } => {
+                let sources = if self.online {
+                    ONLINE_SOURCES
+                } else {
+                    LOCAL_SOURCES
+                };
+                Caption::new(format!("刮削 · {name}")).with_subtitle(format!("{sweep} · {sources}"))
+            }
+        };
+        match self.sweep {
+            Gather::Fill => caption.resumable(),
+            Gather::Refresh => caption,
+        }
     }
 
     /// 任务台交回来一趟跑完的活。**不是自己那一趟就放过去**，返回「认领了没有」。

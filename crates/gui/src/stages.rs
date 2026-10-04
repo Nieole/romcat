@@ -64,10 +64,11 @@ use romcat_core::fs::RealFs;
 use romcat_core::identify;
 use romcat_core::identify::model::{Answers, DEFAULT_MODEL, Guessing, Limits, Price};
 use romcat_core::report::{human_bytes, thousands};
+use romcat_core::scrape::Gather;
 use romcat_core::scrape::pool::MediaPool;
 use romcat_core::site::Site;
 use romcat_core::stage::{Stage, StageRow, Stages};
-use romcat_core::task::{Cutoff, Ending, Finished, Handle};
+use romcat_core::task::{Caption, Cutoff, Ending, Finished, Handle};
 use romcat_core::triage::{self, batch::Coverage};
 use romcat_core::{title, verdict, workspace};
 
@@ -615,14 +616,10 @@ impl Section {
             return;
         }
         let workspace = self.workspace.clone();
-        // **照写那一趟在任务台历史上也看得出来**：丢掉手改的那一趟不许与平常那几趟长得一样。
-        let title = if knobs.force {
-            format!("{}（照写）", stage.label())
-        } else {
-            stage.label().to_string()
-        };
+        // 照写那一趟照写掉的是眼下点着名的那几份（下面才收掉那份名单）。
+        let caption = caption(stage, knobs, &site.catalog, self.conflicts.len());
         let id = match site.catalog.file().map(Path::to_path_buf) {
-            Some(file) => tasks.queue(title, move |task| {
+            Some(file) => tasks.queue(caption, move |task| {
                 // 后台这条线程自己开一份写得动的现场：`rusqlite::Connection` 不是
                 // `Sync`，界面那条线程手里那一份交不过来。
                 let mut site = Site::open_file(&workspace, &file, None)
@@ -631,7 +628,7 @@ impl Section {
             }),
             // 只活在内存里的库（合成数据走这条）分不出第二份连接：**就地跑完**。
             // 那时窗口确实会僵一下，但那份库小到几毫秒就走完——真库一律走上面那条。
-            None => tasks.run_here(title, |task| run(stage, knobs, site, &workspace, task)),
+            None => tasks.run_here(caption, |task| run(stage, knobs, site, &workspace, task)),
         };
         // **上一趟的回执一起收掉**：不收的话「识别 跑完了：…」会挂在新一趟正跑着的
         // 那一行旁边，读起来像这一趟已经跑完了。点名的那几份同理——那份名单说的是
@@ -1370,6 +1367,95 @@ fn run(
             "{}不排到任务台上：扫描从库屏根那一块排，裁决在待确认队列屏上做",
             stage.label()
         ))),
+    }
+}
+
+/// 这道工序排上任务台那一趟**在台上叫什么**（[`Caption`]）：名字、名字底下那一行（[`subtitle`]）、停了续不续得上。
+///
+/// **名字照稿 `TASKS` 各支的 `name`**（拿主意的人 2026-10-04 裁，票 `gui-draws-the-rest-of-the-design/02`）：「识别 · 全部变体」
+/// 「刮削 · 全部变体（补缺）」「整理标题 · 全部作品」「导出 · 格式」。照写那一趟是「导出 · 格式（照写 N 份）」，N 是这一趟照写掉的
+/// 那几份——丢掉手改的那一趟在任务台历史上不许与平常那几趟长得一样。格式名取适配器自己报的（`Adapter::name`），读不出来就不写。
+///
+/// **续得上**（[`Caption::resumable`]）只交核过的那几支，说不准的不交：
+/// - **识别**：上一趟没走完时只算还没识别的那些，算完的结论留在中立库里（`romcat_core::identify::run_task` 报的那句）。
+/// - **刮削**：这一支是补缺（[`scrape_run`]）。停下之前采完的落进了中立库，下一趟补缺照输入指纹跳过它们。
+/// - **导出**：写过的那几份连底本进了中立库，下一趟只重写变过的（`transfer::export_task` 报的那句）。
+/// - **整理标题续不上**：重折在清空与写回之间一步都不停，被按停的那一趟一个字节都没写（[`fold_titles_run`]）。
+fn caption(stage: Stage, knobs: ExportKnobs, catalog: &Catalog, 照写几份: usize) -> Caption {
+    // 导出那一支名字与副标题都要记着的那份设置：读一次，两处用。
+    let setup = if stage == Stage::Export {
+        catalog.export_setup().ok().flatten()
+    } else {
+        None
+    };
+    let name = match stage {
+        Stage::Identify => format!("{} · 全部变体", stage.label()),
+        Stage::Scrape => format!("{} · 全部变体（{}）", stage.label(), Gather::Fill.label()),
+        Stage::FoldTitles => format!("{} · 全部作品", stage.label()),
+        Stage::Export => {
+            let 格式 = setup
+                .as_ref()
+                .and_then(|setup| setup.adapter().ok())
+                .map(|adapter| format!(" · {}", adapter.name()))
+                .unwrap_or_default();
+            let 照写 = if knobs.force {
+                format!("（照写 {} 份）", thousands(照写几份 as u64))
+            } else {
+                String::new()
+            };
+            format!("{}{格式}{照写}", stage.label())
+        }
+        Stage::Scan | Stage::Triage => stage.label().to_string(),
+    };
+    let mut caption = Caption::new(name);
+    if let Some(subtitle) = subtitle(stage, knobs, catalog, setup.as_ref()) {
+        caption = caption.with_subtitle(subtitle);
+    }
+    match stage {
+        Stage::Identify | Stage::Scrape | Stage::Export => caption.resumable(),
+        Stage::FoldTitles | Stage::Scan | Stage::Triage => caption,
+    }
+}
+
+/// 这道工序排上任务台那一趟名字底下那一行副标题（设计稿 `TASKS` 各支的 `sub`，票 `gui-draws-the-rest-of-the-design/02`）：
+/// 它在做什么、碰不碰网络、写到哪儿。**排活那一刻就说得准的才说**——识别那个数是此刻库里的变体数，导出目录是记着的那份设置。
+///
+/// - **识别**：几个变体、本地运行（稿 `TASKS.identify`）。库里的变体数读不动时只说后半句。
+/// - **刮削**：只用本地源那一句（[`crate::scrape::LOCAL_SUBTITLE`]；这一支的选项就是只用本地源，[`scrape_run`]）。
+/// - **整理标题**：稿那句原话。
+/// - **导出**：导到哪儿、只写元数据（稿 `TASKS.export`）；开着**铺媒体**时这一趟还往导出目录里铺媒体，「仅写入元数据」
+///   就不是实话了，换成「写入元数据并铺媒体」（稿没画铺媒体那一档）。导出设置读不出来时不说（按下去之前已经拒过）。
+/// - 扫描、裁决不从这儿排（[`run`]），没有副标题。
+///
+/// `setup` 是导出那一支记着的那份设置（[`caption`] 读一次交进来），别的几支是 `None`。
+fn subtitle(
+    stage: Stage,
+    knobs: ExportKnobs,
+    catalog: &Catalog,
+    setup: Option<&ExportSetup>,
+) -> Option<String> {
+    const LOCAL_RUN: &str = "本地运行，不产生网络请求";
+    match stage {
+        Stage::Identify => Some(
+            match catalog.variant_total(&romcat_core::catalog::browse::VariantQuery::default()) {
+                Ok(variants) => format!("{} 个变体 · {LOCAL_RUN}", thousands(variants)),
+                Err(_) => LOCAL_RUN.to_string(),
+            },
+        ),
+        Stage::Scrape => Some(crate::scrape::local_subtitle()),
+        Stage::FoldTitles => Some("根据识别和刮削结果生成显示标题与排序标题".to_string()),
+        Stage::Export => setup.map(|setup| {
+            format!(
+                "导出到 {} · {}",
+                setup.out.display(),
+                if knobs.media {
+                    "写入元数据并铺媒体"
+                } else {
+                    "仅写入元数据"
+                }
+            )
+        }),
+        Stage::Scan | Stage::Triage => None,
     }
 }
 

@@ -54,7 +54,7 @@ use romcat_core::scan::{self, CheckpointOptions, Jobs, ScanOptions};
 use romcat_core::site::Site;
 use romcat_core::sources::{self, Source, SourceState, SourceStatus};
 use romcat_core::stage::Stage;
-use romcat_core::task::{Cutoff, Ending};
+use romcat_core::task::{Caption, Cutoff, Ending};
 
 use crate::clock::Clock;
 use crate::dialog::{Button, Dialog, Footer, Width};
@@ -221,6 +221,20 @@ pub const ROOT_NAME_HINT: &str = "根名（不填就按目录名取）";
 /// 两次存**断点**的最小间隔。**与命令行同一个数**（`romcat scan` 默认 15 秒）：
 /// 界面停下的那一趟与命令行 `--resume` 接的是同一个文件，两边攒的活也该一样多。
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// 下载一个数据源那一趟名字底下那一行副标题：下的是什么、要联网、只写工作目录。
+///
+/// **稿上那一句说的是份数与大小**（`TASKS.fetch` 的「395 份 DAT 文件 · 415.70 MiB 中文离线数据」），而那两个数
+/// 要连上源列过一遍才知道——排活那一刻说不出来。这里只说排活时说得准的那几样：下的是哪一样（名词照稿）、
+/// 这一趟要联网（与识别、刮削那几句「不产生网络请求」对着读）、写的只有工作目录。
+fn fetch_subtitle(source: Source) -> String {
+    let 下的是 = match source {
+        Source::Dat => "DAT 文件",
+        Source::Chinese => "中文离线数据",
+        Source::Switch => "Switch 数据库",
+    };
+    format!("{下的是} · 联网下载，只写入工作目录")
+}
 
 /// 一个根在这一屏上要画的那几格。
 #[derive(Debug, Clone)]
@@ -601,7 +615,11 @@ impl Screen {
         let workspace = self.workspace.clone();
         let library_fs = Arc::clone(&self.library_fs);
         let owned = name.to_string();
-        let title = format!("扫描 · {owned}");
+        // 名字底下那一行副标题是扫的那个根在盘上的路径（设计稿 `TASKS.scan` 的 `sub` 是 `S.rootPath`）。
+        // **续得上**：这一趟一定写断点、`resume` 开着（下面那几行），按停之后扫完的目录不再重扫。
+        let caption = Caption::new(format!("扫描 · {owned}"))
+            .with_subtitle(root.root.path.clone())
+            .resumable();
         // **断点路径在这条线程上折**：后台那条线程手里没有现场（`Site` 交不过去）。
         let checkpoint = site.checkpoint_path(&self.workspace, name);
         // **人工纠正也在这条线程上取**：它住沉淀库（票 `one-criterion-per-thing/07`），
@@ -618,7 +636,7 @@ impl Screen {
                 return;
             }
         };
-        let id = tasks.queue(title, move |task| {
+        let id = tasks.queue(caption, move |task| {
             // 后台这条线程自己开一份写得动的中立库：`rusqlite::Connection` 不是 `Sync`，
             // 界面那条线程手里那一份交不过来。
             let mut catalog = Catalog::open(&file).map_err(|error| error.to_string())?;
@@ -710,8 +728,9 @@ impl Screen {
             return;
         }
         let workspace = self.workspace.clone();
-        let title = format!("取回 · {}", source.label());
-        let id = tasks.queue(title, move |task| {
+        let caption = Caption::new(format!("取回 · {}", source.label()))
+            .with_subtitle(fetch_subtitle(source));
+        let id = tasks.queue(caption, move |task| {
             sources::refetch(source, &workspace, task).map(Product::Fetched)
         });
         self.error = None;

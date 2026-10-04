@@ -513,6 +513,71 @@ pub struct Record {
     pub ending: Ending<()>,
 }
 
+/// 一趟活在任务台上**叫什么**：名字，连同名字底下那一行**可选的副标题**——说清它在做什么
+/// （差量预览那一趟是「只读取库和设备上的目录，不写入文件」，扫描那一趟是扫的那个根的路径）。
+///
+/// 排活的那一处交进来（[`Board::queue`] 那几个入口都收它），任务台的快照原样交回
+/// （[`Live::subtitle`]、[`Waiting::subtitle`]）：**哪一句由排活的那一处说**，任务台只承接，界面只画
+/// （票 `gui-draws-the-rest-of-the-design/02`，收挂单 `Q1028`）。
+///
+/// **副标题是可选的**：只交一个名字（`&str`、`String`）照样排得上，那一趟屏上名字底下就不画那一行。
+///
+/// ## 续得上
+///
+/// 同一处还交一句**这一趟停了接不接得上**（[`Self::resumable`]）：已经做完的那部分留得下、下一趟从停下的地方接着走，
+/// 不从头来。任务屏正在跑那张卡底下照它说「停止后已完成的部分会保留，下次从中断的位置继续」。
+///
+/// **任务台答不出这一问**：它不知道活里写没写东西、写下的东西下一趟认不认（那是 [`Handle::halfway`] 那一层的事，
+/// 而那要等收场才知道）。所以由**排活的那一处**交——它知道自己排的是哪一个长入口、带的什么选项。**说不准的一律不交**：
+/// 默认是续不上，屏上就不说那一句；说错了比不说坏（拿主意的人 2026-10-04 裁，票 `gui-draws-the-rest-of-the-design/02`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Caption {
+    /// 这趟活叫什么。
+    pub name: String,
+    /// 名字底下那一行；没有就是 `None`。
+    pub subtitle: Option<String>,
+    /// 这一趟停了接得上：已经做完的部分留得下，下一趟从停下的地方接着走。默认 `false`。
+    pub resumable: bool,
+}
+
+impl Caption {
+    /// 只有名字、没有副标题的一份。
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            subtitle: None,
+            resumable: false,
+        }
+    }
+
+    /// 配上名字底下那一行。
+    #[must_use]
+    pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = Some(subtitle.into());
+        self
+    }
+
+    /// 说一句**这一趟停了接得上**（见类型文档「续得上」那一节）。只有说得准的排活入口才调它。
+    #[must_use]
+    pub fn resumable(mut self) -> Self {
+        self.resumable = true;
+        self
+    }
+}
+
+impl From<String> for Caption {
+    fn from(name: String) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<&str> for Caption {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
 /// 正在跑的那一趟：名字、已经跑了多久、走到哪一步了。
 #[derive(Debug, Clone)]
 pub struct Live {
@@ -520,6 +585,10 @@ pub struct Live {
     pub id: u64,
     /// 这趟活叫什么。
     pub name: String,
+    /// 名字底下那一行（[`Caption::subtitle`]）；排它时没交就是 `None`。
+    pub subtitle: Option<String>,
+    /// 这一趟停了接得上（[`Caption::resumable`]）；排它时没说就是 `false`。
+    pub resumable: bool,
     /// 已经跑了多久。
     pub elapsed: Duration,
     /// 走到哪一步了。
@@ -539,6 +608,19 @@ impl Live {
     pub fn remaining(&self) -> Option<Duration> {
         self.progress.remaining(self.elapsed)
     }
+}
+
+/// 排着队、还没轮到的那一趟（[`Board::queued`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waiting {
+    /// 任务号。
+    pub id: u64,
+    /// 这趟活叫什么。
+    pub name: String,
+    /// 名字底下那一行（[`Caption::subtitle`]）；排它时没交就是 `None`。
+    pub subtitle: Option<String>,
+    /// 这一趟停了接得上（[`Caption::resumable`]）；排它时没说就是 `false`。
+    pub resumable: bool,
 }
 
 /// 跑完了的一趟，连它的产物。
@@ -561,7 +643,7 @@ type Job<T> = Box<dyn FnOnce(&Handle) -> Result<T, Cutoff> + Send>;
 /// 一趟排上队、还没开跑的活。
 struct Queued<T> {
     id: u64,
-    name: String,
+    caption: Caption,
     job: Job<T>,
     /// **不留历史**的活（[`Board::queue_quiet`]）。
     quiet: bool,
@@ -570,7 +652,7 @@ struct Queued<T> {
 /// 正在跑的那一趟。
 struct Running<T> {
     id: u64,
-    name: String,
+    caption: Caption,
     /// **不留历史**的活（[`Board::queue_quiet`]）。
     quiet: bool,
     handle: Handle,
@@ -652,20 +734,27 @@ impl<T> Board<T> {
             .filter(|running| running.id == id)
             .map(|running| Live {
                 id: running.id,
-                name: running.name.clone(),
+                name: running.caption.name.clone(),
+                subtitle: running.caption.subtitle.clone(),
+                resumable: running.caption.resumable,
                 elapsed: running.started.elapsed(),
                 progress: running.handle.progress(),
                 stopping: running.handle.stopped(),
             })
     }
 
-    /// 排着队还没轮到的那几趟，按先来后到。**不留历史的活不列**（[`Self::queue_quiet`]）。
+    /// 排着队还没轮到的那几趟，按先来后到，各自连着名字与副标题。**不留历史的活不列**（[`Self::queue_quiet`]）。
     #[must_use]
-    pub fn queued(&self) -> Vec<(u64, String)> {
+    pub fn queued(&self) -> Vec<Waiting> {
         self.queued
             .iter()
             .filter(|job| !job.quiet)
-            .map(|job| (job.id, job.name.clone()))
+            .map(|job| Waiting {
+                id: job.id,
+                name: job.caption.name.clone(),
+                subtitle: job.caption.subtitle.clone(),
+                resumable: job.caption.resumable,
+            })
             .collect()
     }
 
@@ -686,12 +775,15 @@ impl<T: Send + 'static> Board<T> {
     ///
     /// 台上空着就当场开跑，不然排队等着。活本身收一个 [`Handle`]：报进度走它，
     /// 看有没有被叫停也走它。
+    ///
+    /// `caption` 是这一趟在台上叫什么（[`Caption`]）：只交一个名字（`&str`、`String`）也行，
+    /// 要名字底下那一行副标题就交 `Caption::new(名字).with_subtitle(那一句)`。
     pub fn queue(
         &mut self,
-        name: impl Into<String>,
+        caption: impl Into<Caption>,
         job: impl FnOnce(&Handle) -> Result<T, Cutoff> + Send + 'static,
     ) -> u64 {
-        self.enqueue(name.into(), Box::new(job), false)
+        self.enqueue(caption.into(), Box::new(job), false)
     }
 
     /// 排一趟**不留历史**的活（票 `gui-looks-like-the-design/21`，拿主意的人 2026-09-15 定）：跑法与 [`Self::queue`] 一样，
@@ -701,17 +793,17 @@ impl<T: Send + 'static> Board<T> {
     /// 进度要画的话按号问 [`Self::live`]。**人自己点起来的活一律走 [`Self::queue`]。**
     pub fn queue_quiet(
         &mut self,
-        name: impl Into<String>,
+        caption: impl Into<Caption>,
         job: impl FnOnce(&Handle) -> Result<T, Cutoff> + Send + 'static,
     ) -> u64 {
-        self.enqueue(name.into(), Box::new(job), true)
+        self.enqueue(caption.into(), Box::new(job), true)
     }
 
-    fn enqueue(&mut self, name: String, job: Job<T>, quiet: bool) -> u64 {
+    fn enqueue(&mut self, caption: Caption, job: Job<T>, quiet: bool) -> u64 {
         let id = self.take_id();
         self.queued.push_back(Queued {
             id,
-            name,
+            caption,
             job,
             quiet,
         });
@@ -727,21 +819,24 @@ impl<T: Send + 'static> Board<T> {
     ///
     /// **它不排队**：就地跑就是当场跑完，台上那个位子照旧归后台那趟用。所以别拿它跑
     /// 会与台上那趟抢同一份库的活——它存在的前提正是「这份库小到几毫秒就走完」。
+    ///
+    /// 收的 `caption` 与 [`Self::queue`] 是同一种，排活的那一处两条路交同一份。**副标题在这条路上用不着**：
+    /// 当场跑完的那一趟从不出现在 [`Self::running`] / [`Self::queued`] 里，历史只记名字。
     pub fn run_here(
         &mut self,
-        name: impl Into<String>,
+        caption: impl Into<Caption>,
         job: impl FnOnce(&Handle) -> Result<T, Cutoff>,
     ) -> u64 {
-        self.run_here_as(name.into(), job, false)
+        self.run_here_as(caption.into().name, job, false)
     }
 
     /// **就地跑一趟不留历史的活**：[`Self::run_here`] 的跑法，[`Self::queue_quiet`] 的账——产物照旧按号交回，收场不进历史。
     pub fn run_here_quiet(
         &mut self,
-        name: impl Into<String>,
+        caption: impl Into<Caption>,
         job: impl FnOnce(&Handle) -> Result<T, Cutoff>,
     ) -> u64 {
-        self.run_here_as(name.into(), job, true)
+        self.run_here_as(caption.into().name, job, true)
     }
 
     fn run_here_as(
@@ -787,7 +882,7 @@ impl<T: Send + 'static> Board<T> {
                     0,
                     Record {
                         id: job.id,
-                        name: job.name.clone(),
+                        name: job.caption.name.clone(),
                         elapsed: Duration::ZERO,
                         ended_at: crate::catalog::now_secs(),
                         ending: Ending::Stopped,
@@ -796,7 +891,7 @@ impl<T: Send + 'static> Board<T> {
             }
             self.finished.push_back(Finished {
                 id: job.id,
-                name: job.name,
+                name: job.caption.name,
                 elapsed: Duration::ZERO,
                 ended: Ending::Stopped,
             });
@@ -833,7 +928,7 @@ impl<T: Send + 'static> Board<T> {
         };
         self.settle(
             running.id,
-            running.name,
+            running.caption.name,
             running.quiet,
             elapsed,
             ended_at,
@@ -909,7 +1004,7 @@ impl<T: Send + 'static> Board<T> {
         });
         self.running = Some(Running {
             id: job.id,
-            name: job.name,
+            caption: job.caption,
             quiet: job.quiet,
             handle,
             started: Instant::now(),
@@ -1127,6 +1222,8 @@ mod tests {
         let live = Live {
             id: 1,
             name: "扫描 · 主库".to_string(),
+            subtitle: None,
+            resumable: false,
             elapsed: Duration::from_secs(60),
             progress: Progress {
                 step: "挨个文件过一遍".to_string(),
@@ -1214,7 +1311,15 @@ mod tests {
         });
         let 第二趟 = board.queue("第二趟", |_| Ok(2));
         assert_eq!(board.running().expect("有在跑的").id, 头一趟);
-        assert_eq!(board.queued(), vec![(第二趟, "第二趟".to_string())]);
+        assert_eq!(
+            board.queued(),
+            vec![Waiting {
+                id: 第二趟,
+                name: "第二趟".to_string(),
+                subtitle: None,
+                resumable: false,
+            }]
+        );
         assert_eq!(等到跑完(&mut board).id, 头一趟);
         assert_eq!(等到跑完(&mut board).id, 第二趟);
         assert!(!board.busy());
@@ -1377,7 +1482,15 @@ mod tests {
             "按号查得到它的进度，弹层里照它画"
         );
         let 人点的 = board.queue("算一遍容量", |_| Ok(3));
-        assert_eq!(board.queued(), vec![(人点的, "算一遍容量".to_string())]);
+        assert_eq!(
+            board.queued(),
+            vec![Waiting {
+                id: 人点的,
+                name: "算一遍容量".to_string(),
+                subtitle: None,
+                resumable: false,
+            }]
+        );
         drop(放行);
         let mut 收到 = Vec::new();
         while 收到.len() < 2 {
@@ -1388,6 +1501,124 @@ mod tests {
         assert_eq!(收到, vec![后台, 人点的]);
         assert_eq!(board.history().len(), 1, "只有人自己点起来的那一趟进历史");
         assert_eq!(board.history()[0].id, 人点的);
+    }
+
+    #[test]
+    fn 排一趟带副标题的活_正在跑与排着的那两份快照里都读得回那一句() {
+        // 票 `gui-draws-the-rest-of-the-design/02`（收挂单 `Q1028`）：任务屏上每一趟名字底下那一行副标题，
+        // 由排活的那一处交进来，任务台的快照原样交回——界面只画，一个字都不添。
+        let mut board: Board<u32> = Board::new();
+        let (放行, 等着) = std::sync::mpsc::channel::<()>();
+        let 跑着的 = board.queue(
+            Caption::new("生成差量预览 · 掌机").with_subtitle("只读取库和设备上的目录，不写入文件"),
+            move |_| {
+                let _ = 等着.recv();
+                Ok(1)
+            },
+        );
+        let 排着的 = board.queue(
+            Caption::new("同步 · 掌机").with_subtitle("先删除，再复制 · 共 3 个文件"),
+            |_| Ok(2),
+        );
+
+        let live = board.running().expect("有在跑的");
+        assert_eq!(
+            (live.id, live.name.as_str(), live.subtitle.as_deref()),
+            (
+                跑着的,
+                "生成差量预览 · 掌机",
+                Some("只读取库和设备上的目录，不写入文件")
+            ),
+        );
+        let 排着 = board.queued();
+        assert_eq!(排着.len(), 1, "{排着:?}");
+        assert_eq!(
+            (
+                排着[0].id,
+                排着[0].name.as_str(),
+                排着[0].subtitle.as_deref()
+            ),
+            (排着的, "同步 · 掌机", Some("先删除，再复制 · 共 3 个文件")),
+        );
+
+        // 轮到排着的那一趟时，它的副标题跟着它上了跑着的那一格。
+        drop(放行);
+        assert_eq!(等到跑完(&mut board).id, 跑着的);
+        assert_eq!(
+            board.running().and_then(|live| live.subtitle).as_deref(),
+            Some("先删除，再复制 · 共 3 个文件"),
+        );
+        assert_eq!(等到跑完(&mut board).id, 排着的);
+    }
+
+    #[test]
+    fn 排活时说了续得上的那一趟_快照里读得回_没说的一律当续不上() {
+        // 拿主意的人 2026-10-04 裁（票 `gui-draws-the-rest-of-the-design/02`）：「停止后已完成的部分会保留，下次从中断的位置
+        // 继续」只画在**排活的那一处说得准续得上**的那一趟上——由排活入口交，任务台原样交回，界面不按活名猜。
+        let mut board: Board<u32> = Board::new();
+        let (放行, 等着) = std::sync::mpsc::channel::<()>();
+        let 扫描 = board.queue(
+            Caption::new("扫描 · 主库")
+                .with_subtitle("/Volumes/新加卷/Game")
+                .resumable(),
+            move |_| {
+                let _ = 等着.recv();
+                Ok(1)
+            },
+        );
+        let 体检 = board.queue(Caption::new("库体检 · 全部根"), |_| Ok(2));
+        let 同步 = board.queue(Caption::new("同步 · 掌机").resumable(), |_| Ok(3));
+
+        let live = board.running().expect("有在跑的");
+        assert_eq!((live.id, live.resumable), (扫描, true));
+        let 排着: Vec<(u64, bool)> = board
+            .queued()
+            .iter()
+            .map(|waiting| (waiting.id, waiting.resumable))
+            .collect();
+        assert_eq!(排着, vec![(体检, false), (同步, true)]);
+
+        drop(放行);
+        assert_eq!(等到跑完(&mut board).id, 扫描);
+        assert_eq!(
+            board.running().map(|live| (live.id, live.resumable)),
+            Some((体检, false)),
+            "没说续得上的那一趟当成续不上",
+        );
+        assert_eq!(等到跑完(&mut board).id, 体检);
+        assert_eq!(等到跑完(&mut board).id, 同步);
+    }
+
+    #[test]
+    fn 不带副标题的旧调用照常排得上_快照里那一格是空的() {
+        // 副标题槽是**可选的**：只交一个名字的那几处一行不用改，屏上名字底下就不画那一行。
+        let mut board: Board<u32> = Board::new();
+        let (放行, 等着) = std::sync::mpsc::channel::<()>();
+        let 跑着的 = board.queue("算一遍容量", move |_| {
+            let _ = 等着.recv();
+            Ok(1)
+        });
+        let 名字 = format!("算「{}」加入后会怎样", "掌机");
+        let 排着的 = board.queue(名字, |_| Ok(2));
+
+        let live = board.running().expect("有在跑的");
+        assert_eq!((live.id, live.name.as_str()), (跑着的, "算一遍容量"));
+        assert_eq!(live.subtitle, None);
+        let 排着 = board.queued();
+        assert_eq!(
+            (
+                排着[0].id,
+                排着[0].name.as_str(),
+                排着[0].subtitle.as_deref()
+            ),
+            (排着的, "算「掌机」加入后会怎样", None),
+        );
+        drop(放行);
+        assert_eq!(等到跑完(&mut board).id, 跑着的);
+        assert_eq!(等到跑完(&mut board).id, 排着的);
+
+        let 就地 = board.run_here("就地跑", |_| Ok(3));
+        assert_eq!(board.poll().map(|done| done.id), Some(就地));
     }
 
     #[test]

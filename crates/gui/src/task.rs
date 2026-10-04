@@ -3,7 +3,7 @@
 //! ## 这一屏为什么是基础设施而不是一屏
 //!
 //! 核心库那几个长入口一趟要跑很久——扫一遍真库半个小时上下、识别一分钟上下（见台账 `docs/library-facts.md`）、
-//! 排一次**差量预览**在真机量级上 343 毫秒。它们跑在画帧那条线程上的话，窗口就是一块
+//! 排一次**差量预览**在真机量级上三百多毫秒（挂账 D156）。它们跑在画帧那条线程上的话，窗口就是一块
 //! 白板：期间切不了屏、滚不动列表、连「停下」都点不着。所以它们统统搬到画帧线程之外，
 //! 这一屏是那件事在界面上的落点。
 //!
@@ -67,15 +67,15 @@ pub enum Product {
     /// 算了一遍「**把这一批加进那个子库之后会怎样**」（票 `gui-looks-like-the-design/23`
     /// 的「加入子库」弹层，核心库 `sublibrary::addition`）。
     ///
-    /// **它排在台上而不是画帧线上**：那一趟要折一遍事实（真机 343 毫秒）。
+    /// **它排在台上而不是画帧线上**：那一趟要折一遍事实（真机上三百多毫秒，挂账 D156）。
     /// 弹层在它回来之前写「正在算…」，不写 0（挂单 `Q1181`）。
     Added(Box<romcat_core::sublibrary::Addition>),
     /// 跑完了一趟**识别**。装箱同上：这份账里带着整份命中率报告。
     ///
     /// **被按停的那一趟也会走到这儿**（`Outcome::interrupted` 记着），而且**必须**
-    /// 走到——识别起手就把上一轮的结论清干净，已经算出来的那些真的落进了中立库，
-    /// 库屏工序段那一行的数字要照它刷新。**它没有断点**：下一趟从头再算一遍
-    /// （`romcat_core::identify::run_task` 报的那句「停在半路」说的就是这件事）。
+    /// 走到——已经算出来的那些真的落进了中立库，库屏工序段那一行的数字要照它刷新。
+    /// **它不落断点文件，可下一趟接得上**：上一趟没走完时只算还没识别的那些
+    /// （`romcat_core::identify::run_task` 报的那句「下一趟接着算剩下的」说的就是这件事）。
     Identified(Box<romcat_core::identify::Outcome>),
     /// 跑完了一趟**折标题**：把识别与刮削的结论折成每个作品的**标题集合**。
     /// 装箱同上——这份报告里带着按语言、按类型、按来源的整份账。
@@ -143,6 +143,11 @@ pub enum Product {
 
 /// 这个界面上那张**任务台**。
 pub type Tasks = Board<Product>;
+
+/// 正在跑那张卡底下那一句（设计稿 `renderTasks()` 里 `T.half` 那一支的原话）：**只画在续得上的那一趟上**
+/// （[`Live::resumable`]，排活入口说得准才交）。续不上的那一趟什么都不说——稿上另一句「停止后不会保留任何结果」不画
+/// （拿主意的人 2026-10-04 裁，票 `gui-draws-the-rest-of-the-design/02`；收口时 `Q836` 的「不画」随之作废一半）。
+pub const RESUMABLE_NOTE: &str = "停止后已完成的部分会保留，下次从中断的位置继续。";
 
 /// **截图那一路定死的钟**：任务屏上跟着挂钟走的那几个数——正在跑那一趟的已用（约剩由它折）、
 /// 历史里每一趟的耗时与收场时刻——一律画成这里给的值。
@@ -336,6 +341,11 @@ impl Screen {
                 if 按了停下 {
                     stop = Some(live.id);
                 }
+                // 设计稿 `.help` 的 `margin-top:8px`：卡与这一句之间同小标题底下那一档。
+                if live.resumable {
+                    ui.add_space(space.section_title_gap);
+                    help(ui, RESUMABLE_NOTE);
+                }
             }
         }
 
@@ -346,7 +356,7 @@ impl Screen {
             help(ui, "没有等待中的任务。");
         }
         let [row_y, row_x] = space.queue_row_padding;
-        for (at, (id, name)) in queued.into_iter().enumerate() {
+        for (at, waiting) in queued.into_iter().enumerate() {
             // 一趟一张卡，卡与卡之间与小标题底下同一档（设计稿 `.col` 的 `gap:8px`）。
             if at > 0 {
                 ui.add_space(space.section_title_gap);
@@ -365,20 +375,36 @@ impl Screen {
                         ui.spacing_mut().item_spacing.x = step(1);
                         // 排第几：从 1 数的位次，不是任务号——人问的是「前面还有几趟」。
                         ui.label(font::mono((at + 1).to_string()).weak());
-                        ui.label(font::strong(&name));
+                        ui.label(font::strong(&waiting.name));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // **撤掉排着的这一趟**走任务台现成的入口（`Board::stop`）：还没开跑的
                             // 直接撤下，照任务台原有的账在历史里记一条已取消、交回排它的那一屏
                             // ——不然那一屏会一直记着「我还有一趟在排」。正在跑的那一趟不受影响。
                             // 设计稿 `.btn.ghost.sm`：小号幽灵按钮。
-                            look::small_buttons(ui, |ui| {
+                            let 移除 = look::small_buttons(ui, |ui| {
                                 ui.scope(|ui| {
                                     look::ghost_button(ui.visuals_mut());
                                     ui.button("移除")
                                 })
                                 .inner
                             })
-                            .clicked()
+                            .clicked();
+                            // 名字后头那一句副标题（设计稿 `.dim`，排活的那一处交给任务台的，`Waiting::subtitle`）：
+                            // 摆在名字与「移除」之间剩下的那一截里，放不下就截掉尾巴，不把「移除」挤出卡外。
+                            if let Some(subtitle) = &waiting.subtitle {
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(subtitle.as_str()).weak(),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+                            }
+                            移除
                         })
                         .inner
                     })
@@ -386,7 +412,7 @@ impl Screen {
                 },
             );
             if 移除 {
-                stop = Some(id);
+                stop = Some(waiting.id);
             }
         }
         if let Some(id) = stop {
@@ -742,7 +768,7 @@ fn status_line(live: &Live) -> String {
     line
 }
 
-/// 正在跑的那一趟：设计稿 `.runcard`——名字与「停止」一排，一条进度条，底下一排
+/// 正在跑的那一趟：设计稿 `.runcard`——名字（底下一行副标题）与「停止」一排，一条进度条，底下一排
 /// 进度、已用、约剩、在做什么。返回「按了停下没有」。
 fn running_ui(ui: &mut egui::Ui, live: &Live) -> bool {
     let tokens = Tokens::builtin();
@@ -750,10 +776,29 @@ fn running_ui(ui: &mut egui::Ui, live: &Live) -> bool {
     ui.spacing_mut().item_spacing.y = tokens.space.card_row_gap;
     let mut stopped = false;
     ui.horizontal(|ui| {
-        // 字号直接取令牌 `size-title`，**不走具名字号那一档**（`look::TITLE`）：开窗头一帧
-        // 观感基线才装上去，而那一帧手上这个 `Ui` 还带着装之前的样式——台上头一帧就有活在跑时
-        // （开场走完向导直接开扫就是这样），按名字找那一档会当场 panic。
-        ui.label(font::strong(&live.name).size(tokens.font.size_title));
+        // 设计稿 `.runcard` 头一格：名字（`h3`）底下一行副标题（`.mono.dim`，12 号）。两行之间不另垫缝，
+        // 隔开它们的只有照稿的行高；「停止」在右边，对着这两行竖直居中（`.runcard` 的 `align-items:center`）。
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // 字号直接取令牌 `size-title`，**不走具名字号那一档**（`look::TITLE`）：开窗头一帧
+            // 观感基线才装上去，而那一帧手上这个 `Ui` 还带着装之前的样式——台上头一帧就有活在跑时
+            // （开场走完向导直接开扫就是这样），按名字找那一档会当场 panic。
+            ui.label(
+                font::strong(&live.name)
+                    .size(tokens.font.size_title)
+                    .line_height(lh(tokens.font.size_title)),
+            );
+            // **那一句由排活的那一处说**（`Live::subtitle`，票 `gui-draws-the-rest-of-the-design/02`）：这一层一个字
+            // 都不添，没交就不画这一行。行高照稿里它所在那一行（正文字号的行距）。
+            if let Some(subtitle) = &live.subtitle {
+                ui.label(
+                    font::mono(subtitle.as_str())
+                        .size(tokens.font.size_small)
+                        .weak()
+                        .line_height(lh(tokens.font.size_body)),
+                );
+            }
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if live.stopping {
                 // 按下停下到真的停之间隔着一步——**如实说出来**，不然人会以为按钮没反应。
