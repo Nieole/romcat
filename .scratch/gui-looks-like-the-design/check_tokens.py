@@ -737,6 +737,17 @@ merge_literals = [
 ]
 literals += check_literals(merge_literals)
 
+# 刮削弹层（票 gui-draws-the-rest-of-the-design/17）：三栏 .sgrid、弹层内容区里块与块之间 .mbody、预估框 .est（格间、内边距、
+# 那三个数的字号、右边那句的最宽）。
+scrape_literals = [
+    (r"\.sgrid\{[^}]*?gap:(\d+)px", [(1, "space", "scrape-columns-gap", None)]),
+    (r"\.mbody\{[^}]*?gap:(\d+)px", [(1, "space", "dialog-body-gap", None)]),
+    (r"\.est\{[^}]*?gap:(\d+)px;[^}]*?padding:(\d+)px (\d+)px", [(1, "space", "estimate-gap", None), (2, "layout", "estimate-padding", 0), (3, "layout", "estimate-padding", 1)]),
+    (r"\.est \.v\{[^}]*?font-size:(\d+)px", [(1, "font", "size-estimate-value", None)]),
+    (r'<div class="help" style="max-width:(\d+)px">\$\{on\?', [(1, "layout", "estimate-note-width", None)]),
+]
+literals += check_literals(scrape_literals)
+
 # 作品详情页（票 gui-looks-like-the-design/15）：顶条、六个面、头上那一块与字卡、概览、变体卡、文件表、识别依据、
 # 元数据那一面、标题面、媒体那一面。
 work_literals = [

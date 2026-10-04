@@ -1829,19 +1829,21 @@ impl Screen {
             }
             // **范围就是这个作品底下那几个变体**：与屏头「刮削…」同一层弹层，只是交进去的名单不同。
             PageAction::Scrape => {
-                let keys: Vec<String> = self
-                    .work
-                    .as_ref()
-                    .map(|work| {
-                        work.variants
-                            .iter()
-                            .map(|variant| variant.row.key.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let Some(work) = self.work.as_ref() else {
+                    return;
+                };
+                let keys: Vec<String> = work
+                    .variants
+                    .iter()
+                    .map(|variant| variant.row.key.clone())
+                    .collect();
                 if !keys.is_empty() {
                     let shown = u64::try_from(keys.len()).unwrap_or(u64::MAX);
-                    self.scrape.open(keys, shown);
+                    // 标头那句说的是这一个作品：名字与详情页顶上写的是同一个（`F-1` 单个作品那一档）。
+                    let reach = crate::scrape::Reach::Work {
+                        name: self.work_title(work),
+                    };
+                    self.scrape.open(keys, shown, reach);
                 }
             }
         }

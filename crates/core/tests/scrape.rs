@@ -2739,6 +2739,8 @@ fn 估算的请求数与在线档实际发出去的一致() {
     let 账 = scrape::estimate::estimate(&现场.catalog, &options, 宽松()).expect("算得出");
     assert!(账.requests > 0, "有已确认的作品锚点，不该一个请求都不发");
     assert!(账.over_budget.is_none(), "这点量撞不到自设上限");
+    // 头一趟一条都没问过：有判据可查的，每一条都会问（弹层拿这个数分开「没有可查的」与「都查过了」）。
+    assert_eq!(账.queryable, 账.requests, "头一趟可查的该个个都问");
 
     let fetcher = CannedFetcher::new().with_prefix(
         "https://api.screenscraper.fr/api2/jeuInfos.php",
@@ -2756,6 +2758,10 @@ fn 估算的请求数与在线档实际发出去的一致() {
     // **第二趟补缺应当一个都不发**：判据没变，输入指纹就没变，整条跳过。
     let 二趟账 = scrape::estimate::estimate(&现场.catalog, &options, 宽松()).expect("算得出");
     assert_eq!(二趟账.requests, 0, "补缺不该为同一份判据再问一遍");
+    assert_eq!(
+        二趟账.queryable, 账.queryable,
+        "一个都不发，是因为都查过了，不是因为没有可查的——两种缘故弹层上说法不同"
+    );
     let 二趟 = 刮削在线带选项(&mut 现场, &fetcher, 宽松(), &options);
     assert_eq!(二趟.online.expect("有账").requests, 0);
 
@@ -2783,6 +2789,7 @@ fn 范围里一个已确认的作品都没有时在线档也不发请求() {
     assert_eq!(账.works, 0, "这两个变体一个作品都挂不上");
     assert_eq!(账.variants, 2, "范围就是这两个");
     assert_eq!(账.requests, 0);
+    assert_eq!(账.queryable, 0, "一个有判据可查的都没有");
 
     let fetcher = CannedFetcher::new();
     let outcome = 刮削在线带选项(&mut 现场, &fetcher, 宽松(), &options);

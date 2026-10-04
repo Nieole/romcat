@@ -462,6 +462,8 @@ pub struct Font {
     pub size_empty_title: f32,
     /// 差量账那五格里的数（设计稿 `.diff b`，等宽）。
     pub size_diff_value: f32,
+    /// 刮削弹层预估框里那三个数（设计稿 `.est .v`，等宽）。
+    pub size_estimate_value: f32,
     /// 行高，字号的倍数。
     pub line_height: f32,
     /// 左栏收成窄条后入口底下那个计数的字号。
@@ -519,6 +521,8 @@ pub struct Space {
     pub panel_padding: [f32; 2],
     /// 对话框内容区内边距：`[上下, 左右]`。
     pub dialog_padding: [f32; 2],
+    /// 弹层内容区里一块与一块之间（设计稿 `.mbody` 的 `gap`）。
+    pub dialog_body_gap: f32,
     /// 表格单元格内边距：`[上下, 左右]`。
     pub cell_padding: [f32; 2],
     /// 开场左栏内边距：`[上下, 左右]`。
@@ -565,6 +569,10 @@ pub struct Space {
     pub diff_tile_padding: [f32; 2],
     /// 差量账格与格之间。
     pub diff_gap: f32,
+    /// 刮削弹层三栏之间（设计稿 `.sgrid` 的 `gap`）。
+    pub scrape_columns_gap: f32,
+    /// 刮削弹层预估框里格与格、格与右边那句之间（设计稿 `.est` 的 `gap`）。
+    pub estimate_gap: f32,
     /// 差量预览计划那几步一行的内边距：`[上下, 左右]`（设计稿 `.steplist div`）。
     pub step_list_padding: [f32; 2],
     /// 那一行动作词、路径、大小几格之间（设计稿 `.steplist div` 的 `gap`）。
@@ -1103,6 +1111,10 @@ pub struct Layout {
     pub match_key_width: f32,
     /// 警示框内边距 `[上下, 左右]`（设计稿 `.warnbox` 的 `padding`）。
     pub warn_box_padding: [f32; 2],
+    /// 刮削弹层预估框的内边距 `[上下, 左右]`（设计稿 `.est` 的 `padding`）。
+    pub estimate_padding: [f32; 2],
+    /// 预估框右边那句最宽多宽，照它折行（设计稿 `updateEst()` 里那个 `.help` 的 `max-width`）。
+    pub estimate_note_width: f32,
     /// 能力档案平台表「平台 / 不能用时 / 覆盖」三列的宽；「设备直接能用」占余下的（设计稿 `DLG.subform` 的表头）。
     pub platform_table_columns: [f32; 3],
     /// 目标设置里「自定义」容量上限那一格的宽（设计稿 `DLG.subform`）。

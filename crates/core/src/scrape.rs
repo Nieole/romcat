@@ -1102,21 +1102,23 @@ pub(crate) fn fingerprint(parts: &[&str]) -> String {
 /// 漏在这里，`priorities.toml` 里那一行就会被报成「打错字」。
 #[must_use]
 pub fn all_source_names() -> Vec<&'static str> {
-    let mut out = vec![
-        "No-Intro",
-        "Redump",
-        "TOSEC",
-        "MAME",
-        "GoodNES",
+    let mut out = DAT_SOURCES.to_vec();
+    out.extend([
         local::FILENAME,
         local::LOCAL_MEDIA,
         fuzzy::SOURCE,
         fuzzy::ALIAS_SOURCE,
         online::SCREEN_SCRAPER,
-    ];
+    ]);
     out.extend(crate::adapter::names());
     out
 }
+
+/// **DAT 那几个源**在优先级表、报告与依据里各叫什么——每一份 DAT 仓库一个源。
+///
+/// 只写这一处：这一趟造哪几个 DAT 源（`sources`）、优先级表认哪几个名字（[`all_source_names`]）、
+/// 刮削弹层「DAT」那一行说它是哪几个，读的都是它（ADR-0024）。
+pub const DAT_SOURCES: [&str; 5] = ["No-Intro", "Redump", "TOSEC", "MAME", "GoodNES"];
 
 /// 这一档的全部源。**顺序无关**——谁排前面由优先级表说了算，不由这里说了算。
 ///
@@ -1132,14 +1134,11 @@ fn sources<'a>(
     summaries: Option<&'a dyn zh::Summaries>,
     rulings: &'a zh::Rulings,
 ) -> Result<Vec<Box<dyn Source + 'a>>, ScrapeError> {
-    let mut sources: Vec<Box<dyn Source + 'a>> = vec![
-        Box::new(dat::DatSource::new("No-Intro")),
-        Box::new(dat::DatSource::new("Redump")),
-        Box::new(dat::DatSource::new("TOSEC")),
-        Box::new(dat::DatSource::new("MAME")),
-        Box::new(dat::DatSource::new("GoodNES")),
-        Box::new(local::FilenameSource::new()),
-    ];
+    let mut sources: Vec<Box<dyn Source + 'a>> = DAT_SOURCES
+        .iter()
+        .map(|&name| Box::new(dat::DatSource::new(name)) as Box<dyn Source + 'a>)
+        .collect();
+    sources.push(Box::new(local::FilenameSource::new()));
     if media {
         sources.push(Box::new(local::LocalMediaSource::new()));
     }
@@ -1511,7 +1510,7 @@ fn ingest_all(
                 });
             }
             // 几种跳过**分开数**。它们不是同一件事，塞进同一个计数器，报告就只能说
-            // 「有 108 份没收进来」而说不出为什么——而它们的处置各不相同：超上限是
+            // 「有一百多份没收进来」（真库上那一趟的数见台账 `docs/library-facts.md`）而说不出为什么——而它们的处置各不相同：超上限是
             // 自己设的，读不动是 ADR-0021 的第三态，闸门拦下是要去看一眼的，
             // 源说没有则什么都不必做。
             pool::Ingested::TooBig { .. } => run.oversized_media += 1,

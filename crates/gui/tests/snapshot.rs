@@ -798,7 +798,21 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
 /// 同上，`疑似` 为真时多摆一个作品与它那一个变体，于是库里**有一对疑似同一作品**
 /// （[`疑似的作品`]）。别的态一律走 `false`，那几张基线的内容一个字都不动。
 fn 浏览现场_(收起两栏: bool, 疑似: bool) -> 浏览现场 {
-    let mut catalog = Catalog::open_in_memory().expect("开得出中立库");
+    搭浏览现场(收起两栏, 疑似, false)
+}
+
+/// 同 [`浏览现场_`]，`库在盘上` 为真时中立库写在工作目录里的一份文件上（而不是只活在内存里）。
+///
+/// 刮削弹层「按不动」那一张要它（票 `gui-draws-the-rest-of-the-design/17`）：只活在内存里的库，按「开始刮削」那一趟
+/// **就地跑完**、主窗口下一帧就认领了它；库在盘上时那一趟才真的排进任务台、排在占着位子的那一趟后头，「上一趟还没收场」
+/// 才停得住。主库原名照旧是 [`浏览的根`]，左栏那张卡上写的名字与别的几张一样。
+fn 搭浏览现场(收起两栏: bool, 疑似: bool, 库在盘上: bool) -> 浏览现场 {
+    let 目录 = temp_dir("gui-截图门-浏览");
+    let mut catalog = if 库在盘上 {
+        Catalog::create(&目录.path().join("中立库.sqlite"), 浏览的根).expect("建得出中立库")
+    } else {
+        Catalog::open_in_memory().expect("开得出中立库")
+    };
     romcat_core::catalog::roots::add_root(&catalog, None, 浏览的根, Path::new("/主库"))
         .expect("建得出根");
 
@@ -993,7 +1007,6 @@ fn 浏览现场_(收起两栏: bool, 疑似: bool) -> 浏览现场 {
             .expect("写得进刮削值");
     }
 
-    let 目录 = temp_dir("gui-截图门-浏览");
     if 收起两栏 {
         let at = romcat_core::workspace::gui_layout_path(目录.path());
         std::fs::create_dir_all(at.parent().expect("版式偏好有上一级目录")).expect("建得出目录");
@@ -1294,6 +1307,144 @@ fn 浏览_快捷键表_浅色() {
 #[test]
 fn 浏览_快捷键表_暗色() {
     拍快捷键表("browse/keys-sheet-dark", Theme::Dark);
+}
+
+// ——— 刮削弹层（票 `gui-draws-the-rest-of-the-design/17`） ———
+
+/// 刮削弹层拍哪一态（拿主意的人 2026-10-02 裁 `F-16`：新立这几张）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum 刮削态 {
+    /// 刚摊开：全选那一批，只用本地源、不收媒体、补缺。
+    默认,
+    /// 勾着联网源（工作目录里存着一套 ScreenScraper 账号），这一批有可查的条目：预估框换警示样、右边写配额那句。
+    联网,
+    /// 上一趟刮削还在任务台上（排在一趟占着位子的活后头）：「开始刮削」画灰，页脚左边常驻那句为什么。
+    /// 要 `demo` 那一路的占位活，不带它时这一态没人拍。
+    #[cfg_attr(not(feature = "demo"), allow(dead_code))]
+    按不动,
+}
+
+/// 给浏览屏那份库里每个变体记一份**内容哈希**：认出作品的那几个于是有判据可查，联网那一档真会发请求。
+fn 记上内容哈希(app: &mut App) {
+    let (_, site) = app.browse_and_site();
+    let variants = site.catalog.variants().expect("读得出变体");
+    let hashes: Vec<romcat_core::catalog::identify::ContentHash> = variants
+        .iter()
+        .enumerate()
+        .map(
+            |(at, variant)| romcat_core::catalog::identify::ContentHash {
+                key: variant.main_key.clone(),
+                inner: String::new(),
+                size: variant.bytes,
+                crc32: 0x1000_0000 + u32::try_from(at).unwrap_or(0),
+                looked: true,
+                header: None,
+                bare_size: None,
+                bare_crc32: None,
+                nkit: None,
+                sha1: None,
+                bare_sha1: None,
+            },
+        )
+        .collect();
+    site.catalog
+        .put_content_hashes(&hashes)
+        .expect("写得进内容哈希");
+}
+
+/// 搭好刮削弹层那一态、拍一张。CI 上跳过（[`该跳过`]）。
+///
+/// **先在窗外把这一层摊开**：表格全选、走屏头「刮削…」那一个入口（`browse::Screen::open_scrape`）——范围与标头那句
+/// 「N 个作品（M 个变体）」要浏览屏先把那一页取回来、数出变体数，所以先在一个无头上下文里画几帧。`按不动` 那一态再按一下
+/// 「开始刮削」（任务台上已经占着一趟，这一趟排在它后头），然后再摊开一次。
+///
+/// 台上有活时主窗口每一帧都请求下一帧（[`拍正在跑`] 那一条同一个缘故），`按不动` 那一态跑不到「不要重画」，于是数帧：
+/// 十帧够头两帧装字体与观感、弹层淡入跑完。
+#[track_caller]
+fn 拍刮削弹层(名字: &str, 主题: Theme, 态: 刮削态) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 搭浏览现场(false, false, 态 == 刮削态::按不动);
+    // DAT 取回过、中文离线源没摆：数据源那一栏 DAT 那一行写照稿那句小字，中文离线源那一行不勾、写核心库给的状态词
+    // ——一张图上两种写法都看得见。
+    shared::摆一份取回过的dat库(目录.path());
+    if 态 == 刮削态::联网 {
+        记上内容哈希(&mut app);
+        romcat_core::scrape::online::save_account(
+            目录.path(),
+            &romcat_core::scrape::online::Account {
+                dev_id: "截图门".to_owned(),
+                dev_password: "截图门".to_owned(),
+                ..Default::default()
+            },
+        )
+        .expect("存得下账号");
+    }
+    #[cfg(feature = "demo")]
+    let 占位 = (态 == 刮削态::按不动).then(|| 占位活::排上(app.tasks_mut(), "扫描 · 主库"));
+    #[cfg(not(feature = "demo"))]
+    assert!(态 != 刮削态::按不动, "按不动那一态要 demo 那一路的占位活");
+
+    let ctx = headless::context();
+    for _ in 0..3 {
+        headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    }
+    app.browse_and_site().0.picked_mut().select_all();
+    for _ in 0..3 {
+        headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    }
+    {
+        let (browse, site, tasks) = app.browse_site_and_tasks();
+        browse.open_scrape(&site.catalog);
+        match 态 {
+            刮削态::默认 => {}
+            刮削态::联网 => browse.scrape_mut().toggle_online(),
+            刮削态::按不动 => {
+                browse.scrape_mut().start(site, tasks);
+                assert!(
+                    browse.scrape().running().is_some() && !browse.scrape().is_open(),
+                    "前提：那一趟排上了任务台、这一层关了：{:?}",
+                    browse.scrape().error(),
+                );
+                browse.open_scrape(&site.catalog);
+            }
+        }
+        assert!(browse.scrape().is_open(), "前提：刮削那一层摊开着");
+    }
+    let mut harness = 搭一个(主题, move |ui| app.ui(ui));
+    if 态 == 刮削态::按不动 {
+        harness.run_steps(10);
+    } else {
+        harness.run();
+    }
+    拍下(harness, 名字);
+    #[cfg(feature = "demo")]
+    if let Some(占位) = 占位 {
+        占位.放行();
+    }
+    drop(目录);
+}
+
+#[test]
+fn 浏览_刮削弹层_浅色() {
+    拍刮削弹层("browse/scrape-light", Theme::Light, 刮削态::默认);
+}
+
+#[test]
+fn 浏览_刮削弹层_暗色() {
+    拍刮削弹层("browse/scrape-dark", Theme::Dark, 刮削态::默认);
+}
+
+#[test]
+fn 浏览_刮削弹层_联网开着_浅色() {
+    拍刮削弹层("browse/scrape-online-light", Theme::Light, 刮削态::联网);
+}
+
+#[cfg(feature = "demo")]
+#[test]
+fn 浏览_刮削弹层_按不动_浅色() {
+    拍刮削弹层("browse/scrape-blocked-light", Theme::Light, 刮削态::按不动);
 }
 
 /// 带「未关联作品」标签的那一行，正题至少露出这么多个字（不算截断补上的「…」）。
