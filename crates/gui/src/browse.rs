@@ -32,7 +32,8 @@
 //! 3. **这一行到底是什么**——右边那块面板：**作品** → **变体**（每个带置信度与
 //!    **依据**）→ **媒体**（封面与截图内嵌画出来，视频是一张抽出来的首帧加一个播放标，
 //!    [`crate::media`]）。一部作品的全部情况——变体与文件、元数据、标题、媒体、识别依据——在
-//!    **作品详情页**（[`work`]，双击一行或点「查看详情」打开，票 `gui-looks-like-the-design/15`）。
+//!    **作品详情页**（[`work`]，双击一行或点「查看详情」打开，票 `gui-looks-like-the-design/15`；
+//!    按 `Enter` 也开它——高亮着一部，或 Tab 走到一张卡、一行上，票 `gui-draws-the-rest-of-the-design/20`）。
 //!
 //! ## 收藏与合集：同一套成员关系
 //!
@@ -3788,14 +3789,7 @@ impl Screen {
                         scroll_highlight: self.scroll_to_highlight.take(),
                     }
                     .show(ui),
-                    BrowseView::Cards => {
-                        self.card_grid(ui, &site.catalog)
-                            .map(|row| crate::table::Opened {
-                                row,
-                                index: 0,
-                                page: false,
-                            })
-                    }
+                    BrowseView::Cards => self.card_grid(ui, &site.catalog),
                 };
                 // **画完表才问封面**：这一帧画到了哪几行，表画完才知道。
                 self.sync_shelf(ui.ctx(), site, writable, true);
@@ -3806,7 +3800,8 @@ impl Screen {
                 }
                 if let Some(opened) = opened {
                     self.open_work(&site.catalog, &opened.row.anchor);
-                    // **双击的打开作品详情页**，停在概览（设计稿双击一行 → 概览）。
+                    // **双击一行、拿着焦点按 `Enter` 的打开作品详情页**，停在概览（设计稿双击一行、
+                    // 卡上按 `Enter` → 概览）；同侧边详情「查看详情」那一路，都落在 `open_page`。
                     if opened.page {
                         self.open_page(work::Tab::Overview);
                     }
@@ -4186,11 +4181,7 @@ impl Screen {
     }
 
     /// 卡片墙走自己的分页窗：仅封面开关不影响主列表；封面与无封面字卡都复用 [`Shelf`]。
-    fn card_grid(
-        &mut self,
-        ui: &mut egui::Ui,
-        catalog: &Catalog,
-    ) -> Option<romcat_core::catalog::browse::WorkRow> {
+    fn card_grid(&mut self, ui: &mut egui::Ui, catalog: &Catalog) -> Option<crate::table::Opened> {
         // 设计稿 `.cgrid`：横向 16、纵向 20；不能借全局控件间距，否则卡片墙会挤成表格。
         // **纵向那 20 点不另摆**：卡面下半截那一段是定高的（令牌 `card-info-height`），排与排之间那道缝由它
         // 底下空着的那一截给（挂单 `Q1468`）。
@@ -4385,13 +4376,9 @@ impl Screen {
                                     row.confidence_label(),
                                 );
                             });
-                            // **拿着焦点时按下的 `Enter` / `空格`**：egui 把它也算成点了一下（`clicked`），
-                            // 这一下不走指针那一路，归底下那条无障碍路接。
-                            let 键盘 = response.has_focus()
-                                && ui.input(|input| {
-                                    input.key_pressed(egui::Key::Enter)
-                                        || input.key_pressed(egui::Key::Space)
-                                });
+                            // **这一下是指针点的，还是拿着焦点时按的 `Enter` / `空格`**（[`crate::keys::press`]）：
+                            // egui 把后者也算成点了一下（`clicked`），而两样要的不是同一件事。
+                            let 按的 = crate::keys::press(&response);
                             // **选择框照稿**（`.cv-ck`，挂单 `Q1418`）：指针靠近时露出来；勾着的常驻（不然人移开鼠标
                             // 就看不出哪几张勾着）；墙上有一张勾着时每张都露出来（稿 `.cgrid.picking`）——那时人正在挑一批，
                             // 每张都该看得出「这儿能勾」。**勾着的卡封面不描圈**，只亮这一枚（拿主意的人 2026-10-04 裁）。
@@ -4405,8 +4392,7 @@ impl Screen {
                                 );
                                 // 选择框压在整卡点击区里；egui 只会把那一下归给先注册的整卡。
                                 // 因此按整卡响应给出的命中坐标二次判定，而不是再注册一个竞争响应。
-                                if response.clicked()
-                                    && !键盘
+                                if 按的 == Some(crate::keys::Press::Pointer)
                                     && response
                                         .interact_pointer_pos()
                                         .is_some_and(|pos| check_rect.contains(pos))
@@ -4433,21 +4419,26 @@ impl Screen {
                                     at,
                                 });
                             }
-                            if response.clicked() && !键盘 && !点了选择 {
-                                self.highlight = Some(高亮这一张());
-                                opened = Some(row.clone());
-                            }
-                            // **Tab + Enter 那条无障碍路**：Tab 走到一张卡，`Enter` 打开它、`空格` 勾选它，由这张卡
-                            // 自己接（设计稿 `card&&(e.key==='Enter'||e.key===' ')` 那一段）。算不算数照全仓
-                            // 键盘入口那一处判（挂单 `Q1143`）：有弹层、有浮层摊着时不接。
-                            if 键盘 && crate::keys::allowed(ui.ctx(), Some(response.id)) {
-                                if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                                    self.highlight = Some(高亮这一张());
-                                    opened = Some(row.clone());
-                                }
-                                if ui.input(|input| input.key_pressed(egui::Key::Space)) {
+                            // 打开它：指针点的开侧边详情；**Tab + Enter 那条无障碍路**——Tab 走到一张卡，`Enter`
+                            // 开它的作品详情页、停在概览，`空格` 勾选它，由这张卡自己接（设计稿
+                            // `card&&(e.key==='Enter'||e.key===' ')` 那一段：`openWD(i,'overview')`，
+                            // 票 `gui-draws-the-rest-of-the-design/20`）。键盘那两下有弹层、有浮层摊着时不接（挂单 `Q1143`）。
+                            let 开详情页 = match 按的 {
+                                Some(crate::keys::Press::Pointer) if !点了选择 => Some(false),
+                                Some(crate::keys::Press::Key(egui::Key::Enter)) => Some(true),
+                                Some(crate::keys::Press::Key(egui::Key::Space)) => {
                                     self.picked.toggle(&row.anchor);
+                                    None
                                 }
+                                _ => None,
+                            };
+                            if let Some(page) = 开详情页 {
+                                self.highlight = Some(高亮这一张());
+                                opened = Some(crate::table::Opened {
+                                    row: row.clone(),
+                                    index,
+                                    page,
+                                });
                             }
                         }
                     });

@@ -452,14 +452,15 @@ impl Picked {
     }
 }
 
-/// 表上这一帧**点开**的那一行。
+/// 表上（或卡片墙上）这一帧**点开**的那一行。
 #[derive(Debug, Clone)]
 pub struct Opened {
     /// 那一行的一份拷贝：侧边详情要在它滚出视口之后照样摆得出来。
     pub row: WorkRow,
-    /// 它在全序里是第几行。
+    /// 它在摆着它的那一种视图的全序里是第几行（卡片墙只摆有封面的那一批时，是那一批里的第几张）。
     pub index: u64,
-    /// **双击**的：打开作品详情页，而不只是侧边详情（设计稿双击一行打开作品详情）。
+    /// **双击、或者拿着焦点按 `Enter`** 的：打开作品详情页，而不只是侧边详情（设计稿双击一行、
+    /// 卡上按 `Enter` 都是 `openWD(i,'overview')`，票 `gui-draws-the-rest-of-the-design/20`）。
     pub page: bool,
 }
 
@@ -781,15 +782,24 @@ impl Table<'_> {
                                 at,
                             });
                         }
-                        if response.clicked() {
+                        // **点开这一行**：指针点的，还是拿着焦点时按的 `Enter` / `空格`（[`crate::keys::press`]，
+                        // egui 把后者也算成点了一下这一行）。**双击、`Enter` 开作品详情页**、停在概览
+                        // （Tab + Enter 那条无障碍路同卡片墙上那张卡，票 `gui-draws-the-rest-of-the-design/20`）；
+                        // `空格` 照旧同点一下这一行。键盘那两下有弹层、有浮层摊着时不接（挂单 `Q1143`）。
+                        let 开详情页 = match crate::keys::press(&response) {
+                            // 双击的第二下松开时，`clicked` 与 `double_clicked` 同时为真。
+                            Some(crate::keys::Press::Pointer) => Some(response.double_clicked()),
+                            Some(crate::keys::Press::Key(键)) => Some(键 == egui::Key::Enter),
+                            _ => None,
+                        };
+                        if let Some(page) = 开详情页 {
                             *highlight = Some(高亮这一行());
                             // **交一份拷贝出去而不只是下标**：详情面板要在这一行滚出视口
                             // 之后照样摆得出来。只有真点中的那一帧才复制。
                             opened = Some(Opened {
                                 row: work.clone(),
                                 index,
-                                // 双击的第二下松开时，`clicked` 与 `double_clicked` 同时为真。
-                                page: response.double_clicked(),
+                                page,
                             });
                         }
                     });
