@@ -2472,8 +2472,11 @@ impl Screen {
     /// （[`dialog::screen_has_keys`]），不在这一屏自己记着「计划书开着没有」：别处开出来的
     /// 弹层盖在这一屏上头时，照样得拦（[`Screen::drop_stale_plan`] 说了它与核心库那道门各管
     /// 各的什么）。
+    ///
+    /// 这几道门与窗口那一层的快捷键问的是同一个函数（[`crate::keys::allowed`]，挂单 `Q1143`）：
+    /// 有浮层摊着（一个下拉）时同样不接。
     fn keyboard(&mut self, ctx: &egui::Context, site: &mut Site) {
-        if !dialog::screen_has_keys(ctx) || ctx.egui_wants_keyboard_input() {
+        if !crate::keys::allowed(ctx, None) {
             return;
         }
         let (mut pass, mut reject, mut set_aside, mut undo, mut back, mut forth) =

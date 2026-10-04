@@ -104,7 +104,9 @@ use crate::layout;
 use crate::look;
 use crate::media::{Gallery, Shelf};
 use crate::scrape;
-use crate::table::{Picked, SPAN, Table, UNLINKED_LABEL, Window, tail_fit, unlinked_title};
+use crate::table::{
+    Highlight, Picked, SPAN, Table, UNLINKED_LABEL, Window, tail_fit, unlinked_title,
+};
 use crate::task::{Product, Tasks};
 use crate::toast::{self, Toast};
 use crate::tokens::Tokens;
@@ -188,44 +190,48 @@ fn paint_card_overlay(
     cover: egui::Vec2,
     cover_radius: u8,
     row: &romcat_core::catalog::browse::WorkRow,
-    chosen: bool,
-    focused: bool,
 ) {
     let cover = egui::Rect::from_min_size(card.min, cover);
     let painter = ui.painter_at(card);
     let tokens = Tokens::builtin();
     let platform = row.platforms.first().map_or("未知", String::as_str);
     let color = tokens.color.platform.of(platform);
-    let font = egui::FontId::new(tokens.font.size_caption_plus, font::strong_family());
+    let layout = &tokens.layout;
+    let [平台标顶, 中文标顶] = layout.cover_tag_top;
+    // 封面右上角那两枚标（设计稿 `.cv-plat`、`.cv-zh`）：右沿离封面右沿 `cover-tag-inset`、一样高、左右留白一样，
+    // 圆角取 `radius.small`（稿上 4px），字竖直居中；两枚右沿对齐，一上一下。
+    let 摆一枚 =
+        |字: std::sync::Arc<egui::Galley>, 顶: f32, 底色: egui::Color32, 字色: egui::Color32| {
+            let 右 = cover.right() - layout.cover_tag_inset;
+            let 标 = egui::Rect::from_min_max(
+                egui::pos2(
+                    右 - 字.size().x - 2.0 * layout.cover_tag_padding,
+                    cover.top() + 顶,
+                ),
+                egui::pos2(右, cover.top() + 顶 + layout.cover_tag_height),
+            );
+            painter.rect_filled(标, tokens.radius.small, 底色);
+            painter.galley(标.center() - 字.size() / 2.0, 字, 字色);
+        };
     // 平台标上的字取令牌 `[color.platform-badge]`：稿上 `.cv-plat` 两套主题都是白字。
     let 字色 = tokens.color.platform_badge.ink;
-    let galley = painter.layout_no_wrap(platform.to_owned(), font.clone(), 字色);
-    let badge = egui::Rect::from_min_size(
-        egui::pos2(cover.right() - galley.size().x - 14.0, cover.top() + 8.0),
-        galley.size() + egui::vec2(12.0, 6.0),
+    let font = egui::FontId::new(tokens.font.size_caption_plus, font::strong_family());
+    摆一枚(
+        painter.layout_no_wrap(platform.to_owned(), font, 字色),
+        平台标顶,
+        color,
+        字色,
     );
-    painter.rect_filled(badge, tokens.radius.small, color);
-    painter.galley(badge.center() - galley.size() / 2.0, galley, 字色);
+    // **中文标照稿**（设计稿 `.cv-zh`，挂单 `Q1237`）：压在封面上的深色半透明底、白字，两套主题共用
+    // （令牌 `[color.cover-tag]`——底下是画面，不是界面底色）；11 号、拉丁与数字 600 字重（中文落回常规体）。
     if !row.chinese.is_empty() {
-        let text = row.chinese.join(" / ");
-        let galley = painter.layout_no_wrap(
-            text,
-            egui::FontId::proportional(tokens.font.size_caption_plus),
-            ui.visuals().strong_text_color(),
-        );
-        let badge = egui::Rect::from_min_size(
-            egui::pos2(cover.right() - galley.size().x - 14.0, cover.top() + 34.0),
-            galley.size() + egui::vec2(12.0, 6.0),
-        );
-        painter.rect_filled(
-            badge,
-            tokens.radius.small,
-            ui.visuals().window_fill.gamma_multiply(0.85),
-        );
-        painter.galley(
-            badge.center() - galley.size() / 2.0,
-            galley,
-            ui.visuals().strong_text_color(),
+        let 标色 = &tokens.color.cover_tag;
+        let font = egui::FontId::new(tokens.font.size_caption, font::strong_family());
+        摆一枚(
+            painter.layout_no_wrap(row.chinese.join(" / "), font, 标色.ink),
+            中文标顶,
+            标色.shade,
+            标色.ink,
         );
     }
     // 设计稿里的 `.cv-tier` 是被封面圆角裁掉的 3px 色带，不是一条另起圆角的横线。
@@ -239,17 +245,44 @@ fn paint_card_overlay(
         cover_radius,
         look::tier_color(row.tier(), ui.visuals()),
     );
-    if chosen || focused {
-        // 选中态和键盘焦点都只落在 `.cover`，且只画一圈：整卡焦点框和双层光晕会把
-        // 信息区误认成卡面的一部分。
-        painter.rect_stroke(
+}
+
+/// 卡片封面外头那几圈，宽取令牌 `card-ring`：**高亮**那一张（`两圈` 为真）强调色一圈、外头再一圈强调浅色
+/// （设计稿 `.gcard[aria-selected="true"] .cover`，挂单 `Q1142`）；拿着键盘焦点的那一张只描强调色那一圈
+/// （`.gcard:focus-visible .cover`）。**只围封面**，不围整张卡：围整张卡会把底下那几行字也读成卡面的一部分。
+///
+/// 照稿描在封面**外头**（稿上是 `box-shadow` 的扩展）：先描外头那一圈强调浅色，再把强调色那一圈压在它里沿。
+fn paint_cover_rings(ui: &egui::Ui, cover: egui::Rect, cover_radius: u8, 两圈: bool) {
+    let [强调, 外圈] = Tokens::builtin().layout.card_ring;
+    let 宽 = if 两圈 { 外圈 } else { 强调 };
+    // 卡面那块画布只有卡那么大，外头那几圈得另拿一支画笔：照旧裁在卡片墙的视口里，只是封面顶整个
+    // 露在视口里时准它越过视口上沿那几点——那一截落在 `.cgrid` 的上内边距里，不压任何东西；
+    // 不越的话，墙顶上那一排（以及刚滚到顶的那一排）的那几圈缺上半边。
+    let 视口 = ui.clip_rect();
+    let mut 画得到 = 视口;
+    if cover.top() >= 视口.top() {
+        画得到.min.y = cover.top() - 宽;
+    }
+    let 外头 = egui::Painter::new(
+        ui.ctx().clone(),
+        ui.layer_id(),
+        cover.expand(宽).intersect(画得到),
+    );
+    let palette = look::palette(ui);
+    if 两圈 {
+        外头.rect_stroke(
             cover,
             cover_radius,
-            ui.visuals().selection.stroke,
-            // 卡面贴着分配区边缘；往外画会被裁掉三条边。描在卡面内侧才能完整围住它。
-            egui::StrokeKind::Inside,
+            egui::Stroke::new(外圈, palette.accent_soft),
+            egui::StrokeKind::Outside,
         );
     }
+    外头.rect_stroke(
+        cover,
+        cover_radius,
+        egui::Stroke::new(强调, palette.accent),
+        egui::StrokeKind::Outside,
+    );
 }
 
 /// 界面上人工写下的叫法，**依据**里写这一句。
@@ -470,9 +503,9 @@ pub struct Screen {
     /// （设计稿 `doMerge` / `doSplit` 末尾那一下）。提示条停够了就跟着没了——
     /// 之后照旧走待确认屏的**裁决记录**。
     just_landed: Option<i64>,
-    /// 高亮的是哪一行（全序下标）。
-    focused: Option<u64>,
-    /// 选中了哪几行——**批量操作的作用范围**。与 [`Self::focused`] 不是一回事。
+    /// **高亮**的是哪一部（[`Highlight`]）：存身份，表格与卡片墙共用这一个（挂单 `Q1142`）。
+    highlight: Option<Highlight>,
+    /// 选中了哪几行——**批量操作的作用范围**。与 [`Self::highlight`] 不是一回事。
     picked: Picked,
     /// 点开的那一行是谁。**记身份不记下标**：换个筛选表就重排了，下标会指到别人身上。
     opened: Option<WorkAnchor>,
@@ -651,8 +684,8 @@ pub struct Screen {
     /// 这一帧右键按在哪一行；表格与卡片墙各自落一份进来，这一屏取走、开出菜单
     /// （[`Self::settle_menu`]）。
     menu_click: Option<crate::table::RightClicked>,
-    /// `↑` `↓` 刚挪过高亮：下一帧画表格时把那一行滚进视口。
-    scroll_to_focused: bool,
+    /// `↑` `↓` 刚挪过高亮：下一帧画表格或卡片墙时把那一行（全序下标，眼下摆着的那扇窗里的）滚进视口。
+    scroll_to_highlight: Option<u64>,
     /// `⌘/Ctrl+F` 按过了：画搜索框的那一帧把光标放进去（[`Self::focus_search`]）。
     focus_search: bool,
 }
@@ -701,7 +734,7 @@ impl Screen {
             merging: None,
             splitting: None,
             just_landed: None,
-            focused: None,
+            highlight: None,
             picked: Picked::default(),
             opened: None,
             work: None,
@@ -759,7 +792,7 @@ impl Screen {
             scroll_to: None,
             menu: menu::Menu::default(),
             menu_click: None,
-            scroll_to_focused: false,
+            scroll_to_highlight: None,
             focus_search: false,
         }
     }
@@ -782,16 +815,7 @@ impl Screen {
         self.priorities = priorities;
     }
 
-    /// **眼下摆的是卡片墙吗**：键盘那几下要问它（`App::browse_keys`）。
-    ///
-    /// 挪高亮那几下走的是表格背后那扇窗的**行序号**（[`Self::step_focus`]），而卡片墙背后
-    /// 是另一扇窗、另一份查询——同一个数在两边指的不是同一行（挂单 `Q1142`）。
-    #[must_use]
-    pub fn showing_cards(&self) -> bool {
-        self.view == BrowseView::Cards
-    }
-
-    /// 换成卡片墙（实测与截图门用）。    /// 切到卡片视图；供窗口恢复偏好与界面测试走同一份状态。
+    /// 切到卡片墙；供窗口恢复偏好与界面测试走同一份状态。
     pub fn show_cards(&mut self) {
         self.view = BrowseView::Cards;
     }
@@ -2823,8 +2847,10 @@ impl Screen {
     ///
     /// **换排序与换筛选丢掉的东西不一样**：
     ///
-    /// - 换**排序**只是把同一批行重排。高亮那一份是个全序下标，重排之后它会指到另一行
-    ///   身上，所以丢掉；**选中的那几行一条都不动**——筛出来的还是同一批，人勾了两百行
+    /// - 换**排序**只是把同一批行重排。高亮存的是身份（[`Highlight`]），重排之后照样认得出是哪一部，
+    ///   **可照旧丢掉**：重排之后它多半已经不在视口附近，窗里缓着的那一段里找不着它，`↑` `↓` 会从头一行
+    ///   起步、`空格` `Enter` 什么都不做（[`Self::locate_highlight`]），而那一行还描着选中的底——留着比丢掉更费解
+    ///   （挂单 `Q1467`）。**选中的那几行一条都不动**——筛出来的还是同一批，人勾了两百行
     ///   再按一下「容量」表头，选中不该凭空消失。
     /// - 换**筛选**才是换了一批行。这时全选说的「当前筛出来的这一批」已经不是同一批，
     ///   留着它会让批量操作作用到人根本没看见的行上，所以连选中一起清掉；点开的那一行
@@ -2836,7 +2862,7 @@ impl Screen {
         }
         let refiltered = !self.window.query().same_filter(&self.query);
         if self.window.query() != &self.query {
-            self.focused = None;
+            self.highlight = None;
             self.window.set_query(self.query.clone());
         }
         if refiltered {
@@ -3543,37 +3569,42 @@ impl Screen {
 
     // ── 键盘那几下（`App::shortcuts` 调，票 `gui-looks-like-the-design/14`） ──
 
-    /// **高亮往上／往下挪一行**（`↑` `↓`）。一行都没高亮时落在头一行上。
+    /// **高亮往上／往下挪一行**（`↑` `↓`），侧边详情跟着它。一部都没高亮时落在头一行上。
     ///
-    /// 只在**表格**那一路走得动：卡片墙背后那扇窗是另一份查询（只看有封面的那一批），
-    /// 下标不在同一个空间里（挂单 `Q1142`）。
+    /// **表格与卡片墙都走这一处**（挂单 `Q1142`）：挪的是同一个高亮（存身份），按的是眼下摆着的那扇窗的
+    /// 次序——卡片墙只摆有封面的那一批时，墙上的「下一张」不是表格上的「下一行」。
     pub fn step_focus(&mut self, catalog: &Catalog, 往下: bool) {
-        let 总数 = self.window.total();
-        if 总数 == 0 {
+        let from = self.highlight.clone();
+        let Some(next) = self.shown_window().step(catalog, from.as_ref(), 往下) else {
             return;
-        }
-        let at = match self.focused {
-            None => 0,
-            Some(at) if 往下 => (at + 1).min(总数 - 1),
-            Some(at) => at.saturating_sub(1),
         };
-        self.focused = Some(at);
-        self.scroll_focused_into_view();
-        if let Some(anchor) = self.window.row(catalog, at).map(|row| row.anchor.clone()) {
-            self.open_work(catalog, &anchor);
+        // 挪到的那一行要看得见：滚过去要那一行的矩形，只有画它的那一帧才有——留个记号，
+        // 画表格或卡片墙的那一帧落实（表格交给 `scroll_to_row`，卡片墙交给 `scroll_to_rect`）。
+        self.scroll_to_highlight = Some(next.near);
+        let anchor = next.anchor.clone();
+        self.highlight = Some(next);
+        self.open_work(catalog, &anchor);
+    }
+
+    /// 眼下摆着的那扇窗：表格背后那一扇，或者卡片墙背后那一扇（可以只要有封面的）。
+    fn shown_window(&mut self) -> &mut Window {
+        match self.view {
+            BrowseView::Table => &mut self.window,
+            BrowseView::Cards => &mut self.card_window,
         }
     }
 
-    /// 挪到的那一行要看得见：交给表格那一层下一帧滚过去。
-    fn scroll_focused_into_view(&mut self) {
-        // 表格那一层每帧按 `focused` 画选中底色；滚过去由 egui 的 `scroll_to_rect` 办，
-        // 而那要拿得到那一行的矩形——只有画它的那一帧才有。这里留个记号就够了。
-        self.scroll_to_focused = true;
+    /// 同 [`Self::shown_window`]，只读。
+    fn shown(&self) -> &Window {
+        match self.view {
+            BrowseView::Table => &self.window,
+            BrowseView::Cards => &self.card_window,
+        }
     }
 
     /// **打开高亮那一行的作品详情页**（`Enter`）。
     pub fn open_focused(&mut self, catalog: &Catalog) {
-        let Some(anchor) = self.focused_anchor(catalog) else {
+        let Some(anchor) = self.locate_highlight(catalog) else {
             return;
         };
         self.open_work(catalog, &anchor);
@@ -3582,7 +3613,7 @@ impl Screen {
 
     /// **勾选 / 取消勾选高亮那一行**（`空格`）。
     pub fn toggle_pick_focused(&mut self, catalog: &Catalog) {
-        if let Some(anchor) = self.focused_anchor(catalog) {
+        if let Some(anchor) = self.locate_highlight(catalog) {
             self.picked.toggle(&anchor);
         }
     }
@@ -3594,7 +3625,7 @@ impl Screen {
 
     /// **收藏 / 取消收藏高亮那一行**（`F`）。
     pub fn toggle_favorite_focused(&mut self, site: &Site, tasks: &mut Tasks) {
-        let Some(anchor) = self.focused_anchor(&site.catalog) else {
+        let Some(anchor) = self.locate_highlight(&site.catalog) else {
             return;
         };
         self.toggle_favorite_of(site, tasks, &anchor);
@@ -3602,15 +3633,31 @@ impl Screen {
 
     /// **编辑高亮那一行的元数据**（`E`）。
     pub fn edit_focused(&mut self, catalog: &Catalog) {
-        if let Some(anchor) = self.focused_anchor(catalog) {
+        if let Some(anchor) = self.locate_highlight(catalog) {
             self.edit_meta_of(catalog, &anchor);
         }
     }
 
-    /// 高亮那一行是谁；一行都没高亮（或者读不到）时是 `None`。
-    fn focused_anchor(&mut self, catalog: &Catalog) -> Option<WorkAnchor> {
-        let at = self.focused?;
-        self.window.row(catalog, at).map(|row| row.anchor.clone())
+    /// 高亮那一部是谁——**只认眼下摆着的那扇窗里找得着的**；一部都没高亮、或者它不在这一视图里时是 `None`。
+    ///
+    /// 卡片墙只摆有封面的那一批时，表格上高亮的那一部可能压根不在墙上：那时 `空格` 勾中它、`F` 收藏它，
+    /// 是动了人看不见的那一部，比什么都不发生坏得多。
+    ///
+    /// 找着了顺手把它眼下在第几行记回去（[`Highlight::near`]）：窗里缓着的那一段换掉之后，下一回去那儿取。
+    fn locate_highlight(&mut self, catalog: &Catalog) -> Option<WorkAnchor> {
+        let highlight = self.highlight.clone()?;
+        let at = self.shown_window().find(catalog, &highlight)?;
+        self.highlight = Some(Highlight {
+            anchor: highlight.anchor.clone(),
+            near: at,
+        });
+        Some(highlight.anchor)
+    }
+
+    /// **高亮**的是哪一部（[`Highlight`]）：表格与卡片墙共用这一个。一部都没高亮时是 `None`。
+    #[must_use]
+    pub fn highlighted(&self) -> Option<&WorkAnchor> {
+        self.highlight.as_ref().map(|it| &it.anchor)
     }
 
     /// **把光标放进搜索框**（`⌘/Ctrl+F`）：留个记号，画那一框的那一帧落实。
@@ -3728,7 +3775,7 @@ impl Screen {
                         catalog: &site.catalog,
                         window: &mut self.window,
                         query: &mut self.query,
-                        focused: &mut self.focused,
+                        highlight: &mut self.highlight,
                         picked: &mut self.picked,
                         scroll_to: self.scroll_to,
                         rules: &self.rules,
@@ -3738,7 +3785,7 @@ impl Screen {
                             None
                         },
                         menu: &mut self.menu_click,
-                        scroll_focused: std::mem::take(&mut self.scroll_to_focused),
+                        scroll_highlight: self.scroll_to_highlight.take(),
                     }
                     .show(ui),
                     BrowseView::Cards => {
@@ -4145,8 +4192,9 @@ impl Screen {
         catalog: &Catalog,
     ) -> Option<romcat_core::catalog::browse::WorkRow> {
         // 设计稿 `.cgrid`：横向 16、纵向 20；不能借全局控件间距，否则卡片墙会挤成表格。
+        // **纵向那 20 点不另摆**：卡面下半截那一段是定高的（令牌 `card-info-height`），排与排之间那道缝由它
+        // 底下空着的那一截给（挂单 `Q1468`）。
         const CARD_GAP_X: f32 = 16.0;
-        const CARD_GAP_Y: f32 = 20.0;
         let min_width = self.card_size.width();
         // 左右留白属于可滚动内容；滚动条本身必须贴着中栏右边界，不能被留白再往里推。
         let grid_width = (ui.available_width() - 32.0).max(min_width);
@@ -4158,9 +4206,15 @@ impl Screen {
         let width = (grid_width - CARD_GAP_X * (columns - 1) as f32) / columns as f32;
         let cover = egui::vec2(width, width / Tokens::builtin().layout.card_cover_ratio);
         let card_height = cover.y + Tokens::builtin().layout.card_info_height;
-        let card_row_height = card_height + CARD_GAP_Y;
         let card_rows = self.card_window.total().div_ceil(columns) as usize;
         let mut opened = None;
+        // `↑` `↓` 刚挪过高亮：把那一张所在的那一排滚进视口（滚最少那么多，同表格那一路）。
+        // 一排占多高要连上 `show_rows` 自己加的那一道行距——它照这个数切排。
+        let 滚到 = self.scroll_to_highlight.take();
+        // 墙上有没有一张勾着：有的话每张卡都露出那枚选择框（稿 `.cgrid.picking`）。
+        let 有勾着的 = !self.picked.is_empty(self.card_window.total());
+        let 一排 = card_height + ui.spacing().item_spacing.y;
+        let [_, 外圈] = Tokens::builtin().layout.card_ring;
         // `.cgrid` 的上内边距：即使不显示组头，工具条与第一排卡也不能贴在一起。
         ui.add_space(14.0);
         if self.group_cards {
@@ -4208,7 +4262,19 @@ impl Screen {
         egui::ScrollArea::vertical()
             .id_salt("卡片墙")
             .auto_shrink([false, false])
-            .show_rows(ui, card_row_height, card_rows, |ui, visible| {
+            // **告诉它的一排多高，得是真摆出来的那么高**：从前多报了 20 点（那道纵向缝），而每一排实际只占
+            // `card_height`——头一排一换，整面墙往下跳 20 点；`↓` 照它折出来的位置滚，也滚不准。
+            .show_rows(ui, card_height, card_rows, |ui, visible| {
+                if let Some(at) = 滚到 {
+                    // 那一排不一定在这一帧画到的那几排里——照排数折出它的位置，交给 `scroll_to_rect`。
+                    // 连外头那一圈一起滚进来：封面顶贴着视口上沿时，那一圈的上半边就被裁掉了。
+                    let 第几排 = (at / columns) as f32 - visible.start as f32;
+                    let 封面 = egui::Rect::from_min_size(
+                        egui::pos2(ui.max_rect().left(), ui.max_rect().top() + 第几排 * 一排),
+                        cover,
+                    );
+                    ui.scroll_to_rect(封面.expand(外圈), None);
+                }
                 if self.group_cards {
                     let first = visible.start as u64 * columns;
                     if let Some(row) = self.card_window.row(catalog, first) {
@@ -4279,15 +4345,22 @@ impl Screen {
                             };
                             self.shelf.card(&mut card, cover, &row, &title);
                             let chosen = self.picked.contains(&row.anchor);
-                            paint_card_overlay(
-                                &card,
-                                rect,
-                                cover,
-                                cover_radius,
-                                &row,
-                                chosen,
-                                response.has_focus(),
-                            );
+                            // **高亮认身份**（挂单 `Q1142`）：表格上高亮的那一部切到墙上，照样是这一张描着那两圈。
+                            let 高亮 = self
+                                .highlight
+                                .as_ref()
+                                .is_some_and(|it| it.anchor == row.anchor);
+                            paint_card_overlay(&card, rect, cover, cover_radius, &row);
+                            // 封面外头那几圈：高亮的那一张两圈，拿着键盘焦点的那一张一圈（两样都占时照稿高亮盖过焦点）；
+                            // 勾着的不描（拿主意的人 2026-10-04 裁，照稿）。
+                            if 高亮 || response.has_focus() {
+                                paint_cover_rings(
+                                    &card,
+                                    egui::Rect::from_min_size(rect.min, cover),
+                                    cover_radius,
+                                    高亮,
+                                );
+                            }
                             card.add_space(look::step(2));
                             // 卡面里可以有标题，卡面外仍要有稳定的文字区：滚动时才不会只剩
                             // 一大片色块，也让有封面与无封面卡的扫描节奏一致。
@@ -4312,42 +4385,28 @@ impl Screen {
                                     row.confidence_label(),
                                 );
                             });
-                            // 未选卡只在鼠标靠近时露出选择框；已选卡必须常驻勾选，不能让人移开
-                            // 鼠标就看不出哪些卡被选中了。
+                            // **拿着焦点时按下的 `Enter` / `空格`**：egui 把它也算成点了一下（`clicked`），
+                            // 这一下不走指针那一路，归底下那条无障碍路接。
+                            let 键盘 = response.has_focus()
+                                && ui.input(|input| {
+                                    input.key_pressed(egui::Key::Enter)
+                                        || input.key_pressed(egui::Key::Space)
+                                });
+                            // **选择框照稿**（`.cv-ck`，挂单 `Q1418`）：指针靠近时露出来；勾着的常驻（不然人移开鼠标
+                            // 就看不出哪几张勾着）；墙上有一张勾着时每张都露出来（稿 `.cgrid.picking`）——那时人正在挑一批，
+                            // 每张都该看得出「这儿能勾」。**勾着的卡封面不描圈**，只亮这一枚（拿主意的人 2026-10-04 裁）。
                             let mut 点了选择 = false;
-                            if response.hovered() || chosen {
-                                let check_rect = egui::Rect::from_min_size(
-                                    rect.min + egui::vec2(8.0, 8.0),
-                                    egui::vec2(22.0, 22.0),
+                            if response.hovered() || chosen || 有勾着的 {
+                                let check_rect = look::cover_check(
+                                    ui.painter(),
+                                    egui::Rect::from_min_size(rect.min, cover),
+                                    chosen,
+                                    look::palette(ui),
                                 );
-                                let check_fill = if chosen {
-                                    ui.visuals().selection.bg_fill
-                                } else {
-                                    ui.visuals().window_fill.gamma_multiply(0.75)
-                                };
-                                ui.painter().rect_filled(
-                                    check_rect,
-                                    Tokens::builtin().radius.small,
-                                    check_fill,
-                                );
-                                ui.painter().rect_stroke(
-                                    check_rect,
-                                    Tokens::builtin().radius.small,
-                                    ui.visuals().widgets.active.bg_stroke,
-                                    egui::StrokeKind::Inside,
-                                );
-                                if chosen {
-                                    ui.painter().text(
-                                        check_rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "✓",
-                                        egui::FontId::proportional(16.0),
-                                        ui.visuals().strong_text_color(),
-                                    );
-                                }
                                 // 选择框压在整卡点击区里；egui 只会把那一下归给先注册的整卡。
                                 // 因此按整卡响应给出的命中坐标二次判定，而不是再注册一个竞争响应。
                                 if response.clicked()
+                                    && !键盘
                                     && response
                                         .interact_pointer_pos()
                                         .is_some_and(|pos| check_rect.contains(pos))
@@ -4356,30 +4415,39 @@ impl Screen {
                                     点了选择 = true;
                                 }
                             }
+                            // 点开、右键都把**高亮**挪到这一张（设计稿 `sel:i` 与 `contextmenu` 那一路都先 `S.sel=i`）。
+                            // **不抢键盘焦点**：一张卡拿着焦点时，窗口那一层的单键快捷键整个让给它（焦点那条路，
+                            // [`crate::keys::allowed`]）——点一下卡就抢焦点的话，点完 `↓` 挪不动高亮。焦点只由 Tab 给。
+                            let 高亮这一张 = || Highlight {
+                                anchor: row.anchor.clone(),
+                                near: index,
+                            };
                             // **右键摊菜单**：与表格那一路认的是同一件事，交出来的也是同一份
                             // （`table::RightClicked`）——菜单上摆哪几项由 [`menu`] 一处说了算。
                             if response.secondary_clicked()
                                 && let Some(at) = response.interact_pointer_pos()
                             {
-                                response.request_focus();
+                                self.highlight = Some(高亮这一张());
                                 self.menu_click = Some(crate::table::RightClicked {
                                     row: row.clone(),
                                     at,
                                 });
                             }
-                            if response.clicked() && !点了选择 {
-                                response.request_focus();
+                            if response.clicked() && !键盘 && !点了选择 {
+                                self.highlight = Some(高亮这一张());
                                 opened = Some(row.clone());
                             }
-                            if response.has_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            {
-                                opened = Some(row.clone());
-                            }
-                            if response.has_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Space))
-                            {
-                                self.picked.toggle(&row.anchor);
+                            // **Tab + Enter 那条无障碍路**：Tab 走到一张卡，`Enter` 打开它、`空格` 勾选它，由这张卡
+                            // 自己接（设计稿 `card&&(e.key==='Enter'||e.key===' ')` 那一段）。算不算数照全仓
+                            // 键盘入口那一处判（挂单 `Q1143`）：有弹层、有浮层摊着时不接。
+                            if 键盘 && crate::keys::allowed(ui.ctx(), Some(response.id)) {
+                                if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                                    self.highlight = Some(高亮这一张());
+                                    opened = Some(row.clone());
+                                }
+                                if ui.input(|input| input.key_pressed(egui::Key::Space)) {
+                                    self.picked.toggle(&row.anchor);
+                                }
                             }
                         }
                     });

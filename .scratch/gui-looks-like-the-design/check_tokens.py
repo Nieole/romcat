@@ -630,6 +630,15 @@ card_literals = [
     (r"\.cgrid\{--cw:(\d+)px", [(1, "layout", "card-widths", 1)]),
     (r"\.cgrid\.s\{--cw:(\d+)px\}\.cgrid\.l\{--cw:(\d+)px\}", [(1, "layout", "card-widths", 0), (2, "layout", "card-widths", 2)]),
     (r"\.cv-tier\{[^}]*?height:(\d+)px", [(1, "layout", "tier-bar", None)]),
+    # 卡片墙上高亮那一张（票 gui-draws-the-rest-of-the-design/06）：强调色一圈、外头再一圈强调浅色；拿着焦点的只有头一圈。
+    (r'\.gcard\[aria-selected="true"\] \.cover\{box-shadow:0 0 0 (\d+)px var\(--accent\),0 0 0 (\d+)px var\(--accent-soft\)', [(1, "layout", "card-ring", 0), (2, "layout", "card-ring", 1)]),
+    (r"\.gcard:focus-visible \.cover\{box-shadow:0 0 0 (\d+)px var\(--accent\)\}", [(1, "layout", "card-ring", 0)]),
+    # 封面右上角那两枚标（.cv-plat、.cv-zh，票 06 收挂单 Q1237）：右沿、离顶、高、左右留白、圆角；中文标的字号与字重。
+    (r"\.cv-plat\{position:absolute;right:(\d+)px;top:(\d+)px;height:(\d+)px;padding:0 (\d+)px;border-radius:(\d+)px", [(1, "layout", "cover-tag-inset", None), (2, "layout", "cover-tag-top", 0), (3, "layout", "cover-tag-height", None), (4, "layout", "cover-tag-padding", None), (5, "radius", "small", None)]),
+    (r"\.cv-zh\{position:absolute;right:(\d+)px;top:(\d+)px;height:(\d+)px;padding:0 (\d+)px;border-radius:(\d+)px;[^}]*?font-size:(\d+)px;font-weight:(\d+)", [(1, "layout", "cover-tag-inset", None), (2, "layout", "cover-tag-top", 1), (3, "layout", "cover-tag-height", None), (4, "layout", "cover-tag-padding", None), (5, "radius", "small", None), (6, "font", "size-caption", None), (7, "font", "weight-strong", None)]),
+    # 封面上那枚选择框（.cv-ck，票 06 收挂单 Q1418）：位置、边长、圆角、描边宽；勾上之后那道勾的框与粗。
+    (r"\.cv-ck\{position:absolute;left:(\d+)px;top:(\d+)px;width:(\d+)px;height:(\d+)px;border-radius:(\d+)px;[^}]*?border:([\d.]+)px", [(1, "layout", "cover-check-inset", None), (2, "layout", "cover-check-inset", None), (3, "layout", "cover-check", None), (4, "layout", "cover-check", None), (5, "layout", "cover-check-radius", None), (6, "layout", "cover-check-stroke", None)]),
+    (r'\.cv-ck\.on::after\{content:"";width:(\d+)px;height:(\d+)px;border-left:(\d+)px solid #fff;border-bottom:(\d+)px', [(1, "layout", "cover-check-tick", 0), (2, "layout", "cover-check-tick", 1), (3, "layout", "cover-check-tick-stroke", None), (4, "layout", "cover-check-tick-stroke", None)]),
 ]
 literals += check_literals(card_literals)
 m = re.search(r"\.cover\{[^}]*?aspect-ratio:(\d+)/(\d+)", html)
@@ -836,6 +845,36 @@ for selector, prop, section, key, what in [
         problems.append(f"{what}: 找不到 {selector} 的 {prop}")
     elif not same_color(m[1], want):
         problems.append(f"{what} {section}.{key}: 设计稿 {selector} 的 {prop} 是 {m[1]}，令牌是 {want}")
+
+# 封面上那枚中文标的颜色（.cv-zh）与那枚选择框的颜色（.cv-ck），都写死在规则上、暗色主题不另写，令牌里两套主题共用；票 gui-draws-the-rest-of-the-design/06）：
+# 没勾时的底与描边、勾上之后那道勾；勾上之后的底与描边得是主题强调色（界面取 palette.accent，这里只核稿上说的是它）。
+m = re.search(r"\.cv-ck\{[^}]*?background:(rgba\([^)]*\));border:[\d.]+px solid (rgba\([^)]*\))", html)
+if not m:
+    problems.append("找不到 .cv-ck 的 background 与 border")
+else:
+    for got, key in [(m[1], "shade"), (m[2], "edge")]:
+        literals += 1
+        want = tokens["color"]["cover-check"][key]
+        if not same_color(got, want):
+            problems.append(f"封面选择框 {key}: 设计稿 .cv-ck 是 {got}，令牌是 {want}")
+m = re.search(r"\.cv-zh\{[^}]*?background:(rgba\([^)]*\));color:(#[0-9A-Fa-f]+)", html)
+if not m:
+    problems.append("找不到 .cv-zh 的 background 与 color")
+else:
+    for got, key in [(m[1], "shade"), (m[2], "ink")]:
+        literals += 1
+        want = tokens["color"]["cover-tag"][key]
+        if not same_color(got, want):
+            problems.append(f"封面中文标 {key}: 设计稿 .cv-zh 是 {got}，令牌是 {want}")
+m = re.search(r"\.cv-ck\.on::after\{[^}]*?border-left:\d+px solid (#[0-9A-Fa-f]+)", html)
+literals += 1
+if not m:
+    problems.append("找不到 .cv-ck.on::after 的 border-left 颜色")
+elif not same_color(m[1], tokens["color"]["cover-check"]["tick"]):
+    problems.append(f"封面选择框 tick: 设计稿 .cv-ck.on::after 是 {m[1]}，令牌是 {tokens['color']['cover-check']['tick']}")
+literals += 1
+if not re.search(r"\.cv-ck\.on\{background:var\(--accent\);border-color:var\(--accent\)\}", html):
+    problems.append("设计稿 .cv-ck.on 的底与描边不再是 var(--accent)：界面那一处取的是 palette.accent，得跟着改")
 
 # 字体族：等宽照设计稿 --mono-latin 逐个对上（去掉末尾的通用族 monospace）；无衬线只挑了设计稿 --sans 里的几个，
 # 核的是「每一个都在稿里、先后次序一样」。

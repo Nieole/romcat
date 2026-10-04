@@ -1028,7 +1028,11 @@ enum 浏览态 {
     筛空,
     /// 左右两栏都收着（从工作目录的版式偏好读出来的），点一下那一行认不出作品的。
     两栏收起,
-    /// 卡片墙：按平台分组，混合有封面和无封面的字卡。
+    /// 卡片墙：按平台分组，混合有封面和无封面的字卡。勾上的那一张记着汉化（[`给1942记上汉化`]），卡面上挂着中文标
+    /// （设计稿 `.cv-zh`）。滚一截之后先勾上第二排右边那一张（[`卡片墙勾上的那一张`]），
+    /// 再点一下第二排正中那一张（[`卡片墙点开的那一张`]）：勾上的那一张左上角亮着强调色底加白勾的选择框、封面不描圈
+    /// （设计稿 `.cv-ck.on`），墙上其余每张都露出没勾的那一枚（`.cgrid.picking`）；点开的那一张封面外头描着高亮那两圈
+    /// （`.gcard[aria-selected]`），侧边详情摆它。
     卡片,
     /// **整理建议**（票 `gui-looks-like-the-design/17`）：左栏「疑似同一作品」那颗标签按下去，
     /// 表里只剩那一对；点开其中一个，侧边详情里摆着那张建议卡——凭什么、两颗按钮。
@@ -1040,6 +1044,12 @@ enum 浏览态 {
 /// 刚够**第二排整排连卡面下半截一起露出来**——认不出作品的那几张排在那儿，那枚「未关联作品」
 /// 就画在下半截那一行上。再多滚就把头一排整个推出去了，这一张同时要说得清「墙从头是什么样」。
 const 卡片墙滚一截: f32 = 110.0;
+
+/// 卡片墙那一态点开的那一张：第二排正中那张卡下半截那一行标题（滚一截之后整排露着）。
+const 卡片墙点开的那一张: &str = "圣剑传说 2";
+
+/// 卡片墙那一态勾上的那一张：第二排右边那张卡下半截那一行标题。
+const 卡片墙勾上的那一张: &str = "1942 - MS汉化组";
 
 /// 那一行认不出作品的（长路径那一个）元数据那一格写着的字：一条候选都没有、一样元数据都没采到。
 /// 整张表只有它一行是这个词，按它就是点那一行。
@@ -1067,6 +1077,14 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
     if 态 == 浏览态::行首封面 {
         记上汉化记号(&mut app);
         // 窗口开起来那一刻已经问过左栏那几维；记号是后写的，重读一遍，左栏「中文」那一维与头上那一句才说同一件事。
+        let (browse, site) = app.browse_and_site();
+        browse.refresh(site);
+    }
+    // **卡片墙那一态给勾上的那一张记上汉化**（票 `gui-draws-the-rest-of-the-design/06`，收挂单 `Q1237`）：卡面上那枚
+    // 中文标照稿（`.cv-zh`）要有一张基线盖得住，而第二排（滚完那一截之后封面顶露得出来的那一排）里只有它本来就是
+    // 汉化版（「MS汉化组」）。记完重读一遍浏览屏，左栏那几维与卡面说同一件事。
+    if 态 == 浏览态::卡片 {
+        给1942记上汉化(&mut app);
         let (browse, site) = app.browse_and_site();
         browse.refresh(site);
     }
@@ -1104,6 +1122,13 @@ fn 拍浏览(名字: &str, 主题: Theme, 态: 浏览态) {
         harness.event(egui::Event::PointerGone);
         harness.step();
         harness.run_steps(5);
+        // **先勾上第二排右边那一张，再点第二排正中那一张**（票 `gui-draws-the-rest-of-the-design/06`）：滚完之后
+        // 第二排整排露着，高亮那两圈、勾上那一枚选择框上下左右都在视口里。勾法照人的操作：点一下那张卡（高亮挪过去），
+        // 按空格勾上它；再点正中那一张，高亮挪走，右边那张只剩「勾着」那一态。
+        按(&mut harness, 卡片墙勾上的那一张);
+        harness.key_press(egui::Key::Space);
+        harness.run_steps(3);
+        按(&mut harness, 卡片墙点开的那一张);
     }
     控件都落在所在那一栏里(&harness, 名字);
     // [`带标签的行正题露得出字`] 查的是**表格那几行**被截成什么样（正题一行、标签领着路径一行）：
@@ -2116,6 +2141,54 @@ fn 记上汉化记号(app: &mut App) {
             read_bytes: 0,
             work_id: 原来的.work_id,
             release_id: 原来的.release_id,
+            candidates: vec![那一条],
+        }])
+        .expect("识别结论写得进");
+}
+
+/// 给卡片墙那一态里**「1942 - MS汉化组」**那一份记上汉化（[`浏览态::卡片`]）：写一条已采纳、带汉化记号的候选。
+///
+/// 它在夹具里本是「还没识别」（结论表里一行都没有）；卡面上那枚中文标只认已采纳那一条候选的中文身份，所以得补一条结论。
+/// 仍挂不上作品（`work_id` 空着）：卡面上照旧挂着「未关联作品」。
+fn 给1942记上汉化(app: &mut App) {
+    let (_, site) = app.browse_and_site();
+    let 那一份 = 浏览的变体
+        .iter()
+        .find(|one| one.路径.contains("1942"))
+        .expect("夹具里有 1942 那一份");
+    let key = format!("{浏览的根}/{}/{}", 那一份.平台, 那一份.路径);
+    let mut 那一条 = 候选(
+        &Variant {
+            key: key.clone(),
+            main_key: key.clone(),
+            platform: Some(那一份.平台.to_owned()),
+            rule: SINGLE_FILE_RULE.to_owned(),
+            manual: false,
+            files: 1,
+            bytes: 那一份.字节,
+            unreadable_files: 0,
+            members: Vec::new(),
+        },
+        true,
+        Confidence::Medium,
+        "中文离线源",
+        "1942 (Japan)",
+        "名称模糊匹配，平台一致",
+    );
+    那一条.chinese = Some(romcat_core::dat::chinese::ChineseMark::FanTranslated);
+    site.catalog
+        .write_identifications(&[Identification {
+            variant_key: key,
+            state: State::Matched,
+            reason: None,
+            platform: None,
+            standalone: None,
+            edition: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: None,
+            release_id: None,
             candidates: vec![那一条],
         }])
         .expect("识别结论写得进");

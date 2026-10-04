@@ -111,6 +111,22 @@ ink = "#FFFFFF"           # 平台色底上的字
 [color.switch]
 knob = "#FFFFFF"          # 滑块里的圆点
 
+# ── 卡片封面上那枚选择框：两套主题共用 ──
+# 设计稿 .cv-ck 压在封面上，不压在界面底色上：没勾时的底与描边、勾上之后那道勾都写死在规则上，暗色主题不另写。
+# 勾上之后的底与描边是主题的强调色（.cv-ck.on 的 var(--accent)），不在这一节。
+# 设计稿里没有这几格的 CSS 变量；check_tokens.py 拿 .cv-ck 与 .cv-ck.on::after 两条规则核它们。
+[color.cover-check]
+shade = "#0A0C1280"       # 没勾时的底（rgba(10,12,18,.5)）
+edge  = "#FFFFFFE6"       # 没勾时的描边（rgba(255,255,255,.9)）
+tick  = "#FFFFFF"         # 勾上之后那道勾
+
+# ── 卡片封面上那枚中文标：两套主题共用 ──
+# 设计稿 .cv-zh 压在封面上（平台标正下方），底与字写死在规则上、暗色主题不另写。
+# 设计稿里没有这两格的 CSS 变量；check_tokens.py 拿 .cv-zh 那条规则上的 background 与 color 核它们。
+[color.cover-tag]
+shade = "#0A0C12B8"       # 中文标的底（rgba(10,12,18,.72)）
+ink   = "#FFFFFF"         # 中文标上的字
+
 # ── 尺寸（逻辑像素，egui 的 points） ──────────────────────
 [radius]
 small  = 4    # 分面、标签、小按钮
@@ -361,6 +377,17 @@ thumb-list        = [32, 43] # 列表行首封面缩略图（宽, 高）
 card-cover-ratio  = 0.75  # 卡片封面宽高比 3:4
 card-widths       = [128, 164, 210] # 卡片视图三档封面宽（设计稿 .cgrid.s / 默认 / .cgrid.l）
 card-info-height  = 104   # 卡片封面下标题、元数据与置信度三行的稳定高度
+cover-tag-inset   = 8     # 卡片封面右上角那两枚标（平台标、中文标）右沿离封面右沿多远（设计稿 .cv-plat 与 .cv-zh 的 right:8px）
+cover-tag-top     = [8, 32] # 那两枚标离封面顶多远：平台标、中文标（设计稿 .cv-plat 的 top:8px、.cv-zh 的 top:32px）
+cover-tag-height  = 20    # 那两枚标的高（设计稿 .cv-plat 与 .cv-zh 的 height:20px）
+cover-tag-padding = 7     # 那两枚标左右留白（设计稿 .cv-plat 与 .cv-zh 的 padding:0 7px）
+cover-check       = 20    # 卡片封面上那枚选择框的边长，描边算在里头（设计稿 .cv-ck 的 width:20px;height:20px，*{box-sizing:border-box}）
+cover-check-inset = 8     # 那枚选择框离封面左上角多远（设计稿 .cv-ck 的 left:8px;top:8px）
+cover-check-radius = 5    # 那枚选择框的圆角（设计稿 .cv-ck 的 border-radius:5px）
+cover-check-stroke = 1.5  # 那枚选择框的描边宽（设计稿 .cv-ck 的 border:1.5px）
+cover-check-tick  = [9, 5] # 勾上之后那道勾：一个宽 9、高 5 的框只描左边与底边，转 -45°、再上移 1 点（设计稿 .cv-ck.on::after）
+cover-check-tick-stroke = 2  # 那道勾的粗（设计稿 .cv-ck.on::after 的 border-left / border-bottom:2px）
+card-ring         = [2, 6] # 卡片封面外头那两圈：强调色多宽、连外头那一圈强调浅色一共多宽（设计稿 .gcard[aria-selected] .cover 的 0 0 0 2px / 0 0 0 6px）；拿着键盘焦点的那一张只描头一圈（.gcard:focus-visible .cover 的 0 0 0 2px）
 card-group-height = 22    # 按平台分组时组头高度
 statusbar         = 30    # 底部状态栏高度
 statusbar-bar     = 120   # 底部状态栏里任务那条小进度条的宽度

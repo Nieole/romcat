@@ -1551,6 +1551,60 @@ fn paint_checkbox(
     }
 }
 
+/// 卡片封面上那枚**选择框**（设计稿 `.cv-ck`，挂单 `Q1418`）：画在 `封面` 左上角、离角 `cover-check-inset`，
+/// 交回它占的那一块（点没点中它由调用方拿这一块判）。
+///
+/// 与 [`checkbox`] 那一枚（`.ckb`）不是一个东西：这一枚**压在封面上**，没勾时是半透明深底加半透明白描边
+/// （令牌 `[color.cover-check]`，两套主题共用——封面多亮多暗与主题无关）；勾上之后底与描边换这一套主题的强调色，
+/// 里头一道白勾（照稿是一个宽 9、高 5 的框只描左边与底边，转 −45°、再上移 1 点，尺寸取令牌 `cover-check-tick`）。
+/// **画不画由调用方定**（稿上悬停、勾着、墙上有一张勾着时才露出来）。
+pub fn cover_check(
+    painter: &egui::Painter,
+    封面: egui::Rect,
+    勾着: bool,
+    palette: &Palette,
+) -> egui::Rect {
+    let tokens = Tokens::builtin();
+    let layout = &tokens.layout;
+    let colors = &tokens.color.cover_check;
+    let 方框 = egui::Rect::from_min_size(
+        封面.min + egui::Vec2::splat(layout.cover_check_inset),
+        egui::Vec2::splat(layout.cover_check),
+    );
+    let (底, 描边) = if 勾着 {
+        (palette.accent, palette.accent)
+    } else {
+        (colors.shade, colors.edge)
+    };
+    painter.rect(
+        方框,
+        layout.cover_check_radius,
+        底,
+        egui::Stroke::new(layout.cover_check_stroke, 描边),
+        egui::StrokeKind::Inside,
+    );
+    if 勾着 {
+        // 照稿那个框的左边与底边，各取线的中线：从左上往下、再往右。以框心为原点。
+        let [宽, 高] = layout.cover_check_tick;
+        let 粗 = layout.cover_check_tick_stroke;
+        let (左, 上, 右, 下) = (
+            -宽 / 2.0 + 粗 / 2.0,
+            -高 / 2.0,
+            宽 / 2.0,
+            高 / 2.0 - 粗 / 2.0,
+        );
+        // 转 −45°（屏幕坐标里 y 朝下，逆时针那一转），再上移 1 点（稿上 `translateY(-1px)`）。
+        let (sin, cos) = (-std::f32::consts::FRAC_PI_4).sin_cos();
+        let 摆 =
+            |x: f32, y: f32| 方框.center() + egui::vec2(x * cos - y * sin, x * sin + y * cos - 1.0);
+        painter.add(egui::Shape::line(
+            vec![摆(左, 上), 摆(左, 下), 摆(右, 下)],
+            egui::Stroke::new(粗, colors.tick),
+        ));
+    }
+    方框
+}
+
 /// 一块**警示框**（设计稿 `.warnbox`）：`lo-soft` 底、描边是分隔线色往 `lo` 挪四成、中圆角，内边距取令牌
 /// `warn-box-padding`，字是 `size-small-plus`；头一句用 `lo` 色、拉丁与数字加粗，后面接着正文色。占满这一栏的宽。
 ///

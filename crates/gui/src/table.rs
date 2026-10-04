@@ -28,6 +28,13 @@
 //! [`Picked`] 的两支照 ADR-0016 那条「规则加手动例外」来：全选不把一万行的身份抓进
 //! 内存，它就是**当前这个筛选**本身，再减去人点掉的那几行。批量操作要动哪些变体，
 //! 由核心库照这两样展开（[`Catalog::scoped_variants`]）。
+//!
+//! ## 高亮存的是身份，不是行序号
+//!
+//! [`Highlight`] 记着高亮的是**哪一部作品**（[`WorkAnchor`]），表格与卡片墙共用这一个（挂单 `Q1142`，设计稿
+//! `S.sel` 存的是作品号）。两种视图背后是两扇窗、两份查询（卡片墙那一份可以只要有封面的），同一个行序号在
+//! 两边指的不是同一行——存行序号的话，切一下视图高亮就落到别人身上。挪一行要知道它眼下在第几行，那由
+//! 摆着的那扇窗现找（[`Window::find`]）。
 
 use egui::{Align, Layout};
 use egui_extras::{Column, TableBuilder};
@@ -304,6 +311,65 @@ impl Window {
             }
         }
     }
+
+    /// 这一部**在窗里缓着的那一段里是第几行**（全序下标）；不在那一段里是 `None`。**一次库都不读**——
+    /// 每帧问也不贵（作品详情页头上那句「第几个 / 共几个」就是每帧问的）。
+    #[must_use]
+    pub fn held(&self, anchor: &WorkAnchor) -> Option<u64> {
+        let at = self.rows.iter().position(|row| &row.anchor == anchor)?;
+        Some(self.first + at as u64)
+    }
+
+    /// 高亮那一部**在这扇窗里是第几行**（全序下标）；不在这扇窗里、或者找不着时是 `None`。
+    ///
+    /// 先翻窗里缓着的那一段（[`Self::held`]）——视口里那几行一定在那一段里；不在才去上一回见到它的那一行
+    /// （[`Highlight::near`]）取一段回来看：人高亮了一行、滚远了再按 `空格`，那一行早不在那一段里了。
+    /// **次序不能反**：先取那一段的话，`near` 是另一扇窗里的下标时（从表格带到只摆有封面的卡片墙上），
+    /// 取回来的那一段把视口那几行冲掉，眼前那一张反倒找不着。两处都没有就说找不着：
+    /// 卡片墙只摆有封面的那一批时，表格上高亮的那一部可能压根不在墙上。
+    pub fn find(&mut self, catalog: &Catalog, highlight: &Highlight) -> Option<u64> {
+        if let Some(at) = self.held(&highlight.anchor) {
+            return Some(at);
+        }
+        self.row(catalog, highlight.near)
+            .is_some_and(|row| row.anchor == highlight.anchor)
+            .then_some(highlight.near)
+    }
+
+    /// 高亮往上／往下挪一行之后**落在哪一部**（`↑` `↓`）。
+    ///
+    /// 一部都没高亮、或者高亮那一部不在这扇窗里时落在头一行上（设计稿 `at<0?0`）；到了头或尾就停在那儿。
+    /// 一行都没有、或者那一行读不出来时是 `None`。
+    pub fn step(
+        &mut self,
+        catalog: &Catalog,
+        from: Option<&Highlight>,
+        往下: bool,
+    ) -> Option<Highlight> {
+        if self.total == 0 {
+            return None;
+        }
+        let at = match from.and_then(|highlight| self.find(catalog, highlight)) {
+            None => 0,
+            Some(at) if 往下 => (at + 1).min(self.total - 1),
+            Some(at) => at.saturating_sub(1),
+        };
+        let anchor = self.row(catalog, at)?.anchor.clone();
+        Some(Highlight { anchor, near: at })
+    }
+}
+
+/// **高亮**：人此刻在看哪一部作品——侧边详情摆的、`Enter` `空格` `F` `E` 那几下作用的就是它。
+///
+/// 存的是**身份**，表格与卡片墙共用这一个（挂单 `Q1142`）：两种视图背后是两扇窗，同一个行序号在两边
+/// 指的不是同一行。与[选中](Picked)不是一回事：高亮一部是「我要看它」，选中一批是「我要对它们动手」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Highlight {
+    /// 高亮的是谁。
+    pub anchor: WorkAnchor,
+    /// 上一回在哪一行见到它（全序下标）。**只是找它时先看的地方**，不是它的身份——换了视图、
+    /// 库底下变了，它就可能指着别人（[`Window::find`] 核过才用）。
+    pub near: u64,
 }
 
 /// **选中了哪些行**。
@@ -420,11 +486,12 @@ pub struct Table<'a> {
     pub window: &'a mut Window,
     /// 筛选与排序。**界面那一份的引用，不是副本。**
     pub query: &'a mut WorkQuery,
-    /// 高亮的是哪一行（全序下标）——**详情面板摆的就是它**。
+    /// **高亮**的是哪一部（[`Highlight`]，存身份，卡片墙用的是同一个）——**详情面板摆的就是它**。
+    /// 点一行、右键一行都把高亮挪过去。与键盘焦点（Tab 走到的那一行）不是一回事。
     ///
     /// 与[选中](Self::picked)不是一回事：高亮一行是「我要看它」，选中一批是
     /// 「我要对它们动手」。混成一件事的话，翻着看就会把批量操作的范围改掉。
-    pub focused: &'a mut Option<u64>,
+    pub highlight: &'a mut Option<Highlight>,
     /// 选中了哪几行（批量操作的作用范围）。
     pub picked: &'a mut Picked,
     /// 把滚动位置强按到这个像素偏移。**只有量帧率时才用**，界面上是 `None`。
@@ -443,12 +510,12 @@ pub struct Table<'a> {
     /// 而那一层归浏览屏画（[`crate::browse::menu`]）。两件事各走各的口子，读代码的人
     /// 不必先分辨这一帧交回来的那一行是「点开了」还是「右键了」。
     pub menu: &'a mut Option<RightClicked>,
-    /// **把高亮那一行滚进视口**：`↑` `↓` 刚挪过高亮的那一帧是 `true`。
+    /// **把这一行滚进视口**（全序下标）：`↑` `↓` 刚挪过高亮的那一帧是 `Some`，指着高亮挪到的那一行。
     ///
     /// 滚**最少那么多**（`align` 给 `None`）而不是滚到正中：设计稿那一路
     /// （`scrollIntoView({block:'nearest'})`）也是这样——翻着看时整张表跟着跳，
     /// 上下文就全没了。
-    pub scroll_focused: bool,
+    pub scroll_highlight: Option<u64>,
 }
 
 impl Table<'_> {
@@ -461,13 +528,13 @@ impl Table<'_> {
             catalog,
             window,
             query,
-            focused,
+            highlight,
             picked,
             scroll_to,
             rules,
             mut shelf,
             menu,
-            scroll_focused,
+            scroll_highlight,
         } = self;
         let tokens = Tokens::builtin();
         // 行首摆封面时一行照令牌 `table-row-cover` 高：两行字旁边还得竖得下那一小格封面。
@@ -527,7 +594,7 @@ impl Table<'_> {
                 .column(Column::exact(容量宽).clip(true))
                 .column(Column::exact(年份宽).clip(true))
                 .column(Column::exact(元数据宽).clip(true));
-            if scroll_focused && let Some(at) = *focused {
+            if let Some(at) = scroll_highlight {
                 builder = builder.scroll_to_row(usize::try_from(at).unwrap_or(usize::MAX), None);
             }
             if let Some(offset) = scroll_to {
@@ -609,7 +676,6 @@ impl Table<'_> {
                 .body(|body| {
                     body.rows(height, total, |mut row| {
                         let index = row.index() as u64;
-                        row.set_selected(*focused == Some(index));
                         let Some(work) = window.row(catalog, index) else {
                             // 读不到就留空行：滚动条的长度已经由总数定死，
                             // 这里少画一行不会让下面的行位移。
@@ -617,6 +683,17 @@ impl Table<'_> {
                                 row.col(|_ui| {});
                             }
                             return;
+                        };
+                        // **认身份不认行序号**：卡片墙上高亮的那一部切回表格，照样是这一行铺着选中的底。
+                        row.set_selected(
+                            highlight
+                                .as_ref()
+                                .is_some_and(|it| it.anchor == work.anchor),
+                        );
+                        // 点一下、右键一下都把高亮挪到这一行。
+                        let 高亮这一行 = || Highlight {
+                            anchor: work.anchor.clone(),
+                            near: index,
                         };
                         // 焦点那一圈与行底下那条线要夹在滚动视口里，而只有格子里头拿得到那个裁剪矩形
                         // （勾选那一列不裁，它的裁剪矩形就是整个视口）。
@@ -698,14 +775,14 @@ impl Table<'_> {
                         if response.secondary_clicked()
                             && let Some(at) = response.interact_pointer_pos()
                         {
-                            *focused = Some(index);
+                            *highlight = Some(高亮这一行());
                             *menu = Some(RightClicked {
                                 row: work.clone(),
                                 at,
                             });
                         }
                         if response.clicked() {
-                            *focused = Some(index);
+                            *highlight = Some(高亮这一行());
                             // **交一份拷贝出去而不只是下标**：详情面板要在这一行滚出视口
                             // 之后照样摆得出来。只有真点中的那一帧才复制。
                             opened = Some(Opened {

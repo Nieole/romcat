@@ -127,7 +127,7 @@ impl std::error::Error for TokensError {
     }
 }
 
-/// 颜色：两套主题各一份 [`Palette`]，外加两套主题共用的几节（平台色、视频播放标、平台标上的字、开关圆点）。
+/// 颜色：两套主题各一份 [`Palette`]，外加两套主题共用的几节（平台色、视频播放标、平台标上的字、开关圆点、封面上那枚选择框与中文标）。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Colors {
@@ -144,6 +144,12 @@ pub struct Colors {
     pub platform_badge: PlatformBadge,
     /// 开关里的圆点：两套主题共用。
     pub switch: Switch,
+    /// 卡片封面上那枚选择框：两套主题共用。
+    #[serde(rename = "cover-check")]
+    pub cover_check: CoverCheck,
+    /// 卡片封面上那枚中文标：两套主题共用。
+    #[serde(rename = "cover-tag")]
+    pub cover_tag: CoverTag,
 }
 
 /// 视频格上那个**播放标**的两个颜色。
@@ -185,6 +191,40 @@ pub struct Switch {
     /// 滑块里的圆点。
     #[serde(deserialize_with = "hex")]
     pub knob: Color32,
+}
+
+/// 卡片封面上那枚**选择框**（设计稿 `.cv-ck`）没勾时的底与描边、勾上之后那道勾。
+///
+/// **两套主题共用**：它压在封面上，不压在界面底色上——封面多亮多暗与主题无关；稿上都写死在规则上，暗色主题不另写。
+/// 勾上之后的底与描边是主题的强调色（`.cv-ck.on` 的 `var(--accent)`），不在这一节。
+/// 设计稿里没有这几格的 CSS 变量，`check_tokens.py` 拿 `.cv-ck` 与 `.cv-ck.on::after` 两条规则核它们。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoverCheck {
+    /// 没勾时的底（半透明深色）。
+    #[serde(deserialize_with = "hex")]
+    pub shade: Color32,
+    /// 没勾时的描边（半透明白）。
+    #[serde(deserialize_with = "hex")]
+    pub edge: Color32,
+    /// 勾上之后那道勾。
+    #[serde(deserialize_with = "hex")]
+    pub tick: Color32,
+}
+
+/// 卡片封面上那枚**中文标**（设计稿 `.cv-zh`）的底与字。
+///
+/// **两套主题共用**：它压在封面上，不压在界面底色上；稿上写死在规则上，暗色主题不另写。
+/// 设计稿里没有这两格的 CSS 变量，`check_tokens.py` 拿 `.cv-zh` 那条规则上的 background 与 color 核它们。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoverTag {
+    /// 底（半透明深色）。
+    #[serde(deserialize_with = "hex")]
+    pub shade: Color32,
+    /// 字。
+    #[serde(deserialize_with = "hex")]
+    pub ink: Color32,
 }
 
 impl Colors {
@@ -861,6 +901,28 @@ pub struct Layout {
     pub card_widths: [f32; 3],
     /// 卡片封面下信息区高度。
     pub card_info_height: f32,
+    /// 卡片封面右上角那两枚标（平台标、中文标）右沿离封面右沿多远。
+    pub cover_tag_inset: f32,
+    /// 那两枚标离封面顶多远：`[平台标, 中文标]`。
+    pub cover_tag_top: [f32; 2],
+    /// 那两枚标的高。
+    pub cover_tag_height: f32,
+    /// 那两枚标左右留白。
+    pub cover_tag_padding: f32,
+    /// 卡片封面上那枚选择框的边长（描边算在里头）。
+    pub cover_check: f32,
+    /// 那枚选择框离封面左上角多远。
+    pub cover_check_inset: f32,
+    /// 那枚选择框的圆角。
+    pub cover_check_radius: f32,
+    /// 那枚选择框的描边宽。
+    pub cover_check_stroke: f32,
+    /// 勾上之后那道勾：`[宽, 高]`——一个这么大的框只描左边与底边，转 −45°、再上移 1 点。
+    pub cover_check_tick: [f32; 2],
+    /// 那道勾的粗。
+    pub cover_check_tick_stroke: f32,
+    /// 卡片封面外头那两圈：`[强调色多宽, 连强调浅色一共多宽]`。高亮那一张两圈都描，拿着键盘焦点的那一张只描头一圈。
+    pub card_ring: [f32; 2],
     /// 按平台分组时组头高度。
     pub card_group_height: f32,
     /// 底部状态栏高度。
