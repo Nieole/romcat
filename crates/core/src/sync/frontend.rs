@@ -29,13 +29,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::adapter::converge::{self, Launch};
+use crate::adapter::converge;
 use crate::adapter::{Adapter, AdapterError};
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::priority::Priorities;
 use crate::sublibrary::Selected;
 
-use super::{DesiredFile, FileKind};
+use super::{DesiredFile, FileKind, OnCard};
 
 /// 元数据在清单里挂在哪个「变体」名下。
 ///
@@ -75,10 +75,15 @@ pub enum FrontendError {
 /// **靠文件名找媒体的格式这一份是空的**（ES-DE），于是这一步什么都不写进条目——
 /// 那正是它要的：媒体已经按 ROM 文件名铺在 `downloaded_media/` 下了。
 ///
-/// `launch` 是照**筛过之后**的期望状态折出来的「条目在卡上启动哪一份」（[`Footprint::launching`](super::Footprint::launching)）：
+/// `on_card` 是照**筛过之后**的期望状态折出来的「选中的变体在卡上落成什么样」（[`Footprint::launching`](super::Footprint::launching)）：
 /// 点了名的多碟变体，条目改指播放列表、几张碟不再各成一条（票 `verdict-store-and-sync/18`）；主文件转了格式的，条目
 /// 指转出来的那一份（票 `verdict-store-and-sync/20`）。所以这一步排在播放列表之后——前端元数据要先知道哪几份播放列表
 /// 真落得下。
+///
+/// **没上卡的变体不列**（[`OnCard::left_off`]，票 `verdict-store-and-sync/21`，挂单 `Q1847`）：主文件放不进目标，
+/// 条目写哪个名字都指着卡上没有的文件，前端里多一条点了打不开的条目。与「整库那一份不写过去」同一个道理
+/// （[`converge::run_within`]）：子库的元数据只写卡上真有的那些游戏。一个条目底下另有上了卡的变体时，条目照旧在，
+/// 首选变体从上了卡的那几个里挑。
 ///
 /// # Errors
 /// 读中立库失败、或者适配器写不出来时返回错误。
@@ -88,14 +93,16 @@ pub fn lay(
     priorities: &Priorities,
     selected: &Selected,
     assets: &BTreeMap<String, BTreeMap<&'static str, Vec<String>>>,
-    launch: &BTreeMap<String, Launch>,
+    on_card: &OnCard,
 ) -> Result<Laid, FrontendError> {
     let picked: BTreeSet<String> = selected
         .picked
         .iter()
         .map(|variant| variant.key.clone())
+        .filter(|key| on_card.landed(key))
         .collect();
-    let converged = converge::run_within(catalog, priorities, adapter, Some(&picked), launch)?;
+    let converged =
+        converge::run_within(catalog, priorities, adapter, Some(&picked), &on_card.launch)?;
 
     let mut out = Laid {
         entries: converged.entries,

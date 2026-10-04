@@ -3016,7 +3016,7 @@ impl Screen {
         self.diff_tiles = tally_ui(ui, plan);
         concerns_ui(ui, prepared);
         self.steps_ui(ui, plan);
-        self.anomalies_ui(ui, site, tasks, plan);
+        self.anomalies_ui(ui, site, tasks, plan, prepared.left_off_note());
     }
 
     /// 计划那几步（设计稿 `.steplist`）：装在一个定高的框里，框里滚（[`step_list`]）。
@@ -3053,12 +3053,15 @@ impl Screen {
     /// 在这儿才读得到。不写的话，他会以为工具已经替他处理妥当——那正是 ADR-0017 说的
     /// 「矩阵错了比不转换更糟」的同一种错。每一类那句话由核心答
     /// （[`SurpriseKind::refusal`]），不在这一层另写一份。
+    ///
+    /// `left_off_note` 是「放不进目标」那一栏说明后头接的那一句（[`Prepared::left_off_note`]），核心照这份计划答说不说。
     fn anomalies_ui(
         &mut self,
         ui: &mut egui::Ui,
         site: &mut Site,
         tasks: &mut Tasks,
         plan: &romcat_core::sync::Plan,
+        left_off_note: Option<&str>,
     ) {
         let 数 = |tab: Anomaly| match tab {
             Anomaly::Surprise(kind) => plan.surprises.iter().filter(|one| one.kind == kind).count(),
@@ -3110,7 +3113,9 @@ impl Screen {
                             Anomaly::Surprise(kind) => {
                                 self.surprises_ui(ui, site, tasks, plan, kind)
                             }
-                            Anomaly::NoFit => self.nofit_ui(ui, site, tasks, plan),
+                            Anomaly::NoFit => {
+                                self.nofit_ui(ui, site, tasks, plan, left_off_note);
+                            }
                         }
                     });
             });
@@ -3269,14 +3274,22 @@ impl Screen {
     /// 一处撞车一个框（设计稿 `nofit` 那一段）：头一行落点路径、右头一枚「撞车」标签（[`look::inline_tag`]）；
     /// 底下每份一行「根名 · 相对路径」（[`crate::table::root_and_path`]），右头「排除这一份」。**每份不印体积**
     /// （拿主意的人 2026-10-01 裁 `F-6` B：与「排除哪一份」关系不大；第五格的容量口径另说，见 [`tally_ui`]）。
+    ///
+    /// **有变体没上卡时，整栏那句说明后头接一句「前端里也不列它们。」**（[`Prepared::left_off_note`]，票
+    /// `verdict-store-and-sync/21`；拿主意的人 2026-10-04 裁，挂单 `Q1877`）：那几个变体的主文件就列在这一栏里，话贴着它们说；
+    /// 不重复个数、不用警示色。说不说、说什么都由核心答，这一层只管摆在哪儿。
     fn nofit_ui(
         &mut self,
         ui: &mut egui::Ui,
         site: &mut Site,
         tasks: &mut Tasks,
         plan: &romcat_core::sync::Plan,
+        left_off_note: Option<&str>,
     ) {
-        look::help(ui, NOFIT_HELP);
+        match left_off_note {
+            Some(note) => look::help(ui, &format!("{NOFIT_HELP}{note}")),
+            None => look::help(ui, NOFIT_HELP),
+        };
         let name = self.picked.clone().unwrap_or_default();
         // 撞车归堆由核心一处算（`Collision::among`，排计划时归好存在 `Plan::collisions`）：
         // 命令行、`--json` 与这一屏配出来的对子是同一批。
@@ -3739,6 +3752,11 @@ fn list_path(ui: &mut egui::Ui, path: &str, landing: Option<&str>) -> egui::Resp
 fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
     let plan = &prepared.plan;
     for concern in prepared.concerns() {
+        // **没上卡那一件不在这几行里画**：屏上那一句接在「放不进目标」那一栏的说明后头（[`Prepared::left_off_note`]），
+        // 不重复个数、不用警示色（拿主意的人 2026-10-04 裁，挂单 `Q1877`）。命令行照旧印它，连着变体的键与排除的命令。
+        if matches!(concern, sync::Concern::LeftOffCard(_)) {
+            continue;
+        }
         ui.colored_label(ui.visuals().warn_fg_color, concern_line(&concern));
     }
     if !plan.unsupported.is_empty() {
@@ -6226,7 +6244,9 @@ fn concern_line(concern: &sync::Concern) -> String {
         sync::Concern::BrokenRules(_) => Some("卡上「选择集」那一块里标红的就是。"),
         sync::Concern::MissingCapability(_) => Some("按卡上「目标设置…」重挑一份。"),
         sync::Concern::StaleClaims(_) => Some("按卡上「目标设置…」，平台表里标着「陈旧」的就是。"),
-        sync::Concern::MediaNotInPool(_)
+        // 没上卡那一件不走这儿（[`concerns_ui`] 跳过它，屏上那一句在「放不进目标」那一栏里）。
+        sync::Concern::LeftOffCard(_)
+        | sync::Concern::MediaNotInPool(_)
         | sync::Concern::MediaUnknownKind(_)
         | sync::Concern::MediaCrowdedOut(_) => None,
     };

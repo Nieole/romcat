@@ -183,8 +183,9 @@ impl 现场 {
         let footprint = sync::Footprint::gather(&self.catalog, &selected, &platform_manifest)
             .expect("读得出脚印");
         let mut desired = footprint.desired(profile);
-        // 与 `sync::prepare` 同一个次序：先筛 ROM，多碟变体的播放列表排在筛过之后、再筛一遍；条目在卡上启动哪一份
-        // 照筛过之后的期望状态定（播放列表、转出来的那一份），交给媒体与前端元数据，最后几样一起再筛一遍。
+        // 与 `sync::prepare` 同一个次序：先筛 ROM，多碟变体的播放列表排在筛过之后、再筛一遍；选中的变体在卡上落成
+        // 什么样照筛过之后的期望状态定（播放列表、转出来的那一份、没上卡的那几个），交给媒体与前端元数据，最后几样一起
+        // 再筛一遍。
         desired.screen(&profile.filesystem, 0);
         let playlists = sync::playlist::lay(
             &footprint,
@@ -194,13 +195,13 @@ impl 现场 {
             &platform_manifest,
         );
         desired.add_and_screen(playlists.files.iter().cloned(), &profile.filesystem, 0);
-        let launch = footprint.launching(&desired, &playlists);
+        let on_card = footprint.launching(&desired, &playlists);
         let media = sync::media::lay(
             &self.catalog,
             adapter.as_ref(),
             &self.pool,
             &selected,
-            &launch,
+            &on_card,
         )
         .expect("铺得出媒体");
         let frontend = sync::frontend::lay(
@@ -209,7 +210,7 @@ impl 现场 {
             &priorities,
             &selected,
             &media.assets,
-            &launch,
+            &on_card,
         )
         .expect("折得出元数据");
         desired.add_and_screen(
@@ -722,7 +723,7 @@ fn 导出铺媒体铺到一半按停_铺过的留在盘上_说得出铺了几份
         adapter.as_ref(),
         &现场.pool,
         &selected,
-        &BTreeMap::new(),
+        &sync::OnCard::default(),
     )
     .expect("铺得出媒体");
     assert_eq!(laid.from_pool.len(), 3, "{:?}", laid.from_pool);
@@ -2677,4 +2678,291 @@ fn 播放列表撞车没放行_条目退回指碟_1_转出来的那一份() {
         !条目.iter().any(藏着),
         "没有播放列表就没有要藏的碟：{条目:#?}"
     );
+}
+
+// ── 主文件没上卡的变体，卡上的前端元数据里不列（票 `verdict-store-and-sync/21`，挂单 `Q1847`）──────────────
+
+impl 现场 {
+    /// 工作目录里放一份名册：内置那份，只把 **FAT32 的单文件上限**改成 `上限` 字节。
+    ///
+    /// 不造 4 GiB 的文件，拿一张「小卡」演同一件事（ADR-0017 补充段：FAT32 的单文件上限，大 ISO 原样搬放不进去）。
+    /// 档案照旧挑内置那几份 `-fat32`，平台矩阵一个字不动。
+    fn 换成小卡(&self, 上限: u64) {
+        let 原来 = "\"单文件上限\" = 4294967295";
+        let 名册 = romcat_core::capability::Roster::builtin_text();
+        assert!(
+            名册.contains(原来),
+            "内置名册里 FAT32 那一行变了，这份夹具得跟着改"
+        );
+        写(
+            &self
+                .工作区
+                .path()
+                .join(romcat_core::capability::Roster::IN_WORKSPACE),
+            名册
+                .replace(原来, &format!("\"单文件上限\" = {上限}"))
+                .as_bytes(),
+        );
+    }
+}
+
+/// 卡上这份元数据里有哪几个变体：条目机器读的那一半（`x-romcat-variant`）里的键，按键排。
+fn 列着的变体(条目: &[romcat_core::adapter::Game]) -> Vec<String> {
+    let mut out: Vec<String> = 条目
+        .iter()
+        .flat_map(|game| {
+            game.extra
+                .get("romcat-variant")
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// 卡上有没有哪一份文件的字节就是 `内容`：铺出去的媒体落在哪由格式定（Pegasus 按内容哈希、ES-DE 按条目名），
+/// 照字节找两家都认得出。
+fn 卡上有这份字节(卡: &Path, 内容: &[u8]) -> bool {
+    盘上有什么(卡)
+        .keys()
+        .any(|path| fs::read(卡.join(path)).is_ok_and(|bytes| bytes == 内容))
+}
+
+/// 一份主库：FC 里一份放得下的 `魂斗罗.zip`（2 KiB），一份放不下的 `大部头.zip`（16 KiB）。卡上限照 [`现场::换成小卡`]
+/// 给 8 KiB：大部头**原样搬**（RetroArch 的 FC 吃 zip、不转），超过单文件上限。
+fn 建个有一份放不下的库() -> TempDir {
+    let dir = temp_dir("run-too-big-lib");
+    写(&dir.path().join("FC/魂斗罗.zip"), &zip(2048));
+    写(&dir.path().join("FC/大部头.zip"), &zip(16 * 1024));
+    dir
+}
+
+const 放不下的变体: &str = "库/FC/大部头.zip";
+const 放得下的变体: &str = "库/FC/魂斗罗.zip";
+
+#[test]
+fn 主文件放不进目标的变体_卡上的前端元数据里不列_媒体也不铺_放得下的照旧在_两家都是() {
+    for (格式, 元数据) in [
+        ("ES-Gamelist", "gamelists/FC/gamelist.xml"),
+        ("Pegasus", "FC.metadata.pegasus.txt"),
+    ] {
+        let mut 现场 = 现场::摆在(建个有一份放不下的库());
+        现场.收一份媒体(放不下的变体, MediaKind::Cover, b"cover-of-the-big-one");
+        现场.收一份媒体(放得下的变体, MediaKind::Cover, b"cover-of-contra");
+        现场.建子库(格式, "平台=FC");
+        现场.换成小卡(8 * 1024);
+        现场.换档案("retroarch-fat32");
+
+        // 前提：大部头那一份真被拦在「放不进目标」里，而且是原样搬的那一份（不转格式）。
+        let prepared = 现场.照真线排一趟();
+        let 拦下的: Vec<_> = prepared
+            .plan
+            .rejected
+            .iter()
+            .filter(|row| row.kind == FileKind::Rom)
+            .map(|row| (row.source.as_str(), row.reason))
+            .collect();
+        assert_eq!(
+            拦下的,
+            [(放不下的变体, romcat_core::capability::RejectReason::TooBig)],
+            "{格式}：前提没摆对"
+        );
+        // 差量预览底下那一件怪事：核心交出是哪几个、各被哪一类拦下，那句话只说事实、不带命令（两个壳各补去处）。
+        assert_eq!(
+            prepared.left_off,
+            BTreeMap::from([(
+                放不下的变体.to_string(),
+                romcat_core::capability::RejectReason::TooBig
+            )]),
+            "{格式}"
+        );
+        let 那一句: Vec<String> = prepared
+            .concerns()
+            .iter()
+            .filter(|concern| matches!(concern, sync::Concern::LeftOffCard(_)))
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            那一句,
+            ["有 1 个变体放不进目标、没上卡，前端里也不列：超过单文件上限 1 个。"],
+            "{格式}"
+        );
+        // 界面那一句接在「放不进目标」那一栏的说明后头，说不说也由核心答（挂单 `Q1877`）。
+        assert_eq!(
+            prepared.left_off_note(),
+            Some("前端里也不列它们。"),
+            "{格式}"
+        );
+
+        现场.照真线同步一趟();
+        assert!(
+            !现场.卡.path().join("FC/大部头.zip").exists(),
+            "{格式}：放不下的那一份不该在卡上"
+        );
+        assert!(现场.卡.path().join("FC/魂斗罗.zip").is_file(), "{格式}");
+        // ⭐ **元数据里没有它那一条**：前端里多一条指着空处的条目，点下去找不着文件。同一份元数据里放得下的照旧在。
+        let 条目 = 卡上的条目(现场.卡.path(), 格式, 元数据);
+        assert_eq!(
+            列着的变体(&条目),
+            [放得下的变体],
+            "{格式}：卡上的前端元数据只该列真上了卡的变体：{条目:#?}"
+        );
+        // ⭐ **它的媒体也没铺**：条目都不列，铺它的封面只是白占卡上的地方。放得下的那一份的封面照旧铺。
+        assert!(
+            !卡上有这份字节(现场.卡.path(), b"cover-of-the-big-one"),
+            "{格式}：没上卡的变体，封面不该铺：{:?}",
+            盘上有什么(现场.卡.path()).keys().collect::<Vec<_>>()
+        );
+        assert!(
+            卡上有这份字节(现场.卡.path(), b"cover-of-contra"),
+            "{格式}：放得下的那一份封面照旧铺"
+        );
+    }
+}
+
+#[test]
+fn 主文件转了格式之后放不进目标的变体_卡上的前端元数据里同样不列() {
+    // 票 20 那条保留（挂单 `Q1847`）：转出来那一份放不进目标时，从前条目照旧写主库里的原名，指着卡上没有的文件。
+    // 主库：PS1 两份 `.zip`，各装一份 `.chd`。只吃裸镜像的档案下两份都解开；卡的单文件上限 4000 字节，最终幻想7 解出来
+    // 4097 字节放不进，小品放得下。同一个平台、同一份元数据，放得下的那一条照旧在、指着它转出来的那一份。
+    for (格式, 元数据, 小品指着) in [
+        ("ES-Gamelist", "gamelists/ps/gamelist.xml", "小品.chd"),
+        ("Pegasus", "ps.metadata.pegasus.txt", "ps/小品.chd"),
+    ] {
+        let 库 = 建个要解开的库("最终幻想7.chd");
+        写(
+            &库.path().join("ps/小品.zip"),
+            &zip_container(&[ZipEntrySpec::deflated("小品.chd", vec![7; 1024])]),
+        );
+        let mut 现场 = 现场::摆在(库);
+        现场.建子库(格式, "平台=PS1");
+        现场.换成小卡(4000);
+        现场.换档案("独立模拟器-fat32");
+
+        let prepared = 现场.照真线排一趟();
+        assert!(
+            prepared
+                .plan
+                .rejected
+                .iter()
+                .any(|row| row.source == 要解开的变体
+                    && row.path == "ps/最终幻想7.chd"
+                    && row.reason == romcat_core::capability::RejectReason::TooBig),
+            "{格式}：前提没摆对：{:#?}",
+            prepared.plan.rejected
+        );
+
+        现场.照真线同步一趟();
+        assert!(!现场.卡.path().join("ps/最终幻想7.chd").exists(), "{格式}");
+        assert!(现场.卡.path().join("ps/小品.chd").is_file(), "{格式}");
+        let 条目 = 卡上的条目(现场.卡.path(), 格式, 元数据);
+        assert_eq!(
+            列着的变体(&条目),
+            ["库/ps/小品.zip"],
+            "{格式}：转出来那一份放不进目标的变体不该列：{条目:#?}"
+        );
+        assert_eq!(条目[0].files, [小品指着], "{格式}");
+    }
+}
+
+#[test]
+fn 多碟变体看头一张碟_碟_1_放不进就不列_只有别的碟放不进照旧列并指碟_1() {
+    // 条目启动的是头一张碟（有一张碟放不进时那一套不生成播放列表，票 `verdict-store-and-sync/11`），所以「上没上卡」看的是
+    // 碟 1 的主文件：它被拦下，条目写什么都指着空处，不列；它上了卡、只有别的碟被拦下，条目照旧指碟 1（别的碟点不点得到是
+    // 挂单 `Q1828` 的事），那一张碟照旧报在「放不进目标」里。只吃裸镜像、卡的单文件上限 4000 字节，两张 `.zip` 碟都解开。
+    const 变体: &str = "库/ps/某游戏/游戏 (Disc 1).zip";
+    for (碟_1_多大, 碟_2_多大, 列不列) in [(8192, 1024, false), (1024, 8192, true)] {
+        let 库 = temp_dir("run-discs-too-big-lib");
+        for (碟, 多大) in [(1u8, 碟_1_多大), (2, 碟_2_多大)] {
+            写(
+                &库.path().join(format!("ps/某游戏/游戏 (Disc {碟}).zip")),
+                &zip_container(&[ZipEntrySpec::deflated(
+                    &format!("游戏 (Disc {碟}).bin"),
+                    vec![碟; 多大],
+                )]),
+            );
+        }
+        let mut 现场 = 现场::摆在(库);
+        现场.建子库("ES-Gamelist", "平台=PS1");
+        现场.换成小卡(4000);
+        现场.换档案("独立模拟器-fat32");
+
+        let prepared = 现场.照真线排一趟();
+        let 没上卡: Vec<&str> = prepared.left_off.keys().map(String::as_str).collect();
+        assert_eq!(
+            没上卡,
+            if 列不列 {
+                Vec::<&str>::new()
+            } else {
+                vec![变体]
+            },
+            "碟 1 {碟_1_多大} 字节、碟 2 {碟_2_多大} 字节"
+        );
+
+        现场.照真线同步一趟();
+        assert!(
+            卡上的播放列表(现场.卡.path()).is_empty(),
+            "有一张碟放不进，那一套不生成播放列表"
+        );
+        let 元数据 = 现场.卡.path().join("gamelists/ps/gamelist.xml");
+        let 条目 = if 元数据.is_file() {
+            卡上的条目(现场.卡.path(), "ES-Gamelist", "gamelists/ps/gamelist.xml")
+        } else {
+            Vec::new()
+        };
+        if 列不列 {
+            assert_eq!(列着的变体(&条目), [变体], "{条目:#?}");
+            assert_eq!(
+                条目[0].files.first().map(String::as_str),
+                Some("某游戏/游戏 (Disc 1).bin"),
+                "条目照旧指碟 1 在卡上转出来的那一份：{条目:#?}"
+            );
+        } else {
+            assert!(
+                列着的变体(&条目).is_empty(),
+                "碟 1 没上卡，那一套不该列：{条目:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn 导出到主库那一侧照旧全列_没有放不放得下这回事() {
+    // ADR-0004：导出铺在主库上，没有能力档案、没有文件系统这一说，主库里有的每个变体都写一条。同一份主库同步到小卡上时
+    // 大部头不列（上面那条）——那件事一个字都没漏到导出这边来。钉子：导出那一侧交的是选中的全部变体（`converge::run`、
+    // `transfer::media_to_lay`），「没上卡」只有同步那条线判（`Footprint::launching`）。
+    for adapter in adapter::all() {
+        let mut 现场 = 现场::摆在(建个有一份放不下的库());
+        let 之前 = 盘上有什么(&现场.库根);
+        romcat_core::adapter::transfer::export(
+            &mut 现场.catalog,
+            adapter.as_ref(),
+            &Priorities::builtin(),
+            &romcat_core::adapter::transfer::ExportOptions {
+                out: 现场.库根.clone(),
+                dry_run: false,
+                force: false,
+                media: None,
+            },
+        )
+        .expect("导得出来");
+
+        let 元数据 = match adapter.name() {
+            "ES-Gamelist" => "gamelists/FC/gamelist.xml",
+            _ => "FC.metadata.pegasus.txt",
+        };
+        let 条目 = 卡上的条目(&现场.库根, adapter.name(), 元数据);
+        assert_eq!(
+            列着的变体(&条目),
+            [放不下的变体, 放得下的变体],
+            "{}：导出到主库该全列：{条目:#?}",
+            adapter.name()
+        );
+        // 主库里原来就在的每一份一个字节都没动。
+        let 之后 = 盘上有什么(&现场.库根);
+        for (path, 原样) in &之前 {
+            assert_eq!(之后.get(path), Some(原样), "{path} 被动过");
+        }
+    }
 }

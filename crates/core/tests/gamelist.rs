@@ -687,7 +687,7 @@ fn 子库的媒体按_downloaded_media_铺_条目里一个路径都不写() {
         &Gamelist,
         &现场.pool,
         &selected,
-        &BTreeMap::new(),
+        &sync::OnCard::default(),
     )
     .expect("铺得出");
 
@@ -708,7 +708,7 @@ fn 子库的媒体按_downloaded_media_铺_条目里一个路径都不写() {
         &Priorities::builtin(),
         &selected,
         &BTreeMap::new(),
-        &BTreeMap::new(),
+        &sync::OnCard::default(),
     )
     .expect("折得出元数据");
     let 元数据: Vec<&str> = frontend
@@ -779,7 +779,7 @@ fn 同一个变体的第二张同类图被挤掉_而且这件事说得出口() {
         &Gamelist,
         &现场.pool,
         &selected,
-        &BTreeMap::new(),
+        &sync::OnCard::default(),
     )
     .expect("铺得出");
     assert_eq!(media.files.len(), 1, "落点就一条：{:#?}", media.files);
