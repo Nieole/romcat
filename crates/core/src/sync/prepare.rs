@@ -548,27 +548,26 @@ pub fn prepare_selected(
     // 生成物：相对子库根的路径 → 字节。多碟变体的播放列表先进来，前端元数据后进来。
     let mut generated = BTreeMap::new();
     // **多碟变体的播放列表排在筛过之后**（`playlist` 模块文档）：它列的是卡上真落着的那几张碟，有一张放不进目标
-    // 的那一套就不生成。折出来的那几份照同一份文件系统声明再筛一遍——它们自己也可能撞车、名字太长；筛完还在的那几份
-    // 才交给前端元数据与媒体（[`super::playlist::Laid::launching`]）：条目改指它、封面照它的名字铺。
-    let mut launch = BTreeMap::new();
-    if adapter.uses_playlists() {
-        let playlists = super::playlist::lay(
-            &footprint,
-            &desired,
-            adapter.as_ref(),
-            &profile,
-            &platform_manifest,
+    // 的那一套就不生成（用不上播放列表的前端一份都不生成）。折出来的那几份照同一份文件系统声明再筛一遍——它们自己也
+    // 可能撞车、名字太长。
+    let playlists = super::playlist::lay(
+        &footprint,
+        &desired,
+        adapter.as_ref(),
+        &profile,
+        &platform_manifest,
+    );
+    if !playlists.files.is_empty() {
+        desired.add_and_screen(
+            playlists.files.iter().cloned(),
+            &profile.filesystem,
+            prefix_chars,
         );
-        if !playlists.files.is_empty() {
-            desired.add_and_screen(
-                playlists.files.iter().cloned(),
-                &profile.filesystem,
-                prefix_chars,
-            );
-            launch = playlists.launching(&desired);
-            generated.extend(playlists.bytes);
-        }
     }
+    // **条目在卡上启动哪一份**照筛过之后的期望状态定（[`super::Footprint::launching`]）：卡上有播放列表的启动它，
+    // 主文件转了格式的启动转出来那一份（票 `verdict-store-and-sync/20`）。前端元数据照它写条目，媒体照它起名。
+    let launch = footprint.launching(&desired, &playlists);
+    generated.extend(playlists.bytes);
     step("铺媒体")?;
     let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, selected, &launch)
         .map_err(|error| format!("中立库读不动：{error}"))?;
@@ -717,8 +716,8 @@ pub fn missing_roots_message(missing: &[String]) -> String {
 /// 目标落在主库里、或者把主库的根包在里面，就拦下来。
 ///
 /// **只有真要动手那一步需要这一道。** 排计划从头到尾只读，指哪儿都无所谓；而同步是真的
-/// 往目标上建目录、写文件、删文件——一个手滑的目标路径就会在那块 10 TiB 不可再生的盘里
-/// 动手（ADR-0004）。判据用中立库记着的主库根，于是给不给主库根都拦得住。
+/// 往目标上建目录、写文件、删文件——一个手滑的目标路径就会在那块好几 TiB、不可再生的盘里
+/// 动手（ADR-0004；多大见台账 `docs/library-facts.md`）。判据用中立库记着的主库根，于是给不给主库根都拦得住。
 /// **取不到主库根时不拦**：那说明这份库还没扫过，没有边界可守。
 ///
 /// **把根包在里面也拦**：同步往 `<平台目录>/…` 写，平台目录与根同名时就写进了主库。

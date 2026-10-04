@@ -6,7 +6,7 @@
 //! ## 前端条目拿它启动
 //!
 //! 票 `verdict-store-and-sync/18`：卡上生成了播放列表的那个变体，前端条目改指它，几张碟本身不再各成一条
-//! （[`Laid::launching`] 交出 [`Launch`]，收敛照它写条目、铺媒体照它起名）。拿主意的人 2026-10-04 裁的两条路：
+//! （[`Footprint::launching`] 交出 [`Launch`]，收敛照它写条目、铺媒体照它起名）。拿主意的人 2026-10-04 裁的两条路：
 //!
 //! - **ES-DE**：`<path>` 指播放列表，封面照播放列表的名字铺（ES-DE 照 `<path>` 那份文件的名字找媒体），每张碟的主文件
 //!   各写一条 `<hidden>true</hidden>`。碟**不挪地方**——卡上的布局照旧照搬键。ES-DE 的「Show hidden games」默认开着，
@@ -15,8 +15,9 @@
 //!   不弹挑选框。
 //!
 //! **放不进目标的播放列表不在卡上，条目照旧指头一张碟**——条目指着一份卡上没有的文件，比指头一张碟更糟。所以
-//! [`Laid::launching`] 只交筛过之后还在的那几份。没生成播放列表的那几套（档案说不吃 `.m3u`、有一张碟放不进或落成
-//! 吃不下的形态）照旧指头一张碟，别的碟在前端里点不到（挂单 `Q1828`）。
+//! [`Footprint::launching`] 只认筛过之后还在的那几份。没生成播放列表的那几套（档案说不吃 `.m3u`、有一张碟放不进或落成
+//! 吃不下的形态）照旧指头一张碟，别的碟在前端里点不到（挂单 `Q1828`）；头一张碟转了格式，就指转出来的那一份
+//! （票 `verdict-store-and-sync/20`）。
 //!
 //! ## 只在同步这一侧生成
 //!
@@ -68,7 +69,7 @@ pub struct Laid {
     /// 相对子库根的路径 → 那份播放列表的字节。与前端元数据一样**直接写它**：主库里没有源文件。
     pub bytes: BTreeMap<String, Vec<u8>>,
     /// 变体的键 → 它的条目在卡上启动哪一份：那份播放列表，与它列的那几张碟。**还没筛过**，所以不交出去：
-    /// 交给收敛与铺媒体的是 [`Self::launching`]。
+    /// 交给收敛与铺媒体的是 [`Footprint::launching`]，它从 [`Self::launching`] 取播放列表那一半。
     launch: BTreeMap<String, Launch>,
 }
 
@@ -77,8 +78,11 @@ impl Laid {
     ///
     /// 播放列表折出来之后要照文件系统声明再筛一遍（[`Desired::screen`]）——两套多碟游戏的播放列表撞在同一条路径上，
     /// 两份都不放行。那时条目还指着它，前端里点下去就是一份卡上没有的文件；所以收敛与铺媒体读的是这一份，不是没筛过的那一份。
+    ///
+    /// **不对外**：条目在卡上启动哪一份只有一个答案，在 [`Footprint::launching`]。播放列表是其中一种，主文件转了格式
+    /// 是另一种（票 `verdict-store-and-sync/20`）；只取这一半的话，转了格式的条目还指着主库里的原名。
     #[must_use]
-    pub fn launching(&self, desired: &Desired) -> BTreeMap<String, Launch> {
+    pub(super) fn launching(&self, desired: &Desired) -> BTreeMap<String, Launch> {
         let kept: std::collections::BTreeSet<&str> = desired
             .files
             .iter()
