@@ -1042,9 +1042,10 @@ impl App {
     /// 详情页盖住整块屏，那时 `F` 与 `E` 说的是另一件事。
     ///
     /// **表格与卡片墙一样接**（挂单 `Q1142`）：高亮存的是作品身份，两种视图共用一个（设计稿 `S.sel`）；
-    /// `↑` `↓` 照眼下摆着的那一种视图的次序挪。一张卡拿着键盘焦点时这里整个不跑（[`Self::shortcuts`]
-    /// 那三道门），`Enter` / `空格` 由那张卡自己接（`browse::Screen::card_grid`）——设计稿拿
-    /// `if(e.target.closest('.gcard'))return` 挡的是同一件事。
+    /// `↑` `↓` 照眼下摆着的那一种视图的次序挪。一张卡或表格一行拿着键盘焦点时这里整个不跑（[`Self::shortcuts`]
+    /// 那三道门），`Enter` / `空格` 由那个控件自己接（`crate::keys::press`）——设计稿拿
+    /// `if(e.target.closest('.gcard'))return` 挡的是同一件事。那边的 `Enter` 开的也是作品详情页
+    /// （票 `gui-draws-the-rest-of-the-design/20`）。
     fn browse_keys(&mut self, ctx: &egui::Context) {
         if self.view != View::Browse || self.browse.page().is_some() {
             return;

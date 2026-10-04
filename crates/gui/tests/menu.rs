@@ -11,6 +11,7 @@
 
 use romcat_core::catalog::browse::WorkAnchor;
 use romcat_gui::app::{App, View};
+use romcat_gui::browse::work::Tab;
 use romcat_gui::headless;
 
 mod shared;
@@ -1261,20 +1262,83 @@ fn 卡片墙上有弹层有浮层光标在搜索框里时上下键不挪高亮()
     );
 }
 
-/// 键盘焦点眼下落在哪个控件上：读屏那一层（AccessKit）报的角色与名字。卡片墙上一张卡申报为按钮，名字是卡上的标题。
-fn 焦点落在(output: &egui::FullOutput) -> Option<(egui::accesskit::Role, String)> {
+/// 键盘焦点眼下落在读屏那一层（AccessKit）的哪个节点上：交回节点号与节点。
+fn 焦点节点(
+    output: &egui::FullOutput,
+) -> Option<(egui::accesskit::NodeId, &egui::accesskit::Node)> {
     let tree = output.platform_output.accesskit_update.as_ref()?;
-    let (_, node) = tree.nodes.iter().find(|(id, _)| *id == tree.focus)?;
+    tree.nodes
+        .iter()
+        .find(|(id, _)| *id == tree.focus)
+        .map(|(id, node)| (*id, node))
+}
+
+/// 键盘焦点眼下落在哪个控件上：读屏那一层报的角色与名字。卡片墙上一张卡申报为按钮，名字是卡上的标题。
+fn 焦点落在(output: &egui::FullOutput) -> Option<(egui::accesskit::Role, String)> {
+    let (_, node) = 焦点节点(output)?;
     Some((node.role(), node.label().unwrap_or_default().to_owned()))
 }
 
-/// **Tab + Enter 那条无障碍路在卡片墙上照旧走得通**（挂单 `Q1143` 裁定留着它）：Tab 走到一张卡，`Enter`
-/// 打开它（侧边详情摆它、高亮挪到它）、`空格` 勾选它——由那张卡自己接。
+/// 键盘焦点眼下落在哪个控件上：读屏那一层报的角色，与那个控件占的框（报不出框时是 `None`）。
+fn 焦点框(output: &egui::FullOutput) -> Option<(egui::accesskit::Role, Option<egui::Rect>)> {
+    let (_, node) = 焦点节点(output)?;
+    let 框 = node
+        .bounds()
+        .map(|框| {
+            egui::Rect::from_min_max(
+                egui::pos2(框.x0 as f32, 框.y0 as f32),
+                egui::pos2(框.x1 as f32, 框.y1 as f32),
+            )
+        })
+        .filter(egui::Rect::is_finite);
+    Some((node.role(), 框))
+}
+
+/// 按一下 Tab，交回这一帧。
+fn 按tab(ctx: &egui::Context, app: &mut App) -> egui::FullOutput {
+    headless::frame(
+        ctx,
+        shared::输入(vec![shared::按键事件(egui::Key::Tab)]),
+        |ui| app.ui(ui),
+    )
+}
+
+/// 一下一下按 Tab，直到 `认` 在某一帧上认出焦点落到了要找的那一处；交回 `认` 交出来的那个序号。
+fn tab到(
+    ctx: &egui::Context,
+    app: &mut App,
+    要找的: &str,
+    认: impl Fn(&egui::FullOutput) -> Option<usize>,
+) -> usize {
+    for _ in 0..200 {
+        if let Some(at) = 认(&按tab(ctx, app)) {
+            return at;
+        }
+    }
+    panic!("按了两百下 Tab，焦点一次都没落在{要找的}上");
+}
+
+/// 一下一下按 Tab，直到焦点落在卡片墙的一张卡上（它前头是左栏导航、筛选栏、卡片那一条上的几颗）；
+/// 交回那一张是 `名字们` 里的第几张。
+fn tab到一张卡(ctx: &egui::Context, app: &mut App, 名字们: &[String]) -> usize {
+    tab到(ctx, app, "卡片墙的卡", |这一帧| {
+        match 焦点落在(这一帧) {
+            Some((egui::accesskit::Role::Button, 名字)) => {
+                名字们.iter().position(|one| *one == 名字)
+            }
+            _ => None,
+        }
+    })
+}
+
+/// **Tab 那条无障碍路在卡片墙上照旧走得通**（挂单 `Q1143` 裁定留着它）：Tab 走到一张卡，`空格` 勾选它
+/// ——由那张卡自己接，不跳屏。`Enter` 开作品详情页那一下见
+/// `卡片墙上tab走到一张卡按回车_当前屏是那一部的作品详情页`。
 ///
-/// **那张卡问的也是那三道门**：右键它摊开菜单（焦点照旧在它手上），这时 `空格` 不许再勾一下——
-/// 浮层摊着时单键归浮层（今天之前这一处一道门都不问）。
+/// **那张卡问的也是那三道门**：右键它摊开菜单（焦点照旧在它手上），这时 `空格` 不许再勾一下、
+/// `Enter` 不许开作品详情页——浮层摊着时单键归浮层。
 #[test]
-fn 卡片墙上tab走到一张卡_回车打开_空格勾选_浮层摊着时不接() {
+fn 卡片墙上tab走到一张卡_空格勾选_浮层摊着时空格回车都不接() {
     let ctx = headless::context();
     ctx.enable_accesskit();
     let mut app = 四行的界面("卡片墙跳格");
@@ -1283,22 +1347,7 @@ fn 卡片墙上tab走到一张卡_回车打开_空格勾选_浮层摊着时不�
     app.browse_and_site().0.show_cards();
     跑(&ctx, &mut app, Vec::new());
 
-    // 一下一下按 Tab，直到焦点落在一张卡上（它前头是左栏导航、筛选栏、卡片那一条上的几颗）。
-    let mut 落在 = None;
-    for _ in 0..200 {
-        let 这一帧 = headless::frame(
-            &ctx,
-            shared::输入(vec![shared::按键事件(egui::Key::Tab)]),
-            |ui| app.ui(ui),
-        );
-        if let Some((egui::accesskit::Role::Button, 名字)) = 焦点落在(&这一帧)
-            && let Some(at) = 名字们.iter().position(|one| *one == 名字)
-        {
-            落在 = Some(at);
-            break;
-        }
-    }
-    let 第几张 = 落在.expect("按了两百下 Tab，焦点一次都没落在卡片墙的卡上");
+    let 第几张 = tab到一张卡(&ctx, &mut app, &名字们);
     let 那一部 = &次序[第几张];
     // **拿着焦点的那一张封面外头描一圈强调色**（设计稿 `.gcard:focus-visible .cover{box-shadow:0 0 0 2px var(--accent)}`），
     // 只这一圈、不带外头那一圈强调浅色（那是高亮的）。
@@ -1314,27 +1363,29 @@ fn 卡片墙上tab走到一张卡_回车打开_空格勾选_浮层摊着时不�
         "只拿着焦点、没高亮，不该有外头那一圈强调浅色"
     );
 
-    按(&ctx, &mut app, egui::Key::Enter);
-    assert_eq!(
-        app.browse().work().map(|work| &work.anchor),
-        Some(那一部),
-        "Tab 走到的那张卡上按 Enter，侧边详情该摆它"
-    );
-    assert_eq!(app.browse().highlighted(), Some(那一部), "高亮该挪到它");
     按(&ctx, &mut app, egui::Key::Space);
     assert!(
         app.browse().picked().contains(那一部),
         "Tab 走到的那张卡上按空格该勾中它"
     );
     assert_eq!(app.browse().picked().count(4), 1, "只勾中它一部");
+    assert!(
+        app.browse().page().is_none(),
+        "空格只勾选，不该跳到作品详情页"
+    );
 
-    // 右键它：菜单摊开，焦点照旧在它手上。这时空格不许再动勾选。
+    // 右键它：菜单摊开，焦点照旧在它手上。这时空格不许再动勾选，回车不许开作品详情页。
     let 画的 = 右键(&ctx, &mut app, &名字们[第几张]);
     assert!(画的.contains("刮削此作品"), "菜单该摊开了：\n{画的}");
     按(&ctx, &mut app, egui::Key::Space);
     assert!(
         app.browse().picked().contains(那一部),
         "菜单摊着时那张卡上的空格不该把勾去掉"
+    );
+    按(&ctx, &mut app, egui::Key::Enter);
+    assert!(
+        app.browse().page().is_none(),
+        "菜单摊着时那张卡上的回车不该开作品详情页"
     );
 }
 
@@ -1389,5 +1440,168 @@ fn 详情页开着时浏览屏那几下不接() {
         app.browse_and_site().0.picked().count(2),
         0,
         "详情页开着时空格不该勾中任何东西"
+    );
+}
+
+// ——— 焦点那条路上 `Enter` 开作品详情页（票 `gui-draws-the-rest-of-the-design/20`，挂单 `Q1469`） ———
+
+/// 眼下开着的作品详情页停在哪一面；没开着是 `None`。
+fn 详情页停在(app: &App) -> Option<Tab> {
+    app.browse().page().map(romcat_gui::browse::work::Page::tab)
+}
+
+/// **卡片墙上 Tab 走到一张卡按 `Enter`，开的是那一部的作品详情页**，停在概览——照稿
+/// （`card&&e.key==='Enter'` 那一段 `openWD(i,'overview')`）与快捷键表那一句「打开作品详情 Enter」。
+/// 从前开的是侧边详情（挂单 `Q1469`）。高亮跟着挪到它，回车不勾选。
+#[test]
+fn 卡片墙上tab走到一张卡按回车_当前屏是那一部的作品详情页() {
+    let ctx = headless::context();
+    ctx.enable_accesskit();
+    let mut app = 四行的界面("卡片墙跳格回车");
+    let 次序 = 次序(&mut app);
+    let 名字们: Vec<String> = 次序.iter().map(卡上的名字).collect();
+    app.browse_and_site().0.show_cards();
+    跑(&ctx, &mut app, Vec::new());
+
+    let 第几张 = tab到一张卡(&ctx, &mut app, &名字们);
+    let 那一部 = &次序[第几张];
+    按(&ctx, &mut app, egui::Key::Enter);
+    assert_eq!(
+        详情页停在(&app),
+        Some(Tab::Overview),
+        "Tab 走到的那张卡上按 Enter，该进作品详情页、停在概览"
+    );
+    assert_eq!(
+        app.browse().work().map(|work| &work.anchor),
+        Some(那一部),
+        "开的该是 Tab 走到的那一部"
+    );
+    assert_eq!(app.browse().highlighted(), Some(那一部), "高亮该挪到它");
+    assert_eq!(app.browse().picked().count(4), 0, "回车不勾选");
+}
+
+/// 一下一下按 Tab，直到焦点落在表格某一行**行首那一格**上；交回那一行是 `名字们` 里的第几行，
+/// 连着那一格在读屏那一层的节点号（好认出焦点后来还在不在它上头）。
+///
+/// 表格一行是几格拼起来的，每一格各是一个 Tab 站（`egui_extras` 每一格各是一个点得中的 `Ui`），而读屏那一层
+/// 报不出那几格的框——认得出是哪一行的只有行首那枚勾选框：Tab 走到一枚与某一行作品名同高的勾选框，
+/// 再按一下 Tab，就是那一行行首那一格（格子的 `Ui` 收尾时才登记，排在它里头那枚勾选框后头；
+/// 焦点那一圈画在它上头，`look::focus_ring`）。
+fn tab到表格一行(
+    ctx: &egui::Context,
+    app: &mut App,
+    名字们: &[String],
+) -> (usize, egui::accesskit::NodeId) {
+    let at = tab到(ctx, app, "表格的一行", |这一帧| {
+        let Some((egui::accesskit::Role::CheckBox, Some(框))) = 焦点框(这一帧) else {
+            return None;
+        };
+        名字们.iter().position(|名字| {
+            shared::画着的每一处(这一帧, &|字| 字 == 名字)
+                .iter()
+                .any(|字| 框.y_range().contains(字.center().y))
+        })
+    });
+    let 下一格 = 按tab(ctx, app);
+    let 落在 = 焦点节点(&下一格).map(|(id, node)| (id, node.role()));
+    let Some((id, egui::accesskit::Role::GenericContainer)) = 落在 else {
+        panic!("从那一行的勾选框再按一下 Tab，该落在那一行行首那一格上：{落在:?}");
+    };
+    (at, id)
+}
+
+/// **表格上一行拿着焦点按 `Enter`，同样开那一部的作品详情页**，停在概览（卡片墙与表格一个说法，挂单 `Q1469`）；
+/// 从前 egui 把它当成点了一下那一行，只开侧边详情。
+///
+/// **只高亮着、没有焦点时也一样**：关掉详情页、`↓`（或 `↑`）挪到相邻一行，`Enter` 开的是那一行
+/// （设计稿 `keydown` 那一段 `openWD(S.sel,'overview')`）。
+#[test]
+fn 表格上tab走到一行按回车_当前屏是那一部的作品详情页() {
+    let ctx = headless::context();
+    ctx.enable_accesskit();
+    let mut app = 四行的界面("表格跳格回车");
+    let 次序 = 次序(&mut app);
+    let 名字们: Vec<String> = 次序.iter().map(卡上的名字).collect();
+    跑(&ctx, &mut app, Vec::new());
+
+    let (第几行, _) = tab到表格一行(&ctx, &mut app, &名字们);
+    let 那一部 = &次序[第几行];
+    按(&ctx, &mut app, egui::Key::Enter);
+    assert_eq!(
+        详情页停在(&app),
+        Some(Tab::Overview),
+        "表格上拿着焦点的那一行按 Enter，该进作品详情页、停在概览"
+    );
+    assert_eq!(
+        app.browse().work().map(|work| &work.anchor),
+        Some(那一部),
+        "开的该是拿着焦点的那一行"
+    );
+    assert_eq!(app.browse().highlighted(), Some(那一部), "高亮该挪到它");
+    assert_eq!(app.browse().picked().count(4), 0, "回车不勾选");
+
+    // 只高亮着那一路：关掉详情页（那一格跟着丢了焦点），挪到相邻一行再按 Enter。
+    app.browse_and_site().0.close_page();
+    跑(&ctx, &mut app, Vec::new());
+    let (挪, 下一行) = if 第几行 + 1 < 次序.len() {
+        (egui::Key::ArrowDown, 第几行 + 1)
+    } else {
+        (egui::Key::ArrowUp, 第几行 - 1)
+    };
+    按(&ctx, &mut app, 挪);
+    assert_eq!(
+        app.browse().highlighted(),
+        Some(&次序[下一行]),
+        "上下键该把高亮挪到相邻那一行"
+    );
+    按(&ctx, &mut app, egui::Key::Enter);
+    assert_eq!(
+        详情页停在(&app),
+        Some(Tab::Overview),
+        "高亮着一行按 Enter，该进作品详情页"
+    );
+    assert_eq!(
+        app.browse().work().map(|work| &work.anchor),
+        Some(&次序[下一行]),
+        "开的该是高亮的那一行"
+    );
+}
+
+/// **表格上那一行拿着焦点时也问那三道门**：右键它摊开菜单（指针就在它上头，焦点照旧在它手上），这时 `Enter`
+/// 不许开作品详情页——浮层摊着时单键归浮层（从前那一下 egui 当成点了一下那一行，一道门都不问）。
+///
+/// **`空格` 照旧不跳屏**：拿着焦点的那一行上按空格，同点一下那一行（高亮挪到它、侧边详情摆它）。
+#[test]
+fn 表格上一行拿着焦点时_空格不跳屏_浮层摊着时回车不接() {
+    let ctx = headless::context();
+    ctx.enable_accesskit();
+    let mut app = 四行的界面("表格跳格三道门");
+    let 次序 = 次序(&mut app);
+    let 名字们: Vec<String> = 次序.iter().map(卡上的名字).collect();
+    跑(&ctx, &mut app, Vec::new());
+
+    let (第几行, 那一格) = tab到表格一行(&ctx, &mut app, &名字们);
+    let 那一部 = &次序[第几行];
+    按(&ctx, &mut app, egui::Key::Space);
+    assert!(app.browse().page().is_none(), "空格不该跳到作品详情页");
+    assert_eq!(
+        app.browse().work().map(|work| &work.anchor),
+        Some(那一部),
+        "拿着焦点的那一行上按空格，同点一下它：侧边详情摆它"
+    );
+
+    let 画的 = 右键(&ctx, &mut app, &名字们[第几行]);
+    assert!(画的.contains("刮削此作品"), "菜单该摊开了：\n{画的}");
+    // 焦点照旧在那一行行首那一格上——不然下面那一下回车走的不是那一行自己接的那条路，测不着那道门。
+    let 这一帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    assert_eq!(
+        焦点节点(&这一帧).map(|(id, _)| id),
+        Some(那一格),
+        "右键之后焦点该照旧在那一行行首那一格上"
+    );
+    按(&ctx, &mut app, egui::Key::Enter);
+    assert!(
+        app.browse().page().is_none(),
+        "菜单摊着时那一行上的回车不该开作品详情页"
     );
 }

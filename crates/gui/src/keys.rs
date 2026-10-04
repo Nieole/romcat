@@ -26,9 +26,14 @@
 //! ## 这一下算不算快捷键，也只有一处
 //!
 //! 键盘入口有三处：窗口那一层的全局快捷键（`App::shortcuts`）、待确认屏逐条那几下
-//! （`queue::Screen::keyboard`）、卡片墙上拿着焦点的那张卡自己接的 `Enter` / `空格`。
+//! （`queue::Screen::keyboard`）、浏览屏上拿着焦点的那张卡或那一行自己接的 `Enter` / `空格`
+//! （[`press`]）。
 //! 「有弹层、有浮层、焦点在别的控件上就不接」那三道门三处问的是同一个函数（[`allowed`]，挂单 `Q1143`）——
 //! 从前前两处各抄一份，第三处一道都没问。
+//!
+//! **`Enter` 在浏览屏上哪一路按都开作品详情页**：高亮着一部时窗口那一层接，Tab 走到一张卡或一行上时
+//! 那个控件自己接——两路开的是同一屏（票 `gui-draws-the-rest-of-the-design/20`），表上那一句
+//! 「打开作品详情 Enter」说的是实话。
 //!
 //! ## 修饰键两种写法
 //!
@@ -76,14 +81,62 @@ pub const SEE_SHEET: &str = "随时按 ? 查看这张表。";
 /// 3. **键盘焦点在别的控件上**——光标在输入框里时那一栏正打着中文，`F` 是要打的字母不是命令；
 ///    焦点落在一颗按钮、一行、一张卡上时，`Enter` / `空格` 归那个控件自己（Tab + Enter 那条无障碍路）。
 ///
-/// `owner` 是问这句话的那个控件：卡片墙上拿着焦点的那张卡问的是「我自己那两下接不接」，焦点在它手上
-/// 不算「别的控件」。窗口那一层与待确认屏不是控件，给 `None`——那时任何控件拿着焦点都不接。
+/// `owner` 是问这句话的那个控件：拿着焦点的那张卡、那一行问的是「我自己那两下接不接」，焦点在它手上
+/// 不算「别的控件」——它交的是眼下拿着焦点的那一格（[`press`]：表格一行是几格拼起来的）。
+/// 窗口那一层与待确认屏不是控件，给 `None`——那时任何控件拿着焦点都不接。
 #[must_use]
 pub fn allowed(ctx: &egui::Context, owner: Option<egui::Id>) -> bool {
     let 焦点在别处 = ctx
         .memory(egui::Memory::focused)
         .is_some_and(|focused| Some(focused) != owner);
     crate::dialog::screen_has_keys(ctx) && !egui::Popup::is_any_open(ctx) && !焦点在别处
+}
+
+/// 一个可点件这一帧**被按了哪一下**（[`press`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Press {
+    /// 指针点了一下（读屏那一层的「点一下」也算这一种）。
+    Pointer,
+    /// 拿着焦点时按的 `Enter` / `空格`，三道门（[`allowed`]）都开着——交那个键。
+    Key(egui::Key),
+    /// 拿着焦点时按的，可三道门有一道关着：这一下谁都不接，**也不许当成指针点的**
+    /// （不然浮层摊着时按一下 `空格`，照样算点了一下）。
+    Refused,
+}
+
+/// **这个可点件这一帧被按了哪一下**：指针点的，还是拿着焦点时按的 `Enter` / `空格`（Tab + Enter 那条无障碍路）；
+/// 没被按是 `None`。卡片墙上那张卡、表格上那一行都只问它这一处。
+///
+/// egui 把拿着焦点的可点件上按下的这两下也算成点了一下（`Response::clicked`），与指针点的那一下分不出来
+/// ——而两样要的不是同一件事：点一下卡片墙上一张卡、表格上一行，开的是侧边详情；`Enter` 开的是作品详情页
+/// （设计稿 `card&&e.key==='Enter'` 那一段 `openWD(i,'overview')`，票 `gui-draws-the-rest-of-the-design/20`）。
+/// 认法：点了，却不是指针点的（`Response::clicked_by`），这一帧又按着这两个键之一。
+///
+/// **键盘按的那一下问三道门**（[`allowed`]），`owner` 交的是**眼下拿着焦点的那一个**：这一下既然是键盘按的，
+/// 焦点就在这个可点件上（egui 只给拿着焦点的那一个算这一下），第三道门本就开着。不交 `response.id`——
+/// 表格那一行是几格拼起来的（`egui_extras::TableRow::response` 是每一格的并，`id` 只是头一格的），
+/// 焦点落在哪一格都算这一行。
+#[must_use]
+pub fn press(response: &egui::Response) -> Option<Press> {
+    if !response.clicked() {
+        return None;
+    }
+    if response.clicked_by(egui::PointerButton::Primary) {
+        return Some(Press::Pointer);
+    }
+    let ctx = &response.ctx;
+    let Some(key) = ctx.input(|input| {
+        [egui::Key::Enter, egui::Key::Space]
+            .into_iter()
+            .find(|key| input.key_pressed(*key))
+    }) else {
+        return Some(Press::Pointer);
+    };
+    Some(if allowed(ctx, ctx.memory(egui::Memory::focused)) {
+        Press::Key(key)
+    } else {
+        Press::Refused
+    })
 }
 
 /// 表上一条：`(这个键管什么, 键怎么写)`。
