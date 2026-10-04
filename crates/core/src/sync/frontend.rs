@@ -29,11 +29,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::adapter::converge;
 use crate::adapter::{Adapter, AdapterError};
-use crate::catalog::{Catalog, CatalogError, frontend::hash_of};
+use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::priority::Priorities;
 use crate::sublibrary::Selected;
 
-use super::{DesiredFile, FileKind, Stamp};
+use super::{DesiredFile, FileKind};
 
 /// 元数据在清单里挂在哪个「变体」名下。
 ///
@@ -101,24 +101,13 @@ pub fn lay(
         // 目标上已经有一份而且不是我们放的那一份时，计划器那一侧会把它报成
         // 「落点被占」或者「被改过」，一个字节都不会覆盖过去（ADR-0015）。
         let bytes = adapter.write(&doc, None)?;
-        let fingerprint = hash_of(&bytes);
-        out.files.push(DesiredFile {
-            path: file.file_name.clone(),
-            kind: FileKind::Metadata,
-            bytes: bytes.len() as u64,
-            unreadable: false,
-            // **生成物没有源文件**，于是「源」这一格写它自己的身份加**内容指纹**：
-            // 内容一变键就变，`source_unchanged` 当场判出要重写。时间那一格填 0
-            // ——生成物没有修改时间这回事，而判据已经在键里了。
-            source: format!("{}#{}", file.file_name, &fingerprint[..16]),
-            source_stamp: Stamp {
-                bytes: bytes.len() as u64,
-                mtime_ns: Some(0),
-            },
-            variant: NOT_A_VARIANT.to_string(),
-            // 元数据不转格式：适配器写出来的就是目标前端要的那一份。
-            convert: None,
-        });
+        // **生成物没有源文件**：「源」那一格写它自己的身份加内容指纹（`DesiredFile::generated`）。
+        out.files.push(DesiredFile::generated(
+            file.file_name.clone(),
+            FileKind::Metadata,
+            &bytes,
+            NOT_A_VARIANT.to_string(),
+        ));
         out.bytes.insert(file.file_name.clone(), bytes);
     }
     out.files.sort_by(|a, b| a.path.cmp(&b.path));

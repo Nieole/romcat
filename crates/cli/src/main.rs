@@ -2724,12 +2724,26 @@ fn run_titles(args: &TitlesArgs) -> ExitCode {
 fn run_adapters() -> ExitCode {
     println!("适配器与能力档位");
     println!("{}", "═".repeat(24));
-    println!("{}{}元数据文件", pad("格式", 12), pad("上限", 12));
+    println!(
+        "{}{}{}元数据文件",
+        pad("格式", 12),
+        pad("上限", 12),
+        pad("多碟播放列表", 14)
+    );
     for adapter in adapter::all() {
         println!(
-            "{}{}{}",
+            "{}{}{}{}",
             pad(adapter.name(), 12),
             pad(adapter.ceiling().label(), 12),
+            // 多碟变体同步到卡上时生不生成 `.m3u`（`Adapter::uses_playlists`）；导出到主库一律不生成。
+            pad(
+                if adapter.uses_playlists() {
+                    "同步时生成"
+                } else {
+                    "不生成"
+                },
+                14
+            ),
             adapter.file_name()
         );
     }

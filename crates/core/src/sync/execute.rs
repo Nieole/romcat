@@ -346,7 +346,7 @@ pub struct Sources<'a> {
     pub target_root: &'a Path,
     /// **媒体池**里的落点：相对子库根的路径 → 池里那个文件。
     pub from_pool: &'a BTreeMap<String, PathBuf>,
-    /// 生成物的字节：相对子库根的路径 → 内容。元数据走这条。
+    /// 生成物的字节：相对子库根的路径 → 内容。前端元数据与多碟变体的播放列表走这条。
     pub generated: &'a BTreeMap<String, Vec<u8>>,
     /// 铺媒体时从哪儿探测硬链接。给 `None` 就一律复制。
     pub link_probe_dir: Option<&'a Path>,
@@ -596,7 +596,7 @@ fn place(
     let _ = std::fs::remove_file(&temp);
 
     let how = match step.kind {
-        FileKind::Metadata => {
+        FileKind::Metadata | FileKind::Playlist => {
             let bytes = sources
                 .generated
                 .get(&step.path)

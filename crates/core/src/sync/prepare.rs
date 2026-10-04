@@ -172,7 +172,7 @@ pub struct Prepared {
     pub plan: Plan,
     /// 媒体：相对子库根的路径 → 它在**媒体池**里的落点。
     pub from_pool: BTreeMap<String, PathBuf>,
-    /// 生成物：相对子库根的路径 → 内容。前端元数据走这条。
+    /// 生成物：相对子库根的路径 → 内容。前端元数据与多碟变体的播放列表走这条。
     pub generated: BTreeMap<String, Vec<u8>>,
     /// **媒体池**自己的临时目录。执行那一步拿它当硬链接探测的源那一头。
     pub scratch: PathBuf,
@@ -394,7 +394,7 @@ pub const PLAN_STEPS: u32 = 8;
 /// 于是报告里那个数与这里排出来的计划是**同一条线**算的，不是两条各自演化的代码（挂账 D76）。
 ///
 /// # Errors
-/// 子库不在、前端格式没有适配器、中立库读不动、目标看不了时返回
+/// 子库不在、前端格式没有适配器、中立库读不动、目标看不了（或者平台清单读不动，见 [`prepare_selected`]）时返回
 /// [`PlanCutoff::Unplanned`]（带着结构化的原因）；被叫停时返回
 /// [`PlanCutoff::Halted`]——**那是两个不同的支，不是两句
 /// 不同的话**，任务台按它分「停了」与「失败」。
@@ -450,8 +450,8 @@ pub fn prepare(
 /// 是因为调用方要在步名前面加上是哪一台设备——把手自己不知道。
 ///
 /// # Errors
-/// 目标看不了、前端格式没有适配器、中立库读不动时返回 [`PlanCutoff::Unplanned`]；
-/// `step` 说停下时返回 [`PlanCutoff::Halted`]。
+/// 目标看不了、前端格式没有适配器、中立库读不动、用得上播放列表的前端而平台清单读不动时返回
+/// [`PlanCutoff::Unplanned`]；`step` 说停下时返回 [`PlanCutoff::Halted`]。
 pub fn prepare_selected(
     catalog: &Catalog,
     workspace: &Path,
@@ -505,13 +505,15 @@ pub fn prepare_selected(
     let pool = MediaPool::at(&workspace::media_pool_dir(workspace));
 
     step("折期望状态")?;
-    let mut desired = super::desired(catalog, selected, &profile)
+    // 脚印留着（与 `super::desired` 是同一条线，ADR-0024）：给多碟变体折播放列表还要它的成员与平台。
+    let footprint = super::Footprint::gather(catalog, selected)
         .map_err(|error| format!("中立库读不动：{error}"))?;
+    let mut desired = footprint.desired(&profile);
     step("铺媒体")?;
     let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, selected)
         .map_err(|error| format!("中立库读不动：{error}"))?;
     step("折前端元数据")?;
-    let mut frontend = super::frontend::lay(
+    let frontend = super::frontend::lay(
         catalog,
         adapter.as_ref(),
         &priorities,
@@ -522,16 +524,39 @@ pub fn prepare_selected(
     desired.files.extend(media.files.iter().cloned());
     desired.files.extend(frontend.files.iter().cloned());
     desired.files.sort_by(|a, b| a.path.cmp(&b.path));
+    // 生成物：相对子库根的路径 → 字节。前端元数据先进来，多碟变体的播放列表筛过之后再进来。
+    let mut generated = frontend.bytes;
     // **放不进目标存储的在这里就被拦下来**（ADR-0017 补充段）：FAT32 那 4 GiB 的
     // 单文件上限、文件名不收的字符、路径太长。拦在排计划**之前**，于是它们连成为一条
     // 步骤的路径都没有——「传到一半失败」这件事在构造上不会发生。
     //
     // 路径上限比的是**完整路径**，因此把子库根那串的长度也交进去。
     step("按目标存储筛一遍")?;
-    desired.screen(
-        &profile.filesystem,
-        path::display(&root).encode_utf16().count(),
-    );
+    let prefix_chars = path::display(&root).encode_utf16().count();
+    desired.screen(&profile.filesystem, prefix_chars);
+    // **多碟变体的播放列表排在筛过之后**（`playlist` 模块文档）：它列的是卡上真落着的那几张碟，有一张放不进目标
+    // 的那一套就不生成。折出来的那几份再照同一份文件系统声明筛一遍——它们自己也可能撞车、名字太长；
+    // 已经筛过的那些再筛一遍结论不变（筛过的彼此不撞，单份的判据只看它自己）。
+    //
+    // **用不上播放列表的前端连平台清单都不读**：认各张碟要它（`shape::discs`，与扫描、成型同一条查法），
+    // 可 Pegasus 的子库不该因为一份它用不上的清单读不动而排不出计划。
+    if adapter.uses_playlists() {
+        let platform_manifest = crate::sources::manifest(workspace)
+            .map_err(|error| format!("平台清单读不动：{error}"))?;
+        let playlists = super::playlist::lay(
+            &footprint,
+            &desired,
+            adapter.as_ref(),
+            &profile,
+            &platform_manifest,
+        );
+        if !playlists.files.is_empty() {
+            desired.files.extend(playlists.files);
+            desired.files.sort_by(|a, b| a.path.cmp(&b.path));
+            desired.screen(&profile.filesystem, prefix_chars);
+            generated.extend(playlists.bytes);
+        }
+    }
 
     step("读清单")?;
     let manifest = catalog
@@ -543,7 +568,7 @@ pub fn prepare_selected(
     // 以落点为键的表上——挪了这边不挪那边，执行时会报「在媒体池里找不到落点」。
     let realign = super::align(&mut desired, &actual);
     realign.apply(&mut media.from_pool);
-    realign.apply(&mut frontend.bytes);
+    realign.apply(&mut generated);
     step("排计划")?;
     let plan = super::plan(
         &sublibrary,
@@ -563,7 +588,7 @@ pub fn prepare_selected(
         actual,
         plan,
         from_pool: media.from_pool,
-        generated: frontend.bytes,
+        generated,
         scratch: pool.scratch(),
         // 读不懂的规则几条是求值那半截的账：这里收的已经是求过值的选择集，由 [`prepare`] 填。
         broken: 0,

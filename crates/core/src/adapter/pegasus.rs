@@ -317,6 +317,13 @@ impl Adapter for Pegasus {
         STRUCTURAL_LOSSES
     }
 
+    /// **查过了，用不上**（不是没查过的那个默认）：Pegasus 只列元数据文件里写着的条目，不走目录认游戏，
+    /// 卡上多一份没有哪个条目指着的 `.m3u`，前端里根本见不着它。要它用得上，得让条目的 `files:` 指过去——
+    /// 收敛眼下只写每个变体的主文件，多碟变体那一行是头一张碟（挂单 `Q1647`）。
+    fn uses_playlists(&self) -> bool {
+        false
+    }
+
     fn file_name(&self) -> &'static str {
         FILE_NAME
     }

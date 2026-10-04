@@ -437,6 +437,15 @@ impl Adapter for Gamelist {
         STRUCTURAL_LOSSES
     }
 
+    /// **用得上。** ES 家族一个 `<game>` 只装得下一个文件，多碟游戏本来就靠 `.m3u` 这类容器文件绕过
+    /// （`docs/research/metadata-formats.md` §C.2 ②）；ES-DE 自己走一遍平台目录认游戏，多碟那几个系统的
+    /// 扩展名表里本来就有 `.m3u`（官方示例 `c64/Multidisk/Last Ninja 2/Last Ninja 2.m3u`），放在碟旁边它就列得出来
+    /// ——眼下列成单独一条、没有元数据，前端条目照旧启动头一张碟；开着「只显示 gamelist 里的游戏」时连这一条也看不见
+    /// （挂单 `Q1647`）。
+    fn uses_playlists(&self) -> bool {
+        true
+    }
+
     fn read(&self, bytes: &[u8]) -> Result<Parsed, AdapterError> {
         let snapshot = snapshot_of(bytes)?;
         let (doc, lossy, counts) = fold(&snapshot);
@@ -486,7 +495,7 @@ impl Adapter for Gamelist {
     fn kept_verbatim(&self, doc: &Document, baseline: &Parsed) -> u64 {
         // **按段数，不按条目数。** 一个 `<game>` 只装得下一个文件，多文件条目摊成
         // 好几段——照 [`Entry::origin`] 数的话，摊开的那几段会被全算成「没认领」。
-        // 真库上一趟导出就是 19,442 段的谎。
+        // 真库上一趟导出就是近两万段的谎（台账没收这个数，出处是票 `rom-metadata-automation/17`，挂单 `Q1256`）。
         let Ok(snapshot) = snapshot_of(&baseline.source) else {
             return 0;
         };
@@ -1421,8 +1430,9 @@ fn relativize<'a>(file: &'a str, prefix: Option<&str>) -> &'a str {
 
 /// 要从 `<path>` 里剥掉的那一段**平台目录**。
 ///
-/// 来自文档里的**合集**段，取的是它的 `directory` 而不是名字：真库上 22 个平台里有
-/// 12 个两者对不上，而 `<path>` 是相对**磁盘上那个目录**解析的。数不出唯一目录时
+/// 来自文档里的**合集**段，取的是它的 `directory` 而不是名字：真库上二十来个平台里有
+/// 一半上下两者对不上（见 [`Collection::directory`](super::Collection::directory) 的文档），
+/// 而 `<path>` 是相对**磁盘上那个目录**解析的。数不出唯一目录时
 /// 退回合集名，剥不掉就整条原样写出去（见 [`relativize`]）。
 ///
 /// ES gamelist 自己没有合集这个概念（平台是由文件摆在哪个目录下说的），所以读进来的
@@ -1973,7 +1983,7 @@ mod tests {
 
     #[test]
     fn 剥的是磁盘上那个目录_不是平台名() {
-        // 真库上 22 个平台里有 12 个两者对不上（`WII` 的目录叫 `Wii`）。
+        // 真库上二十来个平台里有一半上下两者对不上（`WII` 的目录叫 `Wii`；出处见 `Collection::directory` 的文档）。
         // `<path>` 是相对**磁盘上那个目录**解析的，剥错一段就一条都指不着。
         let doc = Document {
             entries: vec![

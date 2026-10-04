@@ -181,6 +181,18 @@ pub trait Adapter {
         &[]
     }
 
+    /// 这个前端**用不用得上**多碟变体旁边那份 `.m3u` **播放列表**（票 `verdict-store-and-sync/11`）。
+    ///
+    /// 答「用得上」的，同步把多碟变体送上卡时多生成一份（[`sync::playlist`](crate::sync::playlist)）；答「用不上」的
+    /// 一份都不生成——卡上多一份前端找不着的文件，只是白占清单里的一行。**导出到主库那一侧一律不生成**，与这一条
+    /// 无关（ADR-0004：主库里不多出非元数据文件）。
+    ///
+    /// 默认是用不上，意思是**还没查过**：与 [`Self::structural_losses`] 那条「没查过就不作声称」同一条纪律——
+    /// 一个新适配器不会因为忘了答这一句就往卡上撒播放列表。
+    fn uses_playlists(&self) -> bool {
+        false
+    }
+
     /// 这个格式的元数据文件默认叫什么。
     fn file_name(&self) -> &'static str;
 
@@ -205,7 +217,7 @@ pub trait Adapter {
     /// 因为「一个条目占几段」是格式自己的事：Pegasus 一个条目一段，ES gamelist 一个
     /// `<game>` 只装得下一个文件，多文件条目于是摊成好几段。在共用那一层按
     /// [`Entry::origin`] 数，会把摊开的那几段全算成「没认领」——真库上一趟导出就是
-    /// 19,442 段的谎。
+    /// 近两万段的谎（台账没收这个数，出处是票 `rom-metadata-automation/17`，挂单 `Q1256`）。
     ///
     /// 默认按 [`Entry::origin`] 数：一个条目认领一段。
     fn kept_verbatim(&self, doc: &Document, baseline: &Parsed) -> u64 {
@@ -432,8 +444,8 @@ pub struct Collection {
     /// 这个合集的内容住在哪个**平台目录**下（[`path::platform_of_key`](crate::path::platform_of_key)
     /// 取的就是它）。
     ///
-    /// **它与 [`name`](Self::name) 常常不是同一个词**：真库上 22 个平台里有 12 个
-    /// 目录名与平台名对不上（`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。
+    /// **它与 [`name`](Self::name) 常常不是同一个词**：真库上二十来个平台里有一半上下
+    /// 目录名与平台名对不上（平台数见台账 `docs/library-facts.md`；对不上的个数台账没收，出处是挂账 `D140`，挂单 `Q1256`）（`WII` 的目录叫 `Wii`、`PS1` 的叫 `ps`、`WS` 的叫 `wsc`）。
     /// 平台名是给人看的，平台目录是磁盘上的事实（ADR-0011：目录是强先验）。
     ///
     /// ES 家族要它：`es_systems.xml` 里那个 `<name>` **就是这个目录名**
