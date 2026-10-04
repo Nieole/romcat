@@ -474,6 +474,64 @@ fn 没有ffmpeg时说清影响的只是视频预览帧() {
     );
 }
 
+/// 关于那一节：**每个数据源单独一行，右边一格写着它的许可**（票 `core-answers-once/10`，挂单 `Q1067`）。
+///
+/// 名单是这个工具真取数据的那几家：数据源清单里那几份 DAT、本机的中文离线源与 Switch 数据库、
+/// 联网的 ScreenScraper。从前这一节只说得出「以它们自己的说明为准」。
+#[test]
+fn 关于那一节每个数据源都有许可那一格() {
+    let (mut app, _工作区) = 开在设置屏上("设置屏-许可");
+    app.settings_mut().show_section(Section::About);
+    let ctx = headless::context();
+    一帧(&ctx, &mut app);
+    let out = 一帧(&ctx, &mut app);
+    let 段们 = 每一段(&out);
+    assert!(
+        !段们.iter().any(|(字, _)| 字.contains("自己的说明为准")),
+        "关于那一节还在说「以它们自己的说明为准」：\n{}",
+        画出来的字(&out),
+    );
+    let 名单 = romcat_core::sources::licenses();
+    // 名单本身得是这个工具真取数据的那几家：数据源清单里那几份 DAT 的源，加上另外三家。
+    let 该有的: Vec<String> = romcat_core::dat::registry::Registry::builtin()
+        .sources()
+        .iter()
+        .map(|source| source.name.clone())
+        .chain([
+            romcat_core::sources::Source::Chinese.label().to_owned(),
+            romcat_core::sources::Source::Switch.label().to_owned(),
+            romcat_core::scrape::online::SCREEN_SCRAPER.to_owned(),
+        ])
+        .collect();
+    let 名单上的: Vec<String> = 名单.iter().map(|一家| 一家.name.clone()).collect();
+    assert_eq!(名单上的, 该有的);
+    // 内容区从「版本」那一格的左缘起：左栏与节名那一列上的字不算。
+    let 左缘 = 画在哪儿(&out, "版本").min.x - 1.0;
+    for 一家 in &名单 {
+        let 名 = &一家.name;
+        let Some((_, 名格)) = 段们.iter().find(|(字, 在)| 字 == 名 && 在.min.x >= 左缘)
+        else {
+            panic!(
+                "关于那一节上没有单独一格写着「{名}」：\n{}",
+                画出来的字(&out)
+            );
+        };
+        // 同一行、在名字右边的那一格，写的就是核心库给的那一句许可。
+        let 许可格 = 段们.iter().find(|(字, 在)| {
+            字 == &一家.license
+                && 在.min.x > 名格.max.x
+                && 在.min.y < 名格.max.y
+                && 在.max.y > 名格.min.y
+        });
+        assert!(
+            许可格.is_some(),
+            "「{名}」那一行右边没有许可那一格「{}」：\n{}",
+            一家.license,
+            画出来的字(&out)
+        );
+    }
+}
+
 /// 数据源那一节：配额那一段警示**与刮削面板上那一段是同一句**（ADR-0007 那条命脉只有一处写）。
 #[test]
 fn 配额那段警示与刮削面板是同一句() {
@@ -706,4 +764,34 @@ fn 配额那句话说实话_不说写在刮削面板上() {
     let 屏上 = 跑一帧(&ctx, |ui| app.ui(ui));
     assert!(!屏上.contains("写在刮削面板上"), "{屏上}");
     assert!(屏上.contains("界面上眼下哪儿都看不到"), "{屏上}");
+}
+
+/// 数据源**读不动**时，设置屏两处（工作目录那一节「里头装着」、数据源那一节「本机那几份」）那一格
+/// 写的是**核心库给的那个词**，库屏那张表印的是同一个（挂单 `Q1074`，`tests/roots.rs` 那一条）。
+#[test]
+fn 数据源读不动时设置屏那一格写核心库给的词() {
+    let 工作区 = temp_dir("设置屏-数据源读不动");
+    shared::摆一份读不动的dat库(工作区.path());
+    drop(romcat_core::catalog::Catalog::create(&库文件(&工作区), "主库").expect("建得出中立库"));
+    let mut app = 开一扇窗(&工作区);
+    let 词 = romcat_core::sources::SourceState::Broken { why: String::new() }
+        .label()
+        .expect("读不动那一档有词");
+    let dat_名 = romcat_core::sources::Source::Dat.label();
+    let ctx = headless::context();
+    for 节 in [Section::Workspace, Section::Sources] {
+        app.settings_mut().show_section(节);
+        一帧(&ctx, &mut app);
+        let out = 一帧(&ctx, &mut app);
+        let 名格 = 画在哪儿(&out, dat_名);
+        let 同一行 = 每一段(&out).into_iter().any(|(字, 在)| {
+            字 == 词 && 在.min.x > 名格.max.x && 在.min.y < 名格.max.y && 在.max.y > 名格.min.y
+        });
+        assert!(
+            同一行,
+            "「{}」那一节 {dat_名} 那一行没写「{词}」：\n{}",
+            节.label(),
+            画出来的字(&out)
+        );
+    }
 }

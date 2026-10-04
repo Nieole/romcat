@@ -59,6 +59,10 @@
 pub mod store;
 pub mod sync;
 
+/// 这份数据的**许可**：设置屏「关于」那张名单印它（[`sources::licenses`](crate::sources::licenses)）。
+/// 出处见模块文档「许可与可自动化获取性」那张表。
+pub const LICENSE: &str = "MIT";
+
 /// 一条内容反查出来的东西：哪个游戏的哪个版本。
 ///
 /// **零冲突**：调研对 `cnmts.json` 里全部 173,502 个 `ncaId` 实测，**100.00% 只属于

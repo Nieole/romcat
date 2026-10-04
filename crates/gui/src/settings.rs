@@ -12,6 +12,8 @@
 //! | 改名收不收、为什么不收 | `Catalog::set_library_name`（空白、重名、目录列不开三种，话也是它说的） |
 //! | 换工作目录收不收 | `Roots::refuse_writing_into`（主库只读，ADR-0004） |
 //! | 数据源各多少条、上次什么时候取的 | `sources::survey` |
+//! | 数据源那一格「未下载」「读不动」叫什么 | `SourceState::label` |
+//! | 这个工具从哪几家取数据、各家的许可 | `sources::licenses` |
 //! | ffmpeg 在不在、是哪一版 | `scrape::preview::probe` |
 //! | ScreenScraper 有没有账号、用的是哪一套、存进去收不收 | `scrape::online::find_account` / `saved_account` / `save_account` |
 //! | 认得哪几种前端格式 | `adapter::names` |
@@ -47,7 +49,7 @@ use romcat_core::report::thousands;
 use romcat_core::scrape::online::{self, Account, AccountFrom, Saved};
 use romcat_core::scrape::preview;
 use romcat_core::site::Site;
-use romcat_core::sources::{self, SourceState, SourceStatus};
+use romcat_core::sources::{self, SourceLicense, SourceStatus};
 
 use crate::tokens::Tokens;
 use crate::{font, keys, look, pick, priority};
@@ -244,6 +246,9 @@ pub struct Screen {
     refused: Option<String>,
     /// 三个数据源现在什么状况。`None` 是这一趟还没问过。
     sources: Option<Vec<SourceStatus>>,
+    /// 「关于」那张名单（核心库 `sources::licenses`）。`None` 是这一趟还没问过——**不每帧问**，
+    /// 它要把内置那份数据源清单整份读一遍。
+    licenses: Option<Vec<SourceLicense>>,
     /// 探 ffmpeg 探的是哪个程序。测试拿它走「它不在」那条路（`preview::NO_SUCH_PROGRAM`）。
     ffmpeg_program: String,
     /// 探出来的那一份：`Ok` 是版本，`Err` 是核心库交回的那一档。`None` 是这一趟还没探过。
@@ -283,6 +288,7 @@ impl Screen {
             switch_to: None,
             refused: None,
             sources: None,
+            licenses: None,
             ffmpeg_program: preview::FFMPEG.to_string(),
             ffmpeg: None,
             account: None,
@@ -1007,22 +1013,10 @@ impl Screen {
                 romcat_core::catalog::SCHEMA_VERSION
             )));
         });
-        Self::一行(ui, "数据源", |ui| {
-            let registry = romcat_core::dat::registry::Registry::builtin();
-            let 几家: Vec<&str> = registry
-                .sources()
-                .iter()
-                .map(|source| source.name.as_str())
-                .collect();
-            ui.label(几家.join("、"));
-            look::help(ui, "外加本机的中文离线源，以及可选的 ScreenScraper。");
-        });
-        Self::一行(ui, "许可", |ui| {
-            look::help(
-                ui,
-                "各家数据源的许可条款还没收进工具里，以它们自己的说明为准。",
-            );
-        });
+        // 名单与各家的许可都是核心库给的（`sources::licenses`，票 `core-answers-once/10`）：
+        // 这一层不拼名单、不写许可，一家一行照着摆。
+        let 名单 = self.licenses.get_or_insert_with(sources::licenses);
+        Self::一行(ui, "数据源", |ui| 许可表(ui, 名单));
     }
 
     /// 三个数据源这一趟还没问过就问一遍。**不每帧问**：它要开三份本机库各数一次。
@@ -1037,13 +1031,36 @@ impl Screen {
 /// 两处各写一份的话，ADR-0007 那条命脉就会在屏上有两个说法。
 const QUOTA: &str = crate::scrape::QUOTA_WARNING;
 
-/// 一个数据源那一格写什么：取回了写条数，没取回或者读不动写那个词。
+/// 一个数据源那一格写什么：取回了写条数，没取回或者读不动写核心库给的那个词
+/// （`SourceState::label`，与库屏那张表是同一个词）。
 fn 条数(status: &SourceStatus) -> String {
-    match &status.state {
-        SourceState::Ready { records, .. } => format!("{} 条", thousands(*records)),
-        SourceState::Missing => "未下载".to_owned(),
-        SourceState::Broken { .. } => "读不动".to_owned(),
-    }
+    status.state.label().map_or_else(
+        || format!("{} 条", thousands(status.records())),
+        str::to_owned,
+    )
+}
+
+/// 「关于」那张表：**一家一行，名一列、许可一列，都靠左**——许可是一句话，不比大小。
+/// 许可那一列用弱色，名那一列才扫得出一条竖线。
+fn 许可表(ui: &mut egui::Ui, 名单: &[SourceLicense]) {
+    一张表("关于数据源许可", 2).show(ui, |ui| {
+        for 一家 in 名单 {
+            ui.label(&一家.name);
+            ui.label(egui::RichText::new(&一家.license).weak());
+            ui.end_row();
+        }
+    });
+}
+
+/// 这一屏上那几张表的骨架：缝取令牌 `cell-padding`，列宽下限收成零。
+///
+/// [`数字表`] 与 [`许可表`] 落在相邻几节里，行距列距各写一份的话会各漂各的，一眼看得出来。
+fn 一张表(id: &str, 几列: usize) -> egui::Grid {
+    let [行缝, 列缝] = Tokens::builtin().space.cell_padding;
+    egui::Grid::new(id)
+        .num_columns(几列)
+        .min_col_width(0.0)
+        .spacing(egui::vec2(2.0 * 列缝, 行缝))
 }
 
 /// 联网请求间隔那一格写什么：核心库默认的那一档。
@@ -1102,28 +1119,22 @@ fn 靠右(ui: &mut egui::Ui, 宽: f32, 字: &str) {
 /// 工作目录那一节「里头装着」与数据源那一节「本机那几份」用的是同一张——两张各写一份的话，
 /// 数字那一列的对齐规矩就会在相邻两节里各漂各的（截图门那条「数字那一列右对齐」量的正是它）。
 fn 数字表(ui: &mut egui::Ui, id: &str, 几行: &[(String, String, Option<String>)]) {
-    let tokens = Tokens::builtin();
-    let [行缝, 列缝] = tokens.space.cell_padding;
     let 数宽 = 最宽(ui, 几行.iter().map(|(_, 数, _)| 数.as_str()));
     let 几列 = if 几行.iter().any(|(_, _, 尾)| 尾.is_some()) {
         3
     } else {
         2
     };
-    egui::Grid::new(id)
-        .num_columns(几列)
-        .min_col_width(0.0)
-        .spacing(egui::vec2(2.0 * 列缝, 行缝))
-        .show(ui, |ui| {
-            for (名, 数, 尾) in 几行 {
-                ui.label(名);
-                靠右(ui, 数宽, 数);
-                if let Some(一句) = 尾 {
-                    ui.label(egui::RichText::new(一句).small().weak());
-                }
-                ui.end_row();
+    一张表(id, 几列).show(ui, |ui| {
+        for (名, 数, 尾) in 几行 {
+            ui.label(名);
+            靠右(ui, 数宽, 数);
+            if let Some(一句) = 尾 {
+                ui.label(egui::RichText::new(一句).small().weak());
             }
-        });
+            ui.end_row();
+        }
+    });
 }
 
 /// 画这一屏要知道的几样。

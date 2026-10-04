@@ -11,8 +11,8 @@
 //! per day for the same account **AND/OR the same IP address**”，调研 §1.1）。
 //!
 //! 而这个库在 ScreenScraper 眼里正是一片「未识别 ROM」：票 07 的真机命中率按平台拆开是
-//! 两个世界——GB 91.5%、FC 82.8%，而 GBA 5.8%、NDS 4.4%、GBC 0%。库里上万个变体撞过去
-//! 就是上万次「未找到」，足以在一天之内撞穿那个**专门用来惩罚「乱扔文件」**的配额。
+//! 两个世界——GB、FC 八九成，而 GBA、NDS 只有个位数、GBC 一个没中（见台账 `docs/library-facts.md`）。
+//! 库里上万个变体撞过去就是上万次「未找到」，足以在一天之内撞穿那个**专门用来惩罚「乱扔文件」**的配额。
 //!
 //! 于是这一档的三条纪律，每一条都是代码里的一道闸，不是注释：
 //!
@@ -77,6 +77,13 @@ pub enum Ask {
 
 /// 这个源在优先级表与**依据**里叫什么。
 pub const SCREEN_SCRAPER: &str = "ScreenScraper";
+
+/// 这个源的数据与媒体的**许可**：设置屏「关于」那张名单印它（[`sources::licenses`](crate::sources::licenses)）。
+///
+/// 站点全站页脚的原话（调研 `docs/research/scraper-sources.md` §1.6）：署名、**非商业**、
+/// 相同方式共享。两件事不在这一句里：API 另有自己的条款（只许集成进免费分发的应用）；
+/// 站上一部分媒体是从别处转载的，那几份的条款各归原处，这一句罩不住它们。
+pub const LICENSE: &str = "CC BY-NC-SA 4.0（站点页脚）";
 
 /// 在线档的**并发上限**。
 ///

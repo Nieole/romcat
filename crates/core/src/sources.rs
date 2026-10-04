@@ -2,7 +2,10 @@
 //!
 //! 三个源——DAT 仓库、**中文离线源**、Switch 数据库——各是一份本地镜像，下载一次用很久
 //! （README 的「三份数据分得很清」）。这个模块只回答一句话：**这一份下载了没有、
-//! 有多少条、什么时候下载的**。
+//! 有多少条、什么时候下载的**——连那一档屏上叫什么（[`SourceState::label`]）也由这里说，
+//! 设置屏与库屏不各写一份。
+//!
+//! 另答一问：**这个工具从哪几家取数据、各家按什么许可给出来**（[`licenses`]），设置屏「关于」照摆。
 //!
 //! ## 为什么这一层在核心库里
 //!
@@ -42,6 +45,34 @@ pub enum SourceState {
         /// 读不动的那句话。
         why: String,
     },
+}
+
+/// 「还没下载」那一档屏上叫什么。
+const MISSING_LABEL: &str = "未下载";
+
+/// 「库在那儿但读不动」那一档屏上叫什么（ADR-0021：读不动不等于空）。
+const BROKEN_LABEL: &str = "读不动";
+
+impl SourceState {
+    /// 没下载的那几档各叫什么，[`label`](Self::label) 交出来的就是这几个词。
+    ///
+    /// 给量列宽用：屏上那一列要按这几个词里最宽的那个定宽——眼下摆着哪几档不定，
+    /// 列宽不该跟着某一个源下没下载来回跳。
+    pub const LABELS: [&'static str; 2] = [MISSING_LABEL, BROKEN_LABEL];
+
+    /// 这一档**屏上叫什么**：词由核心库挑，设置屏与库屏印的都是这一个（挂单 `Q1074`，
+    /// 与 `WorkRow::confidence_label` 同一个先例）。
+    ///
+    /// **下载了的那一档没有词**（`None`）：那一格该印的是条数，怎么折（带不带「条」、
+    /// 分不分千位）是各屏版式上的事。
+    #[must_use]
+    pub fn label(&self) -> Option<&'static str> {
+        match self {
+            Self::Ready { .. } => None,
+            Self::Missing => Some(MISSING_LABEL),
+            Self::Broken { .. } => Some(BROKEN_LABEL),
+        }
+    }
 }
 
 /// 一份**数据源**镜像的状况。
@@ -145,6 +176,50 @@ pub fn survey(workspace: &Path) -> Vec<SourceStatus> {
         .into_iter()
         .map(|source| source.survey(workspace))
         .collect()
+}
+
+/// 「关于」那张名单的一行：一个**数据源**叫什么、它的数据按什么许可给出来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLicense {
+    /// 这个源叫什么：与数据源那一节、优先级表、**依据**里印的是同一个名字。
+    pub name: String,
+    /// 许可那一句。
+    pub license: String,
+}
+
+/// **这个工具从哪几家取数据，各家按什么许可给出来。** 不联网，也不碰主库。
+///
+/// 名单与次序：内置数据源清单里那几份 DAT 的源（许可写在清单里，[`Registry`] 带着它），
+/// 然后是本机的中文离线源与 Switch 数据库，最后是联网的 ScreenScraper——后三家的许可各写在
+/// 描述那一家的模块里（[`zh::LICENSE`]、[`crate::titledb::LICENSE`]、
+/// [`crate::scrape::online::LICENSE`]）。
+///
+/// **名单由这里给一次**（ADR-0024）：设置屏「关于」从前自己拼一句「外加本机的中文离线源，
+/// 以及可选的 ScreenScraper」，Switch 数据库在那一句里根本没有。
+#[must_use]
+pub fn licenses() -> Vec<SourceLicense> {
+    let dat = Registry::builtin()
+        .sources()
+        .iter()
+        .map(|source| SourceLicense {
+            name: source.name.clone(),
+            // 内置那一份每一家都写着（测试钉着）；哪天漏了一家，那一格照实说没写。
+            license: source.license_or_unnoted().to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let rest = [
+        (Source::Chinese.label(), zh::LICENSE),
+        (Source::Switch.label(), crate::titledb::LICENSE),
+        (
+            crate::scrape::online::SCREEN_SCRAPER,
+            crate::scrape::online::LICENSE,
+        ),
+    ]
+    .map(|(name, license)| SourceLicense {
+        name: name.to_owned(),
+        license: license.to_owned(),
+    });
+    dat.into_iter().chain(rest).collect()
 }
 
 fn survey_dat(workspace: &Path) -> (SourceState, String) {
@@ -372,5 +447,60 @@ mod tests {
             assert_eq!(row.records(), 0);
             assert!(!row.cost.is_empty(), "{} 得说清没下载的代价", row.name);
         }
+    }
+
+    #[test]
+    fn 没下载与读不动那两档屏上叫什么由这里给一次() {
+        // 设置屏与库屏从前各 `match` 一遍、各写一份（挂单 `Q1074`）。
+        assert_eq!(SourceState::Missing.label(), Some("未下载"));
+        assert_eq!(
+            SourceState::Broken {
+                why: "file is not a database".to_owned()
+            }
+            .label(),
+            Some("读不动")
+        );
+        // 下载了的那一档没有词：那一格印的是条数。
+        let ready = SourceState::Ready {
+            records: 3,
+            fetched_at: None,
+        };
+        assert_eq!(ready.label(), None);
+        // 量列宽要的那一组就是这两个词，一个不多一个不少。
+        assert_eq!(SourceState::LABELS, ["未下载", "读不动"]);
+    }
+
+    #[test]
+    fn 关于那张名单上每个数据源都写着许可() {
+        let rows = licenses();
+        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "No-Intro",
+                "Redump",
+                "TOSEC",
+                "MAME",
+                "GoodNES",
+                "中文离线源",
+                "Switch 数据库",
+                "ScreenScraper"
+            ]
+        );
+        for row in &rows {
+            assert!(!row.license.trim().is_empty(), "{} 没写许可", row.name);
+        }
+        // 明示过许可的那几家，照调研里的原文（`docs/research/scraper-sources.md` §1.6、§9.1，
+        // `docs/research/switch-identification.md` 那一节 titledb）。
+        let of = |name: &str| {
+            rows.iter()
+                .find(|row| row.name == name)
+                .map(|row| row.license.clone())
+                .unwrap_or_default()
+        };
+        assert!(of("ScreenScraper").contains("CC BY-NC-SA 4.0"));
+        assert!(of("中文离线源").contains("CC BY-SA"));
+        assert!(of("Switch 数据库").contains("MIT"));
+        assert!(of("MAME").contains("CC0-1.0"));
     }
 }

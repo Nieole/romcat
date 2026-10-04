@@ -1431,24 +1431,18 @@ impl Screen {
                     .map(|status| egui::WidgetText::from(status.name)),
             ),
         );
-        let 记录宽 =
-            widest(
-                ui,
-                [
-                    egui::WidgetText::from(表头("记录数")),
-                    "未下载".into(),
-                    "读不动".into(),
-                ]
-                .into_iter()
-                .chain(self.sources.iter().filter_map(
-                    |status| match &status.state {
-                        SourceState::Ready { records, .. } => {
-                            Some(egui::WidgetText::from(thousands(*records)))
-                        }
-                        SourceState::Missing | SourceState::Broken { .. } => None,
-                    },
-                )),
-            );
+        // 记录数那一列按表头、核心库那两个词（眼下摆没摆着都量，列宽不跟着下没下载跳）与各条数里最宽的定宽。
+        let 记录宽 = widest(
+            ui,
+            std::iter::once(egui::WidgetText::from(表头("记录数")))
+                .chain(SourceState::LABELS.map(egui::WidgetText::from))
+                .chain(
+                    self.sources
+                        .iter()
+                        .filter(|status| status.ready())
+                        .map(|status| egui::WidgetText::from(thousands(status.records()))),
+                ),
+        );
         let 按钮宽 = look::small_button_width(ui, "下载").max(look::small_button_width(ui, "更新"));
         // 表格通栏，缝与分隔线同根那张表（`roots_ui`）。
         let 表 = ui.available_rect_before_wrap();
@@ -1477,88 +1471,67 @@ impl Screen {
                         {
                             let 名格 =
                                 single_line_cell(ui, 名宽, [egui::WidgetText::from(status.name)]);
-                            let (记录格, 说明格, 竖条色) = match &status.state {
-                                SourceState::Ready {
-                                    records,
-                                    fetched_at,
-                                } => (
-                                    single_line_cell(
-                                        ui,
-                                        记录宽,
-                                        [egui::WidgetText::from(thousands(*records))],
-                                    ),
-                                    ui.vertical(|ui| {
-                                        // 占满算给这一格的宽：按钮那一列才贴着表的右内边距（照稿，第八版候选图上空出一大截）。
-                                        ui.set_min_width(说明宽);
-                                        ui.set_max_width(说明宽);
-                                        ui.label(fetched_at.map_or_else(
-                                            || "——".to_string(),
-                                            |at| clock.short(at),
-                                        ));
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&status.coverage)
-                                                    .small()
-                                                    .weak(),
-                                            )
-                                            .wrap(),
-                                        );
-                                    })
-                                    .response
-                                    .rect,
-                                    look::tone_colors(Tone::Good, ui.visuals()).0,
-                                ),
-                                // **还没取回的要被明确标出来**：那正是「扫完了怎么没认出来」
-                                // 的答案。
-                                SourceState::Missing => (
-                                    single_line_cell(
-                                        ui,
-                                        记录宽,
-                                        [egui::WidgetText::from(
-                                            egui::RichText::new("未下载").color(警告色),
-                                        )],
-                                    ),
-                                    ui.vertical(|ui| {
-                                        // 占满算给这一格的宽：按钮那一列才贴着表的右内边距（照稿，第八版候选图上空出一大截）。
-                                        ui.set_min_width(说明宽);
-                                        ui.set_max_width(说明宽);
-                                        // 说明那一句照稿用弱色（设计稿 `td.dim`）：「未下载」那一格与竖条已经是警示色。
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(status.cost).color(弱色),
-                                            )
-                                            .wrap(),
-                                        );
-                                    })
-                                    .response
-                                    .rect,
-                                    警告色,
-                                ),
-                                // **读不动不等于空**（ADR-0021）：那要人去看一眼，不是按一下取回。
-                                SourceState::Broken { why } => (
-                                    single_line_cell(
-                                        ui,
-                                        记录宽,
-                                        [egui::WidgetText::from(
-                                            egui::RichText::new("读不动").color(出错色),
-                                        )],
-                                    ),
-                                    ui.vertical(|ui| {
-                                        // 占满算给这一格的宽：按钮那一列才贴着表的右内边距（照稿，第八版候选图上空出一大截）。
-                                        ui.set_min_width(说明宽);
-                                        ui.set_max_width(说明宽);
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(why).color(出错色),
-                                            )
-                                            .wrap(),
-                                        );
-                                    })
-                                    .response
-                                    .rect,
-                                    出错色,
-                                ),
+                            // 竖条与那个词同一个颜色：取回了是 `hi`，还没取回是 `mid`，读不动是 `lo`。
+                            let 竖条色 = match &status.state {
+                                SourceState::Ready { .. } => {
+                                    look::tone_colors(Tone::Good, ui.visuals()).0
+                                }
+                                SourceState::Missing => 警告色,
+                                SourceState::Broken { .. } => 出错色,
                             };
+                            // 记录数那一格：取回了印条数；**没取回、读不动印核心库给的那个词**
+                            // （`SourceState::label`，设置屏印的是同一个，挂单 `Q1074`），颜色同竖条。
+                            let 记录格 = single_line_cell(
+                                ui,
+                                记录宽,
+                                [status.state.label().map_or_else(
+                                    || egui::WidgetText::from(thousands(status.records())),
+                                    |词| egui::RichText::new(词).color(竖条色).into(),
+                                )],
+                            );
+                            let 说明格 = ui
+                                .vertical(|ui| {
+                                    // 占满算给这一格的宽：按钮那一列才贴着表的右内边距（照稿，第八版候选图上空出一大截）。
+                                    ui.set_min_width(说明宽);
+                                    ui.set_max_width(说明宽);
+                                    match &status.state {
+                                        SourceState::Ready { fetched_at, .. } => {
+                                            ui.label(fetched_at.map_or_else(
+                                                || "——".to_string(),
+                                                |at| clock.short(at),
+                                            ));
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&status.coverage)
+                                                        .small()
+                                                        .weak(),
+                                                )
+                                                .wrap(),
+                                            );
+                                        }
+                                        // **还没取回的要被明确标出来**：那正是「扫完了怎么没认出来」的答案。
+                                        // 说明那一句照稿用弱色（设计稿 `td.dim`）：记录数那一格与竖条已经是警示色。
+                                        SourceState::Missing => {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(status.cost).color(弱色),
+                                                )
+                                                .wrap(),
+                                            );
+                                        }
+                                        // **读不动不等于空**（ADR-0021）：那要人去看一眼，不是按一下取回。
+                                        SourceState::Broken { why } => {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(why).color(出错色),
+                                                )
+                                                .wrap(),
+                                            );
+                                        }
+                                    }
+                                })
+                                .response
+                                .rect;
                             let 忙 = self
                                 .running
                                 .iter()
