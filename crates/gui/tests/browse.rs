@@ -4947,7 +4947,7 @@ fn 够高的一帧() -> egui::RawInput {
 /// 三档各来一条：认不出的平台名、还没建的合集、以及**评分**那一维（立着但眼下没有源）。
 /// 判在核心库一处（`sublibrary::thin`），这一层只把它印出来（ADR-0024）。
 ///
-/// **与「还有 N 条没生效」是两件事**：那一段说的是**没填完或者填错了**的，它们不进规则；
+/// **与框底下那一行「N 个子句未填写 / 写错了」是两件事**：那一行说的是**没填完或者填错了**的，它们不进规则；
 /// 这一段说的是**读得成、也进了规则**、只是眼下一个变体都选不中的。把后者也拦下来是错的
 /// ——合集可以是待会儿才建的，平台清单也会长。
 #[test]
@@ -4999,9 +4999,10 @@ fn 筛不出东西的子句屏上逐条点名但不拦着() {
         "筛不出东西的子句被悄悄扔掉了——那会让存出去的子库比屏上说的宽",
     );
 
-    // 三、**它不是「没生效」**：那一段说的是没填完或填错的，这一趟一条都没有。
+    // 三、**它不是「没生效」**：框底下那一行计数说的是没填完或写错的（票 `gui-draws-the-rest-of-the-design/23`
+    // 照稿换成「N 个子句未填写…；N 个子句写错了…」），这一趟一条都没有。
     assert!(
-        !屏上.contains("还有 1 条没生效") && !屏上.contains("还有 3 条没生效"),
+        !屏上.contains("个子句未填写") && !屏上.contains("个子句写错了"),
         "把「筛不出东西」说成了「没生效」，两件事混了：\n{屏上}"
     );
 }
@@ -5068,6 +5069,692 @@ fn 筛不出东西的提示贴在那一条子句底下_默认窗口不滚就整�
         提示框.min.y >= 头一条.max.y && 提示框.max.y <= 下一条.min.y,
         "那句提示没贴在它那一条底下：头一条的值画在 {头一条:?}，提示画在 {提示框:?}，下一条的值画在 {下一条:?}"
     );
+}
+
+// ——— 条件组照稿（票 `gui-draws-the-rest-of-the-design/23`） ———
+
+/// 这一帧里画着的每一块方的（`Shape::Rect`），按画出来的次序。
+fn 画着的方块(帧: &egui::FullOutput) -> Vec<egui::epaint::RectShape> {
+    fn 收(shape: &egui::epaint::Shape, out: &mut Vec<egui::epaint::RectShape>) {
+        match shape {
+            egui::epaint::Shape::Rect(rect) => out.push(rect.clone()),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &帧.shapes {
+        收(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// 框住屏上这一处字的那**一格**：包着它的、看得见（填了底或描了边）的方块里最小的那一块，矮于 40 点
+/// ——输入框、下拉框那一格，不是外头那个组或那一栏。
+fn 框住它的那一格(帧: &egui::FullOutput, 字: egui::Rect) -> egui::Rect {
+    画着的方块(帧)
+        .into_iter()
+        .filter(|one| {
+            (one.fill.a() > 0 || one.stroke.width > 0.0)
+                && one.rect.height() < 40.0
+                && one.rect.contains(字.center())
+        })
+        .map(|one| one.rect)
+        .min_by(|a, b| a.area().total_cmp(&b.area()))
+        .unwrap_or_else(|| panic!("{字:?} 那一处字外头没有框着它的一格"))
+}
+
+/// 这一帧里画着的每一道**这个颜色的竖条**：宽不过 3 点、高过 20 点的实心方块，或者一段这个颜色的竖线。
+/// 条件组每一个组左边那一道（设计稿 `.tg` 的 `border-left:2px`）。
+fn 这个颜色的竖条(帧: &egui::FullOutput, 颜色: egui::Color32) -> Vec<egui::Rect> {
+    fn 收(shape: &egui::epaint::Shape, 颜色: egui::Color32, out: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Rect(rect)
+                if rect.fill == 颜色 && rect.rect.width() <= 3.0 && rect.rect.height() > 20.0 =>
+            {
+                out.push(rect.rect);
+            }
+            egui::epaint::Shape::LineSegment {
+                points: [头, 尾],
+                stroke,
+            } if stroke.color == 颜色
+                && (头.x - 尾.x).abs() < 0.5
+                && (头.y - 尾.y).abs() > 20.0 =>
+            {
+                out.push(egui::Rect::from_two_pos(*头, *尾));
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, 颜色, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &帧.shapes {
+        收(&clipped.shape, 颜色, &mut out);
+    }
+    out
+}
+
+/// **条件组照稿的那几样形状**（票 `gui-draws-the-rest-of-the-design/23`，差距清单 `G-01`、`G-02`、`G-05`、`G-07`、`G-09`、`G-10`、`G-11`）。
+///
+/// 稿上（`prototype.html` 的 `groupHTML` / `clauseHTML`）：每个组左边一道竖线，顶层强调色、套进来的组 `mid` 色，没有框；
+/// 头一行一句弱字（顶层「另加子句：」——拿主意的人 2026-10-04 裁 `F-1` 选 B；套进来的「组：」）后接组合方式；
+/// 一条子句的「×」在它**右边**；「+ 子句」「+ 组」在组**底下**。从前是「×」打头、两颗加号在组头上、字是「+ 分组」，
+/// 套进来的组画成一个框、没有竖线。
+///
+/// 断的是画出来的矩形与形状之间的位置关系，不比像素。
+#[test]
+fn 条件组照稿_叉在子句右边_两颗加号在组底下_组左边一道竖线() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-条件组照稿"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    let rule = romcat_core::sublibrary::Rule::parse("平台=GBA 且 (类型~RPG 或 作品^口袋)")
+        .expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule));
+    跑(&ctx, &mut app, 2);
+    let 帧 = headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&帧);
+    let 色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme());
+
+    // 三条子句各自的值那一格（输入框本身，不是框里那几个字）。
+    let 值那一格 = |值: &str| -> egui::Rect {
+        let 几处 = shared::画着的每一处(&帧, &|text| text == 值);
+        assert_eq!(几处.len(), 1, "值「{值}」该画一处：{几处:?}\n{屏上}");
+        框住它的那一格(&帧, 几处[0])
+    };
+    let (平台那条, 类型那条, 作品那条) = (值那一格("GBA"), 值那一格("RPG"), 值那一格("口袋"));
+
+    // 一、每一条的「×」在它右边：横着在值那一格右沿之外，竖着落在这一条的两行里（「维度 运算符」一行在值那一格上头）。
+    let 叉们 = shared::画着的每一处(&帧, &|text| text == "×");
+    for (名, 那一格) in [("平台", 平台那条), ("类型", 类型那条), ("作品", 作品那条)]
+    {
+        assert!(
+            叉们.iter().any(|叉| {
+                叉.center().x > 那一格.right()
+                    && 叉.center().y < 那一格.bottom()
+                    && 叉.center().y > 那一格.top() - 40.0
+            }),
+            "「{名}」那一条的「×」不在它右边：值那一格画在 {那一格:?}，「×」画在 {叉们:?}"
+        );
+    }
+
+    // 二、「+ 子句」「+ 组」两层各一颗，都在组底下：套进来的那一组的两颗在它最后一条（作品）底下，顶层的两颗又在它们底下。
+    for 字 in ["+ 子句", "+ 组"] {
+        let mut 几处 = shared::画着的每一处(&帧, &|text| text == 字);
+        assert_eq!(
+            几处.len(),
+            2,
+            "「{字}」该是两颗（顶层一颗、套进来的组一颗），画了 {几处:?}\n{屏上}"
+        );
+        几处.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        assert!(
+            几处[0].top() >= 作品那条.bottom() && 几处[1].top() > 几处[0].bottom(),
+            "「{字}」不在组底下：最后一条子句的值画在 {作品那条:?}，「{字}」画在 {几处:?}"
+        );
+    }
+
+    // 三、组左边的竖线：顶层那一道强调色，从头一条到最后一条整段都在它右边；套进来的那一道 `mid` 色，
+    // 在顶层那道右边、只管它自己那两条。
+    let 顶层 = 这个颜色的竖条(&帧, 色.accent)
+        .into_iter()
+        .find(|条| {
+            条.right() <= 平台那条.left()
+                && 条.top() < 平台那条.top()
+                && 条.bottom() > 作品那条.bottom()
+        })
+        .unwrap_or_else(|| {
+            panic!("顶层那个组左边没有一道强调色竖线（要从「平台」那一条一直伸到「作品」那一条）")
+        });
+    let 套进来的 = 这个颜色的竖条(&帧, 色.mid)
+        .into_iter()
+        .find(|条| {
+            条.left() > 顶层.right() && 条.right() <= 类型那条.left() && 条.top() < 类型那条.top()
+        })
+        .unwrap_or_else(|| {
+            panic!("套进来的那个组左边没有一道 mid 色竖线（在顶层那道右边、「类型」那一条左边）")
+        });
+    assert!(
+        套进来的.top() > 平台那条.bottom() && 套进来的.bottom() > 作品那条.bottom(),
+        "套进来的那道竖线该只管它自己那两条：竖线 {套进来的:?}，平台那条 {平台那条:?}，作品那条 {作品那条:?}"
+    );
+
+    // 四、头一行那句弱字：顶层「另加子句：」、套进来的「组：」（`F-1` 裁 B：不写「另加条件」）。
+    for 字 in ["另加子句：", "组："] {
+        assert_eq!(
+            shared::画着的每一处(&帧, &|text| text == 字).len(),
+            1,
+            "组头上该有一句「{字}」：\n{屏上}"
+        );
+    }
+
+    // 五、运算符那颗下拉收起时写短词（稿上 `OPS`，`F-4` 裁 A），不是光秃秃一个符号；那几个字由核心库 `Op::short` 给。
+    use romcat_core::sublibrary::Op;
+    for op in [Op::Is, Op::Contains, Op::StartsWith] {
+        assert_eq!(
+            shared::画着的每一处(&帧, &|text| text == op.short()).len(),
+            1,
+            "运算符那颗下拉该写「{}」：\n{屏上}",
+            op.short()
+        );
+    }
+}
+
+/// 屏上**正好**写着这几个字的每一处：画在哪儿、什么色（那一段头一节的字色，没指定就是画它时的默认色）。
+fn 正好这几个字画成什么色(
+    帧: &egui::FullOutput,
+    这几个字: &str,
+) -> Vec<(egui::Rect, egui::Color32)> {
+    fn 收(
+        shape: &egui::epaint::Shape,
+        这几个字: &str,
+        out: &mut Vec<(egui::Rect, egui::Color32)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 这几个字 => {
+                let color = text
+                    .galley
+                    .job
+                    .sections
+                    .first()
+                    .map(|section| section.format.color)
+                    .filter(|color| *color != egui::Color32::PLACEHOLDER)
+                    .unwrap_or(text.fallback_color);
+                out.push((
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                    color,
+                ));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().for_each(|one| 收(one, 这几个字, out))
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &帧.shapes {
+        收(&clipped.shape, 这几个字, &mut out);
+    }
+    out
+}
+
+/// **写错的那一条子句，底下贴一句红字；条件组框下只留一行计数**
+/// （票 `gui-draws-the-rest-of-the-design/23`，收挂单 `Q1477`：拿主意的人裁「写错那一条底下贴红字，框底只留一行计数」）。
+///
+/// 从前写错的、没填完的都汇总在框里最底下：「还有 N 条没生效：」再逐条一行，默认窗口里与 `Q1104` 那一段同样落在折线以下。
+/// 照稿（`clauseHTML` 的 `.tnote.bad`、`renderTreeNote` 的 `#unset`）：那句话由核心库 `RuleError` 给（`F-5` 裁 A），
+/// 贴在写错的那一条底下、`lo` 色；框下一行「1 个子句写错了，改正前不会生效」。与「筛不出东西」那一条同一把尺子：
+/// 默认 1280×800 那一帧里整句看得见。
+#[test]
+fn 写错的子句底下贴一句红字_框下只留一行计数_默认窗口不滚就看得见() {
+    use romcat_core::sublibrary::{Clause, Dimension, Op};
+
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-写错的子句"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    let rule = romcat_core::sublibrary::Rule::parse("年份>=1990 且 简介~勇者冒险").expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule));
+    跑(&ctx, &mut app, 2);
+
+    // 把年份那一格改成写错的「199」：点进值那一格，挪到末尾删一个字——走的是人手那条路。
+    shared::点正好(&ctx, "1990", |ui| app.ui(ui));
+    headless::frame(
+        &ctx,
+        shared::输入(vec![
+            shared::按键事件(egui::Key::End),
+            shared::按键事件(egui::Key::Backspace),
+        ]),
+        |ui| app.ui(ui),
+    );
+    跑(&ctx, &mut app, 2);
+    let 那句话 = Clause::build(Dimension::Year, Op::Ge, "199")
+        .expect_err("「199」不是年份")
+        .to_string();
+    let 色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme());
+
+    // 一、默认那扇窗：那句话整句落在左栏露出来的那一截里。
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 画在 = shared::画着的每一处连裁剪(&帧, &|text| text == 那句话);
+    assert_eq!(
+        画在.len(),
+        1,
+        "默认窗口里写错那一条底下该有一句「{那句话}」，画了 {} 处：\n{}",
+        画在.len(),
+        画出来的字(&帧),
+    );
+    let (那句框, 露出来的) = 画在[0];
+    assert!(
+        露出来的.contains_rect(那句框),
+        "那句话只露出半截：画在 {那句框:?}，左栏露出来的只有 {露出来的:?}"
+    );
+
+    // 二、够高的一帧：夹在它那一条与下一条之间，`lo` 色；框下一行计数，也是 `lo` 色，在最后一条底下；不再说「还有 N 条没生效」。
+    let 帧 = headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&帧);
+    let 值 = |字: &str| -> egui::Rect {
+        let 几处 = shared::画着的每一处(&帧, &|text| text == 字);
+        assert_eq!(几处.len(), 1, "值「{字}」该画一处：{几处:?}\n{屏上}");
+        几处[0]
+    };
+    let (写错那条, 下一条) = (值("199"), 值("勇者冒险"));
+    let 那句 = 正好这几个字画成什么色(&帧, &那句话);
+    assert_eq!(那句.len(), 1, "够高的一帧里那句话该画一处：\n{屏上}");
+    let (那句框, 那句色) = 那句[0];
+    assert!(
+        那句框.min.y >= 写错那条.max.y && 那句框.max.y <= 下一条.min.y,
+        "那句话没贴在写错的那一条底下：那一条的值画在 {写错那条:?}，那句话画在 {那句框:?}，下一条的值画在 {下一条:?}"
+    );
+    assert_eq!(那句色, 色.lo, "写错那一句该是 lo 色");
+    let 计数 = 正好这几个字画成什么色(&帧, "1 个子句写错了，改正前不会生效");
+    assert_eq!(计数.len(), 1, "框下该有一行计数：\n{屏上}");
+    assert!(
+        计数[0].0.min.y > 下一条.max.y,
+        "那一行计数该在最后一条底下：画在 {:?}，最后一条的值画在 {下一条:?}",
+        计数[0].0
+    );
+    assert_eq!(计数[0].1, 色.lo, "有写错的时那一行计数是 lo 色");
+    assert!(
+        !屏上.contains("没生效："),
+        "框底那段「还有 N 条没生效：」逐条汇总该拿掉了：\n{屏上}"
+    );
+}
+
+/// **「+ 子句」「+ 组」加出来的样子照稿，加完就能打字**（票 `gui-draws-the-rest-of-the-design/23`，差距清单 `F-3` 裁 A）。
+///
+/// 稿上（`prototype.html` 那段 `data-tr` 点击）：「+ 子句」加一条「年份 >=」空值；「+ 组」加一个「任一满足」组，里头先摆两条空子句
+/// 「类型 ~」「作品 ^」；加完焦点落进新那一条的值框（新组落进头一条）。从前加的是「平台 =」、一个空的「全部满足」组（空组不进规则），
+/// 焦点不动——人还得先去点那一格。
+///
+/// 断的是**不点值框直接打字**，字落进了新那一条：规则里多出来的正是那一条。
+#[test]
+fn 加子句加组照稿起手_焦点落进新那一条的值框() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-加子句加组"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    let 打 = |ctx: &egui::Context, app: &mut App, 字: &str| {
+        headless::frame(
+            ctx,
+            shared::输入(vec![egui::Event::Text(字.to_string())]),
+            |ui| app.ui(ui),
+        );
+        跑(ctx, app, 2);
+    };
+    let 规则 = |app: &App| {
+        app.browse()
+            .query()
+            .rule
+            .as_ref()
+            .map(|one| one.text.clone())
+    };
+
+    // 一、「+ 子句」：「年份 >=」，不点值框直接打字。
+    shared::点正好(&ctx, "+ 子句", |ui| app.ui(ui));
+    打(&ctx, &mut app, "2003");
+    assert_eq!(
+        规则(&app),
+        Some("年份>=2003".to_string()),
+        "按「+ 子句」之后打的字该落进新那一条（年份 >=）的值框：\n{}",
+        shared::跑一帧(&ctx, |ui| app.ui(ui))
+    );
+
+    // 二、「+ 组」：一个「任一满足」组，头一条「类型 ~」接着打字，第二条「作品 ^」空着。
+    shared::点正好(&ctx, "+ 组", |ui| app.ui(ui));
+    打(&ctx, &mut app, "RPG");
+    // 条件组这会儿长过了默认窗口的折线，读屏上的字用够高的一帧。
+    let 屏上 = 画出来的字(&headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui)));
+    let 规则文字 = 规则(&app).unwrap_or_default();
+    assert!(
+        规则文字.starts_with("年份>=2003 且 ") && 规则文字.contains("类型~RPG"),
+        "按「+ 组」之后打的字该落进新组头一条（类型 ~）的值框，规则是「{规则文字}」：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("任一满足") && 屏上.contains("作品") && 屏上.contains("^ 开头"),
+        "新组该是「任一满足」、第二条「作品 ^」：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("1 个子句未填写，不会生效"),
+        "新组第二条空着，框底下该数出 1 条没填：\n{屏上}"
+    );
+}
+
+/// **组最多套三层：第三层只给「+ 子句」，不再给「+ 组」**（票 `gui-draws-the-rest-of-the-design/23`，差距清单 `F-2` 裁 A）。
+///
+/// 稿上 `groupHTML` 只在 `d<2` 时摆「+ 组」。左栏 232 宽，竖线加缩进每深一层吃掉 10 点，到第三层两颗下拉只剩六七十点宽。
+/// **只在界面上限**：核心库的组照旧嵌多深都行，从子库屏「✎」读进来的更深的规则照样摊得开——这儿拿一条正好三层的规则断。
+#[test]
+fn 组最多套三层_第三层不给加组() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-组最多三层"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    let rule =
+        romcat_core::sublibrary::Rule::parse("平台=GBA 且 (类型~RPG 或 (作品^口袋 且 年份>=1990))")
+            .expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule));
+    跑(&ctx, &mut app, 2);
+    let 帧 = headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&帧);
+    let 几颗 = |字: &str| shared::画着的每一处(&帧, &|text| text == 字).len();
+    assert_eq!(几颗("+ 子句"), 3, "三层各一颗「+ 子句」：\n{屏上}");
+    assert_eq!(
+        几颗("+ 组"),
+        2,
+        "只有顶层与第二层给「+ 组」，第三层不给：\n{屏上}"
+    );
+    // 第三层那条子句照样摊开了（读进来的规则不受这条上限管）。
+    assert_eq!(几颗("1990"), 1, "第三层那条子句该摊在屏上：\n{屏上}");
+}
+
+/// **一条子句都没有时，条件组里说一句它是干什么的，底下规则原文照稿写「（没有条件：全部作品）」**
+/// （票 `gui-draws-the-rest-of-the-design/23`，差距清单 `G-04`、`G-06`；措辞是拿主意的人 2026-10-04 裁的 `F-1` 选 B）。
+///
+/// 说明句不照稿写「…等条件筛」：词表**子句**、**规则**两条的 `_Avoid_` 都列着「条件」，换成「…等维度加子句」。
+/// 规则原文那一句照稿留「没有条件」：它说的是分面加子句合起来一样都没有，落在挂单 `Q1094` 认过的那条界线里。
+/// 从前两样都没有：空的条件组只有一颗下拉与两颗按钮，规则原文那一块整个不画。
+#[test]
+fn 条件组空着时说它是干什么的_规则原文写没有条件全部作品() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-条件组空着"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui)));
+    assert!(
+        屏上.contains("在平台、中文等筛选之外，再按年份、类型、作品名等维度加子句。组可以嵌套。"),
+        "空的条件组里该说一句它是干什么的：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("存成子库规则：\n（没有条件：全部作品）"),
+        "一条都没筛时规则原文该照稿写「（没有条件：全部作品）」：\n{屏上}"
+    );
+    // 筛上一条之后那句说明收起来（稿上只在顶层一项都没有时画）。
+    let rule = romcat_core::sublibrary::Rule::parse("年份>=1990").expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = 画出来的字(&headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui)));
+    assert!(
+        !屏上.contains("等维度加子句") && 屏上.contains("存成子库规则：年份>=1990"),
+        "有了子句那句说明该收起来、规则原文写那一条：\n{屏上}"
+    );
+}
+
+/// 框住 `那一处` 的那一张**卡**：填了底、描了边、矮于 100 点的方块里最小的那一块（弹层本身比它高得多）。
+fn 框住它的那张卡(
+    帧: &egui::FullOutput,
+    那一处: egui::Pos2,
+) -> Option<egui::epaint::RectShape> {
+    画着的方块(帧)
+        .into_iter()
+        .filter(|one| {
+            one.fill.a() > 0
+                && one.stroke.width > 0.0
+                && one.rect.height() < 100.0
+                && one.rect.contains(那一处)
+        })
+        .min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()))
+}
+
+/// **「加入合集」那一层每一档是一张带边框的卡，选中的那张描强调色边，整张卡点哪儿都算**
+/// （票 `gui-draws-the-rest-of-the-design/23`，差距清单 `J-01`）。
+///
+/// 稿上（`DLG.coll` 的 `.asmode`）：已有的每个合集、「新建合集」各一张卡——面板底、分隔线描边、大圆角，选中的那张描强调色、
+/// 外头一圈浅强调色。从前是不装框的单选行，选中只看圆点，按得动的也只有圆点与字那一块。
+#[test]
+fn 加入合集那一层每一档是一张带框的卡_选中的那张描强调色边() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-加入合集的卡"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    // 库里先有两个合集，再勾一行。
+    记这几个合集(&mut app, &["通关过的", "送朋友的"]);
+    {
+        let (browse, site) = app.browse_and_site();
+        let anchor = site
+            .catalog
+            .work_page(browse.query(), 0, 1)
+            .expect("取得出一行")
+            .remove(0)
+            .anchor;
+        browse.picked_mut().toggle(&anchor);
+    }
+    跑(&ctx, &mut app, 3);
+    shared::点正好(&ctx, "加入合集…", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 20);
+    let 色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme());
+    // 弹层盖在最上头：同一个名字左栏分面上也有一处，取最后画的那一处。
+    let 名字在 = |帧: &egui::FullOutput, 名: &str| -> egui::Pos2 {
+        shared::画着的每一处(帧, &|text| text == 名)
+            .last()
+            .unwrap_or_else(|| panic!("弹层里没有「{名}」：\n{}", 画出来的字(帧)))
+            .center()
+    };
+
+    // 一、三档各是一张卡。
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 卡们: Vec<_> = ["通关过的", "送朋友的", "新建合集"]
+        .into_iter()
+        .map(|名| {
+            框住它的那张卡(&帧, 名字在(&帧, 名))
+                .unwrap_or_else(|| panic!("「{名}」那一档外头没有一张带框的卡"))
+        })
+        .collect();
+    assert!(
+        卡们[0].rect != 卡们[1].rect && 卡们[1].rect != 卡们[2].rect,
+        "三档该各是一张卡：{:?}",
+        卡们.iter().map(|one| one.rect).collect::<Vec<_>>()
+    );
+
+    // 二、点「送朋友的」那张卡**右半边的空白处**：选中换成它，它描强调色边，另两张不描。
+    let 送朋友的 = 卡们[1].rect;
+    shared::按在(
+        &ctx,
+        egui::pos2(送朋友的.right() - 24.0, 送朋友的.center().y),
+        |ui| app.ui(ui),
+    );
+    跑(&ctx, &mut app, 2);
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    for (名, 该选中) in [("通关过的", false), ("送朋友的", true), ("新建合集", false)]
+    {
+        let 卡 = 框住它的那张卡(&帧, 名字在(&帧, 名))
+            .unwrap_or_else(|| panic!("「{名}」那一档外头没有一张带框的卡"));
+        assert_eq!(
+            卡.stroke.color == 色.accent,
+            该选中,
+            "「{名}」那张卡的描边是 {:?}（强调色是 {:?}），该选中：{该选中}",
+            卡.stroke.color,
+            色.accent
+        );
+    }
+}
+
+/// 往小库里记这几个合集，每个都装着库里头八个变体：走核心库那条路铺现场，再让浏览屏重读。
+fn 记这几个合集(app: &mut App, 名字们: &[&str]) {
+    let (browse, site) = app.browse_and_site();
+    let keys = site
+        .catalog
+        .variant_page(&romcat_core::catalog::browse::VariantQuery::default(), 0, 8)
+        .expect("取得出变体")
+        .into_iter()
+        .map(|row| row.key)
+        .collect::<Vec<_>>();
+    for 名字 in 名字们 {
+        romcat_core::collection::add(site, 名字, &keys).expect("加得进");
+    }
+    browse.invalidate(site);
+}
+
+/// 「管理合集」那一层：铺好一个自建合集、按左栏那颗「管理合集…」摊开。交回那个合集的名字。
+fn 摊开管理合集(ctx: &egui::Context, app: &mut App) -> &'static str {
+    const 名字: &str = "通关过的";
+    记这几个合集(app, &[名字]);
+    跑(ctx, app, 3);
+    shared::点正好(ctx, "管理合集…", |ui| app.ui(ui));
+    跑(ctx, app, 20);
+    名字
+}
+
+/// **「管理合集」改名那一行，名字擦空时屏上常驻弱色的「请输入名称。」**
+/// （票 `gui-draws-the-rest-of-the-design/23`，收挂单 `Q1478`：拿主意的人裁「照『加入合集』那一层的办法，空着时常驻一句弱色的」）。
+///
+/// 从前「保存」灰着，那一句只在悬停里——ADR-0005 再修订要的「画灰时理由常驻在屏上」在这一行上不齐。
+/// **同一句、同一个来源**：与「加入合集」那一层、排活入口拒下时说的一样，都取 `collection::check_name` 交回的
+/// `BadName::Empty`。摆在输入框**底下**（与「加入合集」那一层同位置，拿主意的人 2026-10-04 定，不照稿摆右边），弱色。
+#[test]
+fn 管理合集改名擦空时屏上常驻请输入名称_与加入合集那一层同一句() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-改名擦空"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    let 名字 = 摊开管理合集(&ctx, &mut app);
+    点弹层里的(&ctx, "改名", "", |ui| app.ui(ui));
+    // 框里预填着原名：点进去、挪到末尾、一个字一个字删光。
+    点弹层里的(&ctx, 名字, "", |ui| app.ui(ui));
+    for _ in 0..名字.chars().count() {
+        headless::frame(
+            &ctx,
+            shared::输入(vec![
+                shared::按键事件(egui::Key::End),
+                shared::按键事件(egui::Key::Backspace),
+            ]),
+            |ui| app.ui(ui),
+        );
+    }
+    跑(&ctx, &mut app, 2);
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 那一句 = romcat_core::collection::BadName::Empty.advice();
+    let 画在 = 正好这几个字画成什么色(&帧, &那一句);
+    assert_eq!(
+        画在.len(),
+        1,
+        "名字擦空了，屏上该常驻一句「{那一句}」：\n{}",
+        画出来的字(&帧)
+    );
+    let 保存 = shared::画着的每一处(&帧, &|text| text == "保存")
+        .last()
+        .copied()
+        .expect("改名那一行有「保存」");
+    assert!(
+        画在[0].0.min.y > 保存.max.y,
+        "那一句该在改名那一行底下：画在 {:?}，「保存」画在 {保存:?}",
+        画在[0].0
+    );
+    let 色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme());
+    assert_eq!(
+        画在[0].1, 色.ink_3,
+        "空着那一档是还没打字、不是打错了：该是帮助字的弱色"
+    );
+}
+
+/// **「管理合集」那一层照稿：名单装在一个列表框里，每一行的按钮靠右对齐**
+/// （票 `gui-draws-the-rest-of-the-design/23`，差距清单 `F-8` 裁 A：这一层其余与稿的差距并进本票）。
+///
+/// 稿上（`DLG.coll` 的 `.lst`）：收藏那一行与每个合集一行装在一个框里、行间一道线；每行右头一排按钮，最后一颗贴着右沿。
+/// 从前不装框，按钮紧跟在名字与那句小字后面——名字多长，按钮就摆到哪儿，几行的按钮对不齐。
+#[test]
+fn 管理合集那一层名单装在框里_每一行的按钮靠右对齐() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-管理合集照稿"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    let 名字 = 摊开管理合集(&ctx, &mut app);
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&帧);
+    // 弹层盖在最上头：同一段字背后也有的，取最后画的那一处。
+    let 在 = |字: &str| -> egui::Rect {
+        *shared::画着的每一处(&帧, &|text| text == 字)
+            .last()
+            .unwrap_or_else(|| panic!("弹层里没有「{字}」：\n{屏上}"))
+    };
+    let (收藏那行, 合集那行) = (在("★ 收藏"), 在(名字));
+
+    // 一、两行装在同一个描了边的框里，那个框比弹层本身矮。
+    let 框 = 画着的方块(&帧)
+        .into_iter()
+        .filter(|one| {
+            one.stroke.width > 0.0
+                && one.rect.contains(收藏那行.center())
+                && one.rect.contains(合集那行.center())
+                && one.rect.height() < 200.0
+        })
+        .min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()));
+    assert!(
+        框.is_some(),
+        "收藏那一行与「{名字}」那一行该装在一个列表框里"
+    );
+
+    // 二、每一行的按钮靠右：收藏那一行的「按它筛选」与「{名字}」那一行的「删除…」右沿对齐。
+    let 收藏那行的按钮 = shared::画着的每一处(&帧, &|text| text == "按它筛选")
+        .into_iter()
+        .find(|one| (one.center().y - 收藏那行.center().y).abs() < 8.0)
+        .unwrap_or_else(|| panic!("收藏那一行没有「按它筛选」：\n{屏上}"));
+    let 删除 = 在("删除…");
+    assert!(
+        (收藏那行的按钮.right() - 删除.right()).abs() < 1.0,
+        "两行最右那颗按钮该右沿对齐：收藏那行的「按它筛选」画在 {收藏那行的按钮:?}，「删除…」画在 {删除:?}"
+    );
+}
+
+/// **「管理合集」删除确认那两颗按钮摆在警示框里头**（票 `gui-draws-the-rest-of-the-design/23`，差距清单 `F-8` 裁 A）。
+///
+/// 稿上（`DLG.coll` 那个 `.warnbox`）：那句警示底下、框里头一排「取消」「删除合集」。从前两颗摆在警示框外头、它底下。
+#[test]
+fn 管理合集删除确认的两颗按钮摆在警示框里头() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-删除确认照稿"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+    摊开管理合集(&ctx, &mut app);
+    点弹层里的(&ctx, "删除…", "", |ui| app.ui(ui));
+    跑(&ctx, &mut app, 2);
+    let 帧 = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 色 = romcat_gui::tokens::Tokens::builtin()
+        .color
+        .theme(ctx.theme());
+    let 警示框 = shared::填着这个颜色的框(&帧, 色.lo_soft);
+    for 字 in ["取消", "删除合集"] {
+        let 在 = *shared::画着的每一处(&帧, &|text| text == 字)
+            .last()
+            .unwrap_or_else(|| panic!("删除确认里没有「{字}」：\n{}", 画出来的字(&帧)));
+        assert!(
+            警示框.iter().any(|框| 框.contains_rect(在)),
+            "「{字}」该摆在警示框里头：画在 {在:?}，警示框 {警示框:?}"
+        );
+    }
 }
 
 /// **搜索框底下那句排序说明，只在搜索框里真有字时才画**

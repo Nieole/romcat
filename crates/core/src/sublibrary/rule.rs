@@ -365,7 +365,7 @@ impl Op {
         }
     }
 
-    /// 界面上那个下拉框里写的字。符号本身太短，光一个 `^` 看不出是什么。
+    /// 说全了是什么意思的那一句：界面上指针停在运算符上时说它。符号本身太短，光一个 `^` 看不出是什么。
     #[must_use]
     pub fn hint(self) -> &'static str {
         match self {
@@ -377,6 +377,26 @@ impl Op {
             Self::Le => "<= 不大于",
             Self::Lt => "< 小于",
             Self::Ge => ">= 不小于",
+            Self::Gt => "> 大于",
+        }
+    }
+
+    /// 界面上运算符那颗下拉里写的**短词**：符号打头、后面两个字（设计稿 `OPS`）。
+    ///
+    /// 条件组那一格只有七八十点宽，[`Self::hint`] 那一句摆不下；只写 [`Self::label`] 又看不出 `=` 是「是其中之一」还是「等于」。
+    /// 拿主意的人 2026-10-04 裁（票 `gui-draws-the-rest-of-the-design/23`）：下拉收起与展开都写它，长句挪去悬停。
+    /// 命令行不用它——规则文字里写的是符号。
+    #[must_use]
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Is => "= 是",
+            Self::IsNot => "!= 不是",
+            Self::Contains => "~ 含有",
+            Self::StartsWith => "^ 开头",
+            Self::EndsWith => "$ 结尾",
+            Self::Le => "<= 至多",
+            Self::Lt => "< 小于",
+            Self::Ge => ">= 至少",
             Self::Gt => "> 大于",
         }
     }
@@ -1419,6 +1439,33 @@ mod tests {
 
     fn 子句(rule: &Rule, at: usize) -> Clause {
         rule.clauses()[at].clone()
+    }
+
+    #[test]
+    fn 运算符的短词照设计稿_符号打头摆得进条件组那一格() {
+        // 设计稿 `OPS`（`prototype.html` 那一张表）：条件组里那颗运算符下拉收起与展开时写的字。
+        // 拿主意的人 2026-10-04 裁（票 `gui-draws-the-rest-of-the-design/23` 的差距 `F-4` 选 A）：短词补在核心库这一处，
+        // 与 `label`（符号）、`hint`（长句）并排，界面不另写一张表。九个逐个走一遍——只验一半的测试栽过（`Q1101`）。
+        let 稿上 = [
+            (Op::Is, "= 是"),
+            (Op::IsNot, "!= 不是"),
+            (Op::Contains, "~ 含有"),
+            (Op::StartsWith, "^ 开头"),
+            (Op::EndsWith, "$ 结尾"),
+            (Op::Le, "<= 至多"),
+            (Op::Lt, "< 小于"),
+            (Op::Ge, ">= 至少"),
+            (Op::Gt, "> 大于"),
+        ];
+        assert_eq!(稿上.len(), Op::ALL.len(), "九个运算符一个不落");
+        for (op, 短词) in 稿上 {
+            assert_eq!(op.short(), 短词, "{} 的短词", op.label());
+            assert!(
+                op.short().starts_with(&format!("{} ", op.label())),
+                "短词得以规则里那个符号打头：{}",
+                op.short()
+            );
+        }
     }
 
     #[test]

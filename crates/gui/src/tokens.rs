@@ -593,6 +593,12 @@ pub struct Space {
     pub rule_box_padding: f32,
     /// 规则原文那一条的内边距：`[上下, 左右]`。
     pub rule_text_padding: [f32; 2],
+    /// 条件组里一个组：`[上下, 左]`——上下各留多少、竖线右边留多少（设计稿 `.tg` 的 `padding`）。
+    pub rule_group_padding: [f32; 2],
+    /// 一个组里一行与一行之间（设计稿 `.tg` 的 `gap`）。
+    pub rule_group_gap: f32,
+    /// 条件组里一行之内格与格之间（设计稿 `.tgh` / `.tc` / `.tci` 的 `gap`）。
+    pub rule_gap: f32,
     /// 一段里小标题与底下内容之间。
     pub section_gap: f32,
     /// 变体卡片里上下两行之间、左右两块之间：`[竖, 横]`。
@@ -1199,6 +1205,18 @@ pub struct Layout {
     pub mode_card_gap: f32,
     /// 「移出此作品」那一档底下的输入框与说明缩进多少（设计稿 `DLG.split` 里 `.field` 的 `padding-left`）。
     pub mode_indent: f32,
+    /// 选择卡一张与一张之间（设计稿「加入合集」那一层 `.col` 的 `gap`）。
+    pub choice_card_gap: f32,
+    /// 条件组每个组左边那道竖线的宽（设计稿 `.tg` 的 `border-left`）。
+    pub rule_group_bar: f32,
+    /// 组头上组合方式那颗下拉的高（设计稿 `.tg .tgh select` 的 `height`）。
+    pub rule_join_height: f32,
+    /// 那颗下拉左右留白（设计稿 `.tg .tgh select` 的 `padding`）。
+    pub rule_join_padding: f32,
+    /// 一条子句里两颗下拉与值框的左右留白（设计稿 `.tc select,.tc input` 的 `padding`）；高取 `input_small_height`。
+    pub rule_control_padding: f32,
+    /// 一条子句头一行维度与运算符两格的宽之比 `[维度, 运算符]`（设计稿 `.tc .tci` 的 `grid-template-columns`）。
+    pub rule_clause_columns: [f32; 2],
     /// 搜索结果那一框最高多高，再多框里滚（设计稿 `.srch` 的 `max-height`）。
     pub search_list_max: f32,
     /// 搜索结果一行的内边距 `[上下, 左右]`（设计稿 `.srch button` 的 `padding`）。

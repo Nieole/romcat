@@ -30,6 +30,7 @@ use romcat_core::collection::{self, FAVORITE};
 use crate::dialog::{Button, Dialog, Footer, Width};
 use crate::font;
 use crate::look;
+use crate::tokens::Tokens;
 
 /// **库里有哪几个合集、各记了几个成员**——问的是**沉淀库**那本账
 /// （`verdict::Store::collections`），一行一条成员关系。
@@ -165,7 +166,11 @@ impl Manage {
         (还开着, 动作)
     }
 
-    /// 内容区：收藏那一行，然后每个合集一行。
+    /// 内容区：一个列表框（设计稿 `.lst`，[`look::list_box`]）——收藏那一行，然后每个合集一行；
+    /// 改名、删除确认都就地展开成框里的一行。框底下一句怎么新建。
+    ///
+    /// 照稿（票 `gui-draws-the-rest-of-the-design/23`，差距清单 `F-8` 裁 A）：每一行右头一排小号按钮贴着右沿——
+    /// 「按它筛选」默认、「改名」幽灵、「删除…」警示；从前不装框，按钮紧跟在字后面，几行的按钮对不齐。
     fn body(
         &mut self,
         ui: &mut egui::Ui,
@@ -173,37 +178,43 @@ impl Manage {
         rules_naming: &mut dyn FnMut(&str) -> Option<usize>,
     ) -> Option<Managed> {
         let mut 动作 = None;
-        // ── 收藏那一行：**照稿写明它改不动也删不掉** ──────────────────────────
-        //
-        // ADR-0005 那条「不禁按钮」：这一行上本来就没有「改名」「删除」两颗，
-        // 而屏上说得出为什么——它是默认的那一组。
         let 收藏几个 = 几个(collections, FAVORITE);
-        ui.horizontal_top(|ui| {
-            ui.label(font::strong(format!("★ {FAVORITE}")));
-            look::help(ui, &format!("· {收藏几个} · 默认的一组，不能改名或删除"));
-            if look::small_buttons(ui, |ui| ui.button("按它筛选").clicked()) {
-                动作 = Some(Managed::Filter(FAVORITE.to_string()));
-            }
-        });
-
-        // ── 自建的那几个 ────────────────────────────────────────────────────
         let 自建的: Vec<&Recorded> = collections
             .iter()
             .filter(|一个| 一个.name != FAVORITE)
             .collect();
-        if 自建的.is_empty() {
-            一段之间(ui);
-            ui.weak("还没有合集。");
-        }
-        for 一个 in 自建的 {
-            一段之间(ui);
-            let name = 一个.name.clone();
-            // **正在改名的那一行换成一个输入框**（照稿就地展开）。
-            if let Some((改的是, 打的字)) = &mut self.renaming
-                && *改的是 == name
-            {
+        look::list_box(ui, |框| {
+            // ── 收藏那一行：**照稿写明它改不动也删不掉** ──────────────────────
+            //
+            // ADR-0005 那条「不禁按钮」：这一行上本来就没有「改名」「删除」两颗，
+            // 而屏上说得出为什么——它是默认的那一组。
+            框.row(|ui| {
+                let 字 = ["按它筛选"];
+                let 筛 = look::text_and_buttons(
+                    ui,
+                    &字,
+                    |ui| {
+                        ui.label(font::strong(format!("★ {FAVORITE}")));
+                        look::help(ui, &format!("· {收藏几个} · 默认的一组，不能改名或删除"));
+                    },
+                    |ui| ui.button(字[0]).clicked(),
+                );
+                if 筛 {
+                    动作 = Some(Managed::Filter(FAVORITE.to_string()));
+                }
+            });
+
+            // ── 自建的那几个 ────────────────────────────────────────────────
+            for 一个 in &自建的 {
+                let name = 一个.name.clone();
+                // **正在改名的那一行换成一个输入框**（照稿就地展开）。
+                if let Some((改的是, 打的字)) = &mut self.renaming
+                    && *改的是 == name
                 {
-                    let 存了 = 改名那一行(ui, &name, 打的字, collections);
+                    let 存了 = 框.row(|ui| {
+                        ui.vertical(|ui| 改名那一行(ui, &name, 打的字, collections))
+                            .inner
+                    });
                     match 存了 {
                         Some(RenameRow::Cancel) => self.renaming = None,
                         Some(RenameRow::Save(到)) => {
@@ -217,27 +228,30 @@ impl Manage {
                     }
                     continue;
                 }
-            }
-            let (筛, 改, 删) = 一行(ui, &name, 一个.members);
-            if 筛 {
-                动作 = Some(Managed::Filter(name.clone()));
-            }
-            if 改 {
-                // 框里先填着原名：改名多半是改一两个字，不是从头打一遍。
-                self.renaming = Some((name.clone(), name.clone()));
-                self.deleting = None;
-            }
-            if 删 {
-                // **那个数在这一下问一次就存着**，别每帧遍历子库（见 `deleting` 的文档）。
-                self.deleting = Some((name.clone(), rules_naming(&name)));
-                self.renaming = None;
-            }
-            // **删除确认就地展开在这一行底下**（照稿那个 `warnbox`）。
-            if let Some((删的是, 几条规则)) = &self.deleting
-                && *删的是 == name
-            {
+                let (筛, 改, 删) = 框.row(|ui| 一行(ui, &name, 一个.members));
+                if 筛 {
+                    动作 = Some(Managed::Filter(name.clone()));
+                }
+                if 改 {
+                    // 框里先填着原名：改名多半是改一两个字，不是从头打一遍。
+                    self.renaming = Some((name.clone(), name.clone()));
+                    self.deleting = None;
+                }
+                if 删 {
+                    // **那个数在这一下问一次就存着**，别每帧遍历子库（见 `deleting` 的文档）。
+                    self.deleting = Some((name.clone(), rules_naming(&name)));
+                    self.renaming = None;
+                }
+                // **删除确认就地展开在这一行底下**（照稿那个 `warnbox`，是名单框里的一行）。
+                if let Some((删的是, 几条规则)) = &self.deleting
+                    && *删的是 == name
                 {
-                    match 删除确认(ui, &name, 一个.members, *几条规则) {
+                    let 几条规则 = *几条规则;
+                    let 定了 = 框.row(|ui| {
+                        ui.vertical(|ui| 删除确认(ui, &name, 一个.members, 几条规则))
+                            .inner
+                    });
+                    match 定了 {
                         Some(true) => {
                             动作 = Some(Managed::Drop(name.clone()));
                             self.deleting = None;
@@ -247,6 +261,10 @@ impl Manage {
                     }
                 }
             }
+        });
+        if 自建的.is_empty() {
+            一段之间(ui);
+            ui.weak("还没有合集。");
         }
 
         一段之间(ui);
@@ -282,55 +300,86 @@ fn 改名那一行(
         .collect();
     let 判 = collection::check_name(打的字, &已有);
     let mut 按了 = None;
-    ui.horizontal_top(|ui| {
-        let width = (ui.available_width() * 0.5).max(120.0);
-        look::small_text_input(ui, width, egui::TextEdit::singleline(打的字));
-        let (取消, 保存) = look::small_buttons(ui, |ui| {
-            let 取消 = ui.button("取消").clicked();
+    // 照稿：输入框占满左边（默认那一档的高），右头「取消」幽灵、「保存」主按钮。
+    let 字 = ["取消", "保存"];
+    let (取消, 保存) = look::text_and_buttons(
+        ui,
+        &字,
+        |ui| {
+            let width = ui.available_width();
+            look::text_input(ui, width, egui::TextEdit::singleline(打的字));
+        },
+        |ui| {
+            let 取消 = look::small_ghost_button(ui, 字[0]).clicked();
             let 保存 = ui
-                .add_enabled(判.is_ok(), egui::Button::new("保存"))
+                .scope(|ui| {
+                    look::primary_button(ui.visuals_mut());
+                    ui.add_enabled(判.is_ok(), egui::Button::new(字[1]))
+                })
+                .inner
                 .on_hover_text(match &判 {
                     Ok(_) => "改完名，写着这个合集的子库规则一并更新。".to_string(),
                     Err(不行) => 不行.advice(),
                 })
                 .clicked();
             (取消, 保存)
-        });
-        if 取消 {
-            按了 = Some(RenameRow::Cancel);
-        }
-        if 保存 && let Ok(到) = &判 {
-            按了 = Some(RenameRow::Save(到.clone()));
-        }
-    });
-    // **为什么按不动，屏上说得出**（ADR-0005）：不只挂在悬停里——空着那一档不说，
-    // 人还没打字就先见一句红的。
-    if let Err(不行) = &判
-        && !打的字.trim().is_empty()
-    {
-        ui.colored_label(ui.visuals().error_fg_color, 不行.advice());
+        },
+    );
+    if 取消 {
+        按了 = Some(RenameRow::Cancel);
     }
+    if 保存 && let Ok(到) = &判 {
+        按了 = Some(RenameRow::Save(到.clone()));
+    }
+    // **为什么「保存」按不动，屏上常驻着说**（ADR-0005 再修订），与「加入合集」那一层同一个摆法、同一句话
+    // （票 `gui-draws-the-rest-of-the-design/23`，收挂单 `Q1478`）：从前空着那一档只挂在悬停里。
+    名字用不得的理由(ui, &判);
     按了
 }
 
-/// 一个合集一行：名字、几个作品、以及「按它筛选 / 改名 / 删除…」。
+/// 名字框**底下**那一句「为什么用不得」（ADR-0005 再修订：画灰的条件之一是理由常驻在屏上，不只挂在那颗按不动的按钮的悬停里）。
+/// 「加入合集」那一层新建那一档与「管理合集」改名那一行都摆它——**同一句、同一个来源**（`check_name` 交回的那一档），
+/// 两处一个常驻、一个只挂悬停的话，下一个人照哪一个抄都会抄错一半（挂单 `Q1478`）。
+///
+/// **空着那一档用帮助字的弱色**：那是还没打字，不是打错了——人还没动手就先见一句红的，读着像挨了骂。
+/// 打了字还用不得的那几档照旧红。空名那一句也是排活入口拒下时说的那一句（`Screen::合集名空着`，票
+/// `gui-draws-the-rest-of-the-design/07`，收挂单 `Q798`）。
+fn 名字用不得的理由(ui: &mut egui::Ui, 判: &Result<String, collection::BadName>) {
+    match 判 {
+        Ok(_) => {}
+        Err(空的 @ collection::BadName::Empty) => {
+            look::help(ui, &空的.advice());
+        }
+        Err(不行) => {
+            ui.colored_label(ui.visuals().error_fg_color, 不行.advice());
+        }
+    }
+}
+
+/// 一个合集一行：名字、几个成员，右头「按它筛选」（默认）「改名」（幽灵）「删除…」（警示），照稿 `DLG.coll` 那一行。
 fn 一行(ui: &mut egui::Ui, name: &str, count: u64) -> (bool, bool, bool) {
-    let mut out = (false, false, false);
-    ui.horizontal_top(|ui| {
-        ui.label(font::strong(name));
-        look::help(ui, &format!("· {}", 多少个成员(count)));
-        let (筛, 改, 删) = look::small_buttons(ui, |ui| {
-            let 筛 = ui.button("按它筛选").clicked();
-            let 改 = ui.button("改名").clicked();
+    let 字 = ["按它筛选", "改名", "删除…"];
+    look::text_and_buttons(
+        ui,
+        &字,
+        |ui| {
+            ui.label(font::strong(name));
+            look::help(ui, &format!("· {}", 多少个成员(count)));
+        },
+        |ui| {
+            let 筛 = ui.button(字[0]).clicked();
+            let 改 = look::small_ghost_button(ui, 字[1]).clicked();
             let 删 = ui
-                .button("删除…")
+                .scope(|ui| {
+                    look::warn_button(ui.visuals_mut());
+                    ui.button(字[2])
+                })
+                .inner
                 .on_hover_text("删除就是把成员全部移出，作品本身不受影响。")
                 .clicked();
             (筛, 改, 删)
-        });
-        out = (筛, 改, 删);
-    });
-    out
+        },
+    )
 }
 
 /// 删除确认那一块（照稿那个 `warnbox`）：交回 `Some(true)` 是真删，
@@ -365,13 +414,19 @@ fn 删除确认(
         ),
         None => format!("{头一句}有几条子库规则提到这个合集，这会儿数不出来（中立库读不动）。"),
     };
-    look::warn_box(ui, &format!("删除合集「{name}」"), &那句话);
-    ui.horizontal_top(|ui| {
-        let (取消, 删) = look::small_buttons(ui, |ui| {
-            let 取消 = ui.button("取消").clicked();
-            let 删 = ui.button("删除合集").clicked();
-            (取消, 删)
-        });
+    // 照稿：「取消」幽灵、「删除合集」危险色，两颗摆在警示框**里头**、靠右（设计稿那个 `.warnbox` 里的 `.row`）。
+    look::warn_box_then(ui, &format!("删除合集「{name}」"), &那句话, |ui| {
+        let 字 = ["取消", "删除合集"];
+        let (取消, 删) = look::text_and_buttons(
+            ui,
+            &字,
+            |_| {},
+            |ui| {
+                let 取消 = look::small_ghost_button(ui, 字[0]).clicked();
+                let 删 = look::danger_button(ui, 字[1], true).clicked();
+                (取消, 删)
+            },
+        );
         if 取消 {
             定了 = Some(false);
         }
@@ -411,7 +466,8 @@ impl Join {
             Some(_) => Ok(String::new()),
             None => collection::check_name(&self.fresh, &已有),
         };
-        let footer = Footer::new(Button::new("取消", Pressed::Dismiss)).button(
+        // 「取消」是幽灵按钮（设计稿 `.btn.ghost`，差距 `J-04`），与合并向导两层的页脚同一个摆法。
+        let footer = Footer::new(Button::new("取消", Pressed::Dismiss).ghost()).button(
             Button::new("加入", Pressed::Add)
                 .primary()
                 .enabled(加得进.is_ok())
@@ -425,7 +481,7 @@ impl Join {
         let shown = Dialog::new("加入合集", "加入合集", footer)
             .note(format!("把{scope}加入合集。"))
             .width(Width::Narrow)
-            .show(ctx, |ui| self.body(ui, collections));
+            .show(ctx, |ui| self.body(ui, collections, &加得进));
         match shown.pressed {
             Some(Pressed::Dismiss) => (false, None),
             Some(Pressed::Add) => {
@@ -445,55 +501,44 @@ impl Join {
     }
 
     /// 内容区：已有那几个各一档、「新建合集」一档，外加路径锚那块说明（中性底，挂单 `Q1110`）。
-    fn body(&mut self, ui: &mut egui::Ui, collections: &[Recorded]) {
-        for 一个 in collections.iter().filter(|一个| 一个.name != FAVORITE) {
-            let 选中 = self.target.as_deref() == Some(一个.name.as_str());
-            if look::radio_option(ui, 选中, &一个.name, &多少个成员(一个.members)).clicked()
-            {
-                self.target = Some(一个.name.clone());
+    ///
+    /// **每一档是一张整张按得动的选择卡**（设计稿 `.asmode`，[`look::mode_card`]；票 `gui-draws-the-rest-of-the-design/23`
+    /// 的差距 `J-01`）：名字一行、底下一行「N 个成员」，选中的那张描强调色边；卡与卡隔 `choice-card-gap`。
+    /// 「新建合集」选着时，名字框缩进挂在那张卡底下（[`look::under_mode_card`]，设计稿 `.field` 的 `padding-left`）。
+    ///
+    /// `加得进` 是 [`Self::ui`] 这一帧问过的那一回 `check_name`（「加入」按不按得动看的就是它），新建那一档底下那句理由照它说。
+    fn body(
+        &mut self,
+        ui: &mut egui::Ui,
+        collections: &[Recorded],
+        加得进: &Result<String, collection::BadName>,
+    ) {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = Tokens::builtin().layout.choice_card_gap;
+            for 一个 in collections.iter().filter(|一个| 一个.name != FAVORITE) {
+                let 选中 = self.target.as_deref() == Some(一个.name.as_str());
+                if look::mode_card(ui, 选中, &一个.name, &多少个成员(一个.members)).clicked()
+                {
+                    self.target = Some(一个.name.clone());
+                }
             }
-        }
-        if look::radio_option(
-            ui,
-            self.target.is_none(),
-            "新建合集",
-            "用勾选的作品建一个新合集",
-        )
-        .clicked()
-        {
-            self.target = None;
-        }
-        if self.target.is_none() {
-            let width = ui.available_width();
-            look::small_text_input(
+            if look::mode_card(
                 ui,
-                width,
-                egui::TextEdit::singleline(&mut self.fresh).hint_text("例如：通关过的"),
-            );
-            // **为什么「加入」按不动，屏上常驻着说**（ADR-0005 再修订：画灰的条件之一是理由常驻在屏上，
-            // 不只挂在那颗按不动的按钮的悬停里）。**空着那一档用帮助字的弱色**：那是还没打字，不是打错了
-            // ——人还没动手就先见一句红的，读着像挨了骂。打了字还用不得的那几档照旧红。
-            //
-            // 空名那一句与排活入口拒下时说的是同一句（`Screen::合集名空着`，票
-            // `gui-draws-the-rest-of-the-design/07`，收挂单 `Q798`）：两处都取 `check_name` 交回的那一档。
-            let 已有: Vec<String> = collections
-                .iter()
-                .map(|一个| 一个.name.clone())
-                .filter(|一个| 一个 != FAVORITE)
-                .collect();
-            match collection::check_name(&self.fresh, &已有) {
-                Ok(_) => {}
-                Err(空的 @ collection::BadName::Empty) => {
-                    look::help(ui, &空的.advice());
-                }
-                Err(不行) => {
-                    ui.colored_label(ui.visuals().error_fg_color, 不行.advice());
-                }
+                self.target.is_none(),
+                "新建合集",
+                "用勾选的作品建一个新合集",
+            )
+            .clicked()
+            {
+                self.target = None;
             }
-        }
+            if self.target.is_none() {
+                look::under_mode_card(ui, |ui| self.fresh_ui(ui, 加得进));
+            }
+        });
         // **挂不住内容锚那件事照实说，但不现编那个数**（挂单 `Q1103`，理由见 `ui` 的文档）：
         // 稿上这儿写的是「其中 N 个只能按路径记录」，而那个 N 要为这一批每个变体折一次
-        // 内容判据——全选那一档在真库上是四万多个变体、秒级的读，排任务台才做得起。
+        // 内容判据——全选那一档在真库上是四万多个变体（见台账 `docs/library-facts.md`）、秒级的读，排任务台才做得起。
         // **不含糊成一句「加好了」**（ADR-0021 那条纪律在这一屏上的样子），
         // 也不印一个现编的数：说清有这一档、并指向那句准的回执。
         //
@@ -502,6 +547,18 @@ impl Join {
         // 见上），于是**每次都画**——常驻的一块就不能是警示色，一批全是认出作品的也照样跳一块色底，久了就没人看了。
         一段之间(ui);
         路径锚的说明(ui);
+    }
+
+    /// 「新建合集」那一档底下：名字框（默认那一档的高，`input-height`），与名字用不得时那一句理由。
+    fn fresh_ui(&mut self, ui: &mut egui::Ui, 加得进: &Result<String, collection::BadName>) {
+        let width = ui.available_width();
+        look::text_input(
+            ui,
+            width,
+            egui::TextEdit::singleline(&mut self.fresh).hint_text("例如：通关过的"),
+        );
+        // **为什么「加入」按不动，屏上常驻着说**（[`名字用不得的理由`]），与那颗按钮看的是同一回判。
+        名字用不得的理由(ui, 加得进);
     }
 }
 
@@ -561,6 +618,6 @@ fn 几个(collections: &[Recorded], name: &str) -> String {
 
 /// 两段之间的留白：`browse.rs` 那个 `section_gap` 是私有的，这儿照同一个算法要一份。
 fn 一段之间(ui: &mut egui::Ui) {
-    let gap = crate::tokens::Tokens::builtin().space.section_gap - ui.spacing().item_spacing.y;
+    let gap = Tokens::builtin().space.section_gap - ui.spacing().item_spacing.y;
     ui.add_space(gap.max(0.0));
 }
