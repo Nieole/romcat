@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::adapter::NoAdapter;
-use crate::capability::{Roster, today};
+use crate::capability::{RejectReason, Roster, today};
 use crate::catalog::{Catalog, Roots};
 use crate::fs::RealFs;
 use crate::path;
@@ -187,6 +187,10 @@ pub struct Prepared {
     pub media_crowded_out: u64,
     /// 折出了几个前端条目。
     pub entries: u64,
+    /// **没上卡**的变体 → 拦下它主文件的那一条（[`OnCard::left_off`](super::OnCard::left_off)）：卡上的前端元数据不列、
+    /// 媒体也不铺（票 `verdict-store-and-sync/21`）。差量预览照它说一句：命令行印 [`Concern::LeftOffCard`]，界面在
+    /// 「放不进目标」那一栏的说明后头接 [`Self::left_off_note`]。
+    pub left_off: BTreeMap<String, RejectReason>,
     /// 子库记着的能力档案在眼下这份名册里找不到——退回了「不作声称」。
     pub missing_capability: Option<String>,
     /// 这份档案里有几条声明已经陈旧。
@@ -200,6 +204,9 @@ impl Prepared {
     /// 「为什么这一趟少选出来这么多」的答案，少印一条就等于让人对着一个说不通的数字发呆。
     /// 那段话只说事实与去处的名字、**不带命令**（挂单 `Q622` 那一族）：命令行照种类补自己那条命令，
     /// 界面照种类补屏上的去处。
+    ///
+    /// **一条例外是 [`Concern::LeftOffCard`]**：界面不在这几行里画它，在「放不进目标」那一栏的说明后头接一句
+    /// [`Self::left_off_note`]（拿主意的人 2026-10-04 裁，挂单 `Q1877`）；命令行照旧印它。
     #[must_use]
     pub fn concerns(&self) -> Vec<Concern> {
         let mut out = Vec::new();
@@ -221,9 +228,25 @@ impl Prepared {
         if self.stale_claims > 0 {
             out.push(Concern::StaleClaims(self.stale_claims));
         }
+        if !self.left_off.is_empty() {
+            out.push(Concern::LeftOffCard(self.left_off.clone()));
+        }
         out
     }
+
+    /// 「放不进目标」那一栏的说明后头**接的那一句**：有变体没上卡时是 [`LEFT_OFF_NOTE`]，没有时不说。
+    ///
+    /// 拿主意的人 2026-10-04 裁（挂单 `Q1877`）：屏上那一句摆进那一栏、接在「这些文件这一趟不会复制……」后头，
+    /// 不重复个数、不用警示色——是哪几份那一栏自己列着。「什么时候说」与「说什么」都在核心这一处：被拦下的只是附属
+    /// 文件、媒体或元数据时变体照样上了卡，那时说「前端里也不列」是句假话。
+    #[must_use]
+    pub fn left_off_note(&self) -> Option<&'static str> {
+        (!self.left_off.is_empty()).then_some(LEFT_OFF_NOTE)
+    }
 }
+
+/// 「放不进目标」那一栏的说明后头接的那一句（[`Prepared::left_off_note`]）：只说事实，几个、是哪几份那一栏自己列着。
+pub const LEFT_OFF_NOTE: &str = "前端里也不列它们。";
 
 /// 折期望状态时一件**要说出口**的怪事（[`Prepared::concerns`]）。
 ///
@@ -243,6 +266,10 @@ pub enum Concern {
     MissingCapability(String),
     /// 这份能力档案里有几条声明超过半年没核实。
     StaleClaims(usize),
+    /// 有几个变体的主文件**放不进目标**、压根没上卡，卡上的前端元数据里也不列它们（[`Prepared::left_off`]，
+    /// 票 `verdict-store-and-sync/21`）。带着是哪几个（变体的键）、各被哪一类拦下：命令行列出键、补上排除的命令。
+    /// 那段话只说几个、各是哪一类。**界面不画这一条**，在「放不进目标」那一栏接 [`Prepared::left_off_note`]（挂单 `Q1877`）。
+    LeftOffCard(BTreeMap<String, RejectReason>),
 }
 
 impl std::fmt::Display for Concern {
@@ -282,6 +309,24 @@ impl std::fmt::Display for Concern {
                  而矩阵错了比不转换更糟。",
                 thousands(*count as u64),
             ),
+            // 「放不进目标」与几类的名字照屏上那一栏的说法（`RejectReason::label`）；前端里不列是这一趟替人做了的事，
+            // 说出口，不然人会在前端里找它。
+            Self::LeftOffCard(left_off) => {
+                let 几类: Vec<String> = RejectReason::all()
+                    .into_iter()
+                    .filter_map(|reason| {
+                        let 几个 = left_off.values().filter(|one| **one == reason).count();
+                        (几个 > 0)
+                            .then(|| format!("{} {} 个", reason.label(), thousands(几个 as u64)))
+                    })
+                    .collect();
+                write!(
+                    f,
+                    "有 {} 个变体放不进目标、没上卡，前端里也不列：{}。",
+                    thousands(left_off.len() as u64),
+                    几类.join("、"),
+                )
+            }
         }
     }
 }
@@ -564,12 +609,13 @@ pub fn prepare_selected(
             prefix_chars,
         );
     }
-    // **条目在卡上启动哪一份**照筛过之后的期望状态定（[`super::Footprint::launching`]）：卡上有播放列表的启动它，
-    // 主文件转了格式的启动转出来那一份（票 `verdict-store-and-sync/20`）。前端元数据照它写条目，媒体照它起名。
-    let launch = footprint.launching(&desired, &playlists);
+    // **选中的变体在卡上落成什么样**照筛过之后的期望状态定（[`super::Footprint::launching`]）：卡上有播放列表的启动它，
+    // 主文件转了格式的启动转出来那一份（票 `verdict-store-and-sync/20`）；主文件放不进目标的压根没上卡（票
+    // `verdict-store-and-sync/21`）。前端元数据照它写条目、不列没上卡的，媒体照它起名、不铺没上卡的。
+    let on_card = footprint.launching(&desired, &playlists);
     generated.extend(playlists.bytes);
     step("铺媒体")?;
-    let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, selected, &launch)
+    let mut media = super::media::lay(catalog, adapter.as_ref(), &pool, selected, &on_card)
         .map_err(|error| format!("中立库读不动：{error}"))?;
     step("折前端元数据")?;
     let frontend = super::frontend::lay(
@@ -578,10 +624,10 @@ pub fn prepare_selected(
         &priorities,
         selected,
         &media.assets,
-        &launch,
+        &on_card,
     )
     .map_err(|error| format!("元数据折不出来：{error}"))?;
-    // 媒体与前端元数据最后进来、再筛一遍。播放列表在这一遍里结论不变（`launch` 因此不必重取）：它们落在平台目录里，
+    // 媒体与前端元数据最后进来、再筛一遍。ROM 与播放列表在这一遍里结论不变（`on_card` 因此不必重取）：它们落在平台目录里，
     // 媒体落在 `downloaded_media/`、`media/` 下，元数据落在 `gamelists/` 下或子库根上，路径撞不到一起。
     desired.add_and_screen(
         media.files.iter().chain(&frontend.files).cloned(),
@@ -628,6 +674,7 @@ pub fn prepare_selected(
         media_unknown_kind: media.unknown_kind,
         media_crowded_out: media.crowded_out,
         entries: frontend.entries,
+        left_off: on_card.left_off,
         missing_capability,
         stale_claims: profile.stale_claims(&today()),
     })

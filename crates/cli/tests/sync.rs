@@ -298,6 +298,55 @@ fn 差量预览底下那几件怪事_核心那句只说事实_命令行照种类
 }
 
 #[test]
+fn 主文件放不进目标的变体_差量预览底下说一句没上卡前端里也不列_命令行补上是哪几个与排除的命令() {
+    // 票 `verdict-store-and-sync/21`（挂单 `Q1847`）：主文件放不进目标的变体卡上的前端元数据不列、媒体也不铺。核心那句
+    // 只说几个、各是哪一类（`sync::Concern::LeftOffCard`），是哪几个变体与排除它们的命令由命令行补。
+    let (_library, workspace, _target) = 现场();
+    let ws = workspace.path();
+    // 一张「小卡」：内置名册，只把 FAT32 的单文件上限改成 3000 字节——超级玛丽（4 KiB）放不进，魂斗罗（2 KiB）放得下。
+    let 底稿 = ws.join("底稿.toml");
+    let out = romcat(
+        ws,
+        &["capability", "--dump-builtin", &底稿.display().to_string()],
+    );
+    assert!(out.status.success(), "{}", 出来的话(&out));
+    let 原来 = "\"单文件上限\" = 4294967295";
+    let 名册 = fs::read_to_string(&底稿).expect("读得出");
+    assert!(
+        名册.contains(原来),
+        "内置名册里 FAT32 那一行变了，这份夹具得跟着改"
+    );
+    fs::write(
+        ws.join("capability.toml"),
+        名册.replace(原来, "\"单文件上限\" = 3000"),
+    )
+    .expect("写得进");
+    let out = 子库(ws, &["set", "掌机", "--capability", "retroarch-fat32"]);
+    assert!(out.status.success(), "{}", 出来的话(&out));
+
+    let out = 子库(ws, &["plan", "掌机"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    for (该有, 怎么回事) in [
+        (
+            "有 1 个变体放不进目标、没上卡，前端里也不列：超过单文件上限 1 个。",
+            "没上卡那一句",
+        ),
+        ("库/FC/超级玛丽.zip（超过单文件上限）", "是哪一个、哪一类"),
+        (
+            "romcat sublibrary except 掌机 --exclude <变体的键>",
+            "排除它们的命令",
+        ),
+    ] {
+        assert!(text.contains(该有), "{怎么回事}没印出来：{text}");
+    }
+    assert!(
+        !text.contains("库/FC/魂斗罗.zip（"),
+        "放得下的不该列进没上卡那几个：{text}"
+    );
+}
+
+#[test]
 fn 子库不在时说得清怎么建() {
     let (_library, workspace, _target) = 现场();
     let out = 子库(workspace.path(), &["plan", "备用卡"]);

@@ -1922,10 +1922,11 @@ impl Footprint {
             .collect()
     }
 
-    /// 每个变体的**条目在卡上启动哪一份**（[`Launch`]，键是变体的键）：收敛照它写条目，铺媒体照它起名。
+    /// 选中的每个变体**在卡上落成什么样**（[`OnCard`]）：条目在卡上启动哪一份，或者它压根没上卡。收敛照它写条目、
+    /// 铺媒体照它起名，没上卡的两样都不给它。
     ///
     /// 条目写的是主文件**在卡上的落点**，也就是期望状态里那一份。原样搬的主文件落点就是它在主库里的键剥掉根名，
-    /// 收敛不点名也写得对，所以这里只点名两种：
+    /// 收敛不点名也写得对，所以 [`OnCard::launch`] 只点名两种：
     ///
     /// - **多碟变体、卡上有它的播放列表**：启动播放列表，几张碟藏起来（票 `verdict-store-and-sync/18`，
     ///   [`playlist`] 模块文档）。只认筛过之后还在的那几份——播放列表放不进目标，就退到下一条。
@@ -1933,17 +1934,19 @@ impl Footprint {
     ///   产物，主库里那个名字卡上没有，写原名的话前端里点下去找不着文件。多碟变体没生成播放列表时也走这一条：条目照旧指
     ///   主文件，转了格式就指转出来那一份。
     ///
-    /// `desired` 得是**按目标存储筛过之后**的期望状态，播放列表也已经并进来筛过（[`Desired::add_and_screen`]）。
-    /// 主文件放不进目标的不在里头，条目照旧写原名。转不转、转成什么只在 [`Self::desired`] 判一次，这里只读它判出来的落点。
+    /// 剩下一种是 [`OnCard::left_off`]：**主文件放不进目标**（原样搬的那一份、或者转出来的那一份被拦在
+    /// [`Desired::rejected`] 里），卡上的播放列表又没接住它——条目要启动的那一份卡上没有，写哪个名字都指着空处，
+    /// 于是卡上的前端元数据不列它、媒体也不铺（票 `verdict-store-and-sync/21`，挂单 `Q1847`）。认的是**明着被拦下**
+    /// 的那一份，不是「期望状态里找不着」：目录树变体的主文件是个目录，本来就不进期望状态，它的内容照样上卡。
     ///
-    /// **只有同步这一侧有**：导出到主库那一侧不转格式、不生成播放列表（ADR-0004），条目照旧指每个变体的主文件。
+    /// `desired` 得是**按目标存储筛过之后**的期望状态，播放列表也已经并进来筛过（[`Desired::add_and_screen`]）。
+    /// 转不转、转成什么只在 [`Self::desired`] 判一次，放不放得下只在 [`Desired::screen`] 判一次，这里只读它们的结论。
+    ///
+    /// **只有同步这一侧有**：导出到主库那一侧不转格式、不生成播放列表、没有放不放得下这回事（ADR-0004），条目照旧指
+    /// 每个变体的主文件，一个都不少。
     #[must_use]
-    pub fn launching(
-        &self,
-        desired: &Desired,
-        playlists: &playlist::Laid,
-    ) -> BTreeMap<String, Launch> {
-        let mut out = playlists.launching(desired);
+    pub fn launching(&self, desired: &Desired, playlists: &playlist::Laid) -> OnCard {
+        let mut launch = playlists.launching(desired);
         // 主库里的键 → 转出来那一份在卡上的落点。只有 ROM 那一类有主库里的键。
         let converted: BTreeMap<&str, &str> = desired
             .files
@@ -1951,21 +1954,53 @@ impl Footprint {
             .filter(|file| file.kind == FileKind::Rom && file.convert.is_some())
             .map(|file| (file.source.as_str(), file.path.as_str()))
             .collect();
+        // 主库里的键 → 拦下它的那一条。转出来那一份被拦下时，`source` 照旧是主库里那份原始形态的键。
+        let barred: BTreeMap<&str, RejectReason> = desired
+            .rejected
+            .iter()
+            .filter(|row| row.kind == FileKind::Rom)
+            .map(|row| (row.source.as_str(), row.reason))
+            .collect();
+        let mut left_off = BTreeMap::new();
         for member in self.members.iter().filter(|member| member.is_main()) {
-            if out.contains_key(&member.variant_key) {
+            if launch.contains_key(&member.variant_key) {
                 continue;
             }
             if let Some(at) = converted.get(member.key.as_str()) {
-                out.insert(
+                launch.insert(
                     member.variant_key.clone(),
                     Launch {
                         file: (*at).to_string(),
                         hidden: Vec::new(),
                     },
                 );
+            } else if let Some(reason) = barred.get(member.key.as_str()) {
+                left_off.insert(member.variant_key.clone(), *reason);
             }
         }
-        out
+        OnCard { launch, left_off }
+    }
+}
+
+/// 照**筛过之后**的期望状态，选中的变体在卡上落成什么样（[`Footprint::launching`] 一处答）：条目启动哪一份，
+/// 哪几个压根没上卡。
+///
+/// 两样一起交出去，收敛与铺媒体只收这一份：拿得到「启动哪一份」就拿得到「哪几个没上卡」，不会只取一半
+/// （ADR-0024）。**导出到主库那一侧没有它**：收敛交空的启动表、铺媒体铺全部变体。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OnCard {
+    /// 条目在卡上启动的**不是主文件原名**的那几个变体（键是变体的键）→ 启动哪一份：播放列表，或者转出来的主文件。
+    pub launch: BTreeMap<String, Launch>,
+    /// **没上卡**的变体（键是变体的键）→ 拦下它主文件的那一条（[`RejectReason`]）。卡上的前端元数据不列它们，
+    /// 媒体也不铺；差量预览照它说一句（[`Concern::LeftOffCard`]）。
+    pub left_off: BTreeMap<String, RejectReason>,
+}
+
+impl OnCard {
+    /// 这个变体上了卡吗：主文件（或它的播放列表）在筛过之后的期望状态里——更准确地说，主文件没被明着拦下。
+    #[must_use]
+    pub fn landed(&self, variant: &str) -> bool {
+        !self.left_off.contains_key(variant)
     }
 }
 

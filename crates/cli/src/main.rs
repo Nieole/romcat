@@ -4887,7 +4887,8 @@ fn run_sublibrary_plan(args: &SubPlanArgs) -> ExitCode {
 }
 
 /// 折期望状态时那几件要说出口的怪事。**`plan` 与 `sync` 印同一份**，
-/// 而且**与界面印同一份**——那几句话在核心里（[`sync::Prepared::concerns`]）。
+/// 而且**与界面印同一份**——那几句话在核心里（[`sync::Prepared::concerns`]）。一件例外：没上卡那一件
+/// （[`sync::Concern::LeftOffCard`]）界面不在差量账底下画，在「放不进目标」那一栏接一句（挂单 `Q1877`）；命令行照旧印。
 ///
 /// 核心那几句只说事实与去处的名字（挂单 `Q622` 那一族）；命令是命令行自己的去处，照种类在这儿补。
 fn warn_about(ready: &sync::Prepared) {
@@ -4906,12 +4907,38 @@ fn warn_about(ready: &sync::Prepared) {
                 "`romcat capability {}` 看是哪几条。",
                 ready.sublibrary.capability.as_deref().unwrap_or("<档案名>")
             )),
+            // 核心那句只说几个、各是哪一类；是哪几个（变体的键）与排除它们的命令由命令行补——`--exclude` 要的正是那串键。
+            sync::Concern::LeftOffCard(left_off) => Some(left_off_hint(name, left_off)),
             sync::Concern::MediaUnknownKind(_) | sync::Concern::MediaCrowdedOut(_) => None,
         };
         if let Some(hint) = hint {
             eprintln!("{hint}");
         }
     }
+}
+
+/// 没上卡的那几个变体（[`sync::Concern::LeftOffCard`]）命令行补的话：列出变体的键与拦下它的那一类，再给排除的命令。
+///
+/// 列前十个；差量预览里放不进目标那一段列的是落点，这里列的是变体的键——`--exclude` 要的是它。
+fn left_off_hint(
+    name: &str,
+    left_off: &std::collections::BTreeMap<String, romcat_core::capability::RejectReason>,
+) -> String {
+    const 列几个: usize = 10;
+    let mut out = String::new();
+    for (key, reason) in left_off.iter().take(列几个) {
+        out.push_str(&format!("  {key}（{}）\n", reason.label()));
+    }
+    if left_off.len() > 列几个 {
+        out.push_str(&format!(
+            "  …… 另有 {} 个。\n",
+            thousands((left_off.len() - 列几个) as u64)
+        ));
+    }
+    out.push_str(&format!(
+        "不要它们就 `romcat sublibrary except {name} --exclude <变体的键>` 从选择集里去掉；落点撞车的只排除其中一份。"
+    ));
+    out
 }
 
 /// **同步**：把差量真正落到目标设备上。

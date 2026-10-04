@@ -46,7 +46,7 @@ use crate::scrape::pool::MediaPool;
 use crate::scrape::{AnchorKind, MediaKind};
 use crate::sublibrary::Selected;
 
-use super::{DesiredFile, FileKind, Stamp};
+use super::{DesiredFile, FileKind, OnCard, Stamp};
 
 /// 铺出来的东西。
 #[derive(Debug, Clone, Default)]
@@ -82,10 +82,13 @@ impl Laid {
 /// 两个锚点都看：躺在变体目录里的那几张图挂在**变体**上，刮削来的封面与简介挂在
 /// **作品**上（[`AnchorKind`]）。只看一个锚点会让另一半媒体静默消失。
 ///
-/// `launch` 是照筛过之后的期望状态折出来的「条目在卡上启动哪一份」（[`Footprint::launching`](super::Footprint::launching)）：
-/// 条目改指播放列表、或者指着转出来的主文件的那几个变体，**靠文件名找媒体的格式**（ES-DE）照条目指着的那一份的名字铺
-/// ——它照 `<path>` 那份文件的名字找媒体，照头一张碟、照主库里那个原名铺的那一份它找不着（票
-/// `verdict-store-and-sync/18`、`20`）。
+/// `on_card` 是照筛过之后的期望状态折出来的「选中的变体在卡上落成什么样」（[`Footprint::launching`](super::Footprint::launching)）：
+///
+/// - 条目改指播放列表、或者指着转出来的主文件的那几个变体，**靠文件名找媒体的格式**（ES-DE）照条目指着的那一份的名字铺
+///   ——它照 `<path>` 那份文件的名字找媒体，照头一张碟、照主库里那个原名铺的那一份它找不着（票
+///   `verdict-store-and-sync/18`、`20`）。
+/// - **没上卡的变体一张都不铺**（[`OnCard::left_off`]，票 `verdict-store-and-sync/21`）：卡上的前端元数据不列它，
+///   铺了也没有条目认领，只是白占卡上的地方。
 ///
 /// # Errors
 /// 读中立库失败时返回错误。
@@ -94,14 +97,15 @@ pub fn lay(
     adapter: &dyn Adapter,
     pool: &MediaPool,
     selected: &Selected,
-    launch: &BTreeMap<String, Launch>,
+    on_card: &OnCard,
 ) -> Result<Laid, CatalogError> {
     let variants: Vec<&str> = selected
         .picked
         .iter()
         .map(|picked| picked.key.as_str())
+        .filter(|key| on_card.landed(key))
         .collect();
-    lay_for(catalog, adapter, pool, &variants, launch)
+    lay_for(catalog, adapter, pool, &variants, &on_card.launch)
 }
 
 /// 同 [`lay`]，只是直接给**变体的键**。

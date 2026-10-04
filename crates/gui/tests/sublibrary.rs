@@ -1699,6 +1699,75 @@ fn 差量预览底下读不懂的规则与陈旧的档案声明_去处是卡上�
 }
 
 #[test]
+fn 主文件放不进目标的变体_放不进目标那一栏的说明后头接一句前端里也不列_差量账底下不另画() {
+    // 票 `verdict-store-and-sync/21`（挂单 `Q1847`）：主文件放不进目标的变体卡上的前端元数据不列、媒体也不铺，差量预览
+    // 说一句。拿主意的人 2026-10-04 裁（挂单 `Q1877`）：那一句接在「放不进目标」那一栏的说明后头（`Prepared::left_off_note`），
+    // 不重复个数、不用警示色；差量账底下不画那件怪事（`sync::Concern::LeftOffCard` 只由命令行印）。
+    let ctx = headless::context();
+    // 两个根里同一条相对路径：剥掉根名之后撞在卡上同一个文件上，撞上的一个都不放行——两个变体都没上卡。
+    let 另一块盘 = temp_dir("gui-sub-lib2-left-off");
+    写(&另一块盘.path().join("SFC/幻想传说 汉化版.zip"), &zip(9999));
+    let mut 场 = 现场::摆好带(Some(&另一块盘));
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    let prepared = 场.app.sublibrary().prepared().expect("排得出来");
+    assert_eq!(
+        prepared
+            .left_off
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "另一块盘/SFC/幻想传说 汉化版.zip",
+            "库/SFC/幻想传说 汉化版.zip"
+        ],
+        "前提：撞车的两份都没上卡",
+    );
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::NoFit);
+
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.contains("这些文件这一趟不会复制：落点撞车、超过单文件上限、文件名里有目标不收的字符。前端里也不列它们。"),
+        "「放不进目标」那一栏的说明后头没接那一句：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("没上卡"),
+        "差量账底下不该再画没上卡那件怪事：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("`romcat") && !屏上.contains("romcat sublibrary"),
+        "屏上出现了终端命令：\n{屏上}"
+    );
+}
+
+#[test]
+fn 没有变体没上卡时_放不进目标那一栏的说明后头不接那一句() {
+    // 说不说由核心答（`Prepared::left_off_note`）：没有变体没上卡时说「前端里也不列它们」是句假话。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    场.排预览();
+    let prepared = 场.app.sublibrary().prepared().expect("排得出来");
+    assert!(prepared.left_off.is_empty(), "前提：都上了卡");
+    场.app
+        .sublibrary_and_site()
+        .0
+        .show_anomaly(romcat_gui::sublibrary::Anomaly::NoFit);
+
+    let 屏上 = 画两帧整张卡(&ctx, &mut 场);
+    assert!(
+        屏上.contains("这些文件这一趟不会复制"),
+        "前提：停在「放不进目标」那一栏上：\n{屏上}"
+    );
+    assert!(!屏上.contains("前端里也不列"), "{屏上}");
+}
+
+#[test]
 fn 目标路径上是一份文件时排差量预览照旧排上去_任务历史记失败() {
     // 票 `gui-looks-like-the-design/07` 的另一半：**跑了没成照旧进历史，收场是「失败」。**
     // 那条路径上**有东西**，按下去之前查一眼看不出缺什么；它不是目录，是「看一眼目标」那一下
