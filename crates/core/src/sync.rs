@@ -36,12 +36,13 @@
 //! - 落点上有个**清单之外**的文件挡着 → 那多半就是维护者自己拷进去的，不覆盖。
 //! - 目标上这个文件**元数据读不到**（ADR-0021 的第三态）→ 既不算在、也不算不在。
 //!
-//! ## 期望状态由三样拼起来
+//! ## 期望状态由几样拼起来
 //!
 //! [`desired`] 折**选中变体的文件成员**，[`media::lay`] 铺**媒体池**里的封面截图视频，
-//! [`frontend::lay`] 折**前端元数据**。三份都是 [`DesiredFile`]，[`plan`] 一视同仁
-//! ——票 20 补上后两样时，[`plan`] 一个字都没动，正是当初把 [`FileKind`] 三类一次立
-//! 齐的那笔账兑现了（清单是持久数据，往写满了的表上加一列贵得多）。
+//! [`frontend::lay`] 折**前端元数据**，[`playlist::lay`] 给多碟变体折一份 `.m3u`。几份都是
+//! [`DesiredFile`]，[`plan`] 一视同仁——票 20 补上媒体与元数据时，[`plan`] 一个字都没动，正是当初把
+//! [`FileKind`] 那几类一次立齐的那笔账兑现了（清单是持久数据，往写满了的表上加一列贵得多）；
+//! 播放列表进来时同样只多了一个类别的词，清单那张表一列没加。
 //!
 //! 格式转换要等票 21，它进来时改的仍然只是折期望状态那一步。
 //!
@@ -63,6 +64,7 @@ pub mod execute;
 pub mod frontend;
 pub mod media;
 pub mod observe;
+pub mod playlist;
 pub mod prepare;
 pub mod report;
 
@@ -86,7 +88,8 @@ pub use prepare::{
 
 /// 子库里一个文件是干什么的。
 ///
-/// 三类从第一天就立着，见模块文档最后一段。眼下 [`desired`] 只产得出 [`Self::Rom`]。
+/// 前三类从第一天就立着，见模块文档「期望状态由几样拼起来」那一段；[`Self::Playlist`] 是票
+/// `verdict-store-and-sync/11` 加的。[`desired`] 只产得出 [`Self::Rom`]，另外三类各由自己那一步铺出来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum FileKind {
     /// 变体的文件成员：主文件、附属文件、内部资源、附属内容都算。
@@ -95,6 +98,10 @@ pub enum FileKind {
     Media,
     /// 前端元数据文件（票 20）。
     Metadata,
+    /// 多碟变体的 `.m3u` **播放列表**：按碟序列出每张碟的主文件，前端拿它启动、模拟器拿它换碟
+    /// （[`playlist`]）。与元数据一样是**生成物**，主库里没有它的源文件；但它挂在那个多碟变体名下，
+    /// 不挂在元数据那个记号下——排除那个变体，它跟着走。
+    Playlist,
 }
 
 impl FileKind {
@@ -105,6 +112,7 @@ impl FileKind {
             Self::Rom => "ROM",
             Self::Media => "媒体",
             Self::Metadata => "元数据",
+            Self::Playlist => "播放列表",
         }
     }
 
@@ -115,14 +123,15 @@ impl FileKind {
             "ROM" => Self::Rom,
             "媒体" => Self::Media,
             "元数据" => Self::Metadata,
+            "播放列表" => Self::Playlist,
             _ => return None,
         })
     }
 
     /// 报告里固定的排列顺序。
     #[must_use]
-    pub fn all() -> [Self; 3] {
-        [Self::Rom, Self::Media, Self::Metadata]
+    pub fn all() -> [Self; 4] {
+        [Self::Rom, Self::Media, Self::Metadata, Self::Playlist]
     }
 }
 
@@ -186,6 +195,33 @@ pub struct DesiredFile {
     /// 而 [`Self::source`] 仍然指着主库里那份**原始形态**——**转换只产生新文件，
     /// 主库一个字节不改**（ADR-0004、ADR-0015）。
     pub convert: Option<Conversion>,
+}
+
+impl DesiredFile {
+    /// 一份**生成物**：前端元数据、多碟变体的播放列表——主库里没有它的源文件，字节是现折出来的。
+    ///
+    /// 「源」那一格于是写它自己的落点加**内容指纹**前 16 位：内容一变键就变，[`plan`] 当场判出要重写
+    /// （`source_unchanged`）。时间那一格填 0——生成物没有修改时间这回事，判据已经在键里了。
+    /// 几样生成物都走这一处，「生成物的源怎么写」只有一个答案。
+    #[must_use]
+    pub fn generated(path: String, kind: FileKind, bytes: &[u8], variant: String) -> Self {
+        let fingerprint = crate::catalog::frontend::hash_of(bytes);
+        let len = bytes.len() as u64;
+        Self {
+            source: format!("{path}#{}", &fingerprint[..16]),
+            path,
+            kind,
+            bytes: len,
+            unreadable: false,
+            source_stamp: Stamp {
+                bytes: len,
+                mtime_ns: Some(0),
+            },
+            variant,
+            // 生成物不转格式：折出来的就是目标要的那一份。
+            convert: None,
+        }
+    }
 }
 
 /// 一份内容**放不进目标存储**。
@@ -1691,7 +1727,7 @@ impl Footprint {
         // 全看这一份——而它零解压就在中立库里躺着（调研第 5 部分 L4）。
         let container_mains: BTreeSet<String> = members
             .iter()
-            .filter(|member| member.is_main && member.is_file)
+            .filter(|member| member.is_main() && member.is_file)
             .filter(|member| {
                 crate::container::ContainerKind::for_path(Path::new(&member.key)).is_some()
             })
@@ -1725,7 +1761,7 @@ impl Footprint {
         let mut verdicts: BTreeMap<&str, Decision> = BTreeMap::new();
         let mut out = Desired::default();
         for member in &self.members {
-            if !member.is_main || !member.is_file {
+            if !member.is_main() || !member.is_file {
                 continue;
             }
             let platform = self
@@ -1763,7 +1799,7 @@ impl Footprint {
             // **只有主文件会被转**。附属文件与内部资源原样搬：它们不是交给模拟器启动的
             // 那一份，转它们既没有依据也没有落点。
             let conversion = match verdicts.get(member.variant_key.as_str()) {
-                Some(Decision::Convert(conversion)) if member.is_main => {
+                Some(Decision::Convert(conversion)) if member.is_main() => {
                     Some((**conversion).clone())
                 }
                 _ => None,
@@ -1895,9 +1931,10 @@ impl Desired {
     /// ——这类情况必须在差量预览阶段就报出来，而不是传到一半失败。文件名的字符限制与
     /// 路径长度限制同理。
     ///
-    /// 单独一趟而不是揉进 [`desired`]，是因为它要看**全部三类文件**（ROM、媒体、元数据）
+    /// 单独一趟而不是揉进 [`desired`]，是因为它要看**全部几类文件**（ROM、媒体、元数据、播放列表）
     /// 与**子库根那串路径有多长**——媒体与元数据是另外两个 `lay` 折出来的，而目标根
-    /// 只有调用方知道。
+    /// 只有调用方知道。多碟变体的播放列表排在筛过之后（它只列筛下来还在的碟），折出来之后
+    /// 再筛一遍：已经筛过的那些结论不变——筛过的彼此不撞，单份的判据只看它自己。
     ///
     /// 顺手还查**落点撞车**：转换会把 `游戏.zip` 变成 `游戏.sfc`，两个不同的容器解出
     /// 同名内容时就撞上了。撞上的**一个都不放行**——留一个放行等于随排序决定谁赢，
@@ -1947,7 +1984,15 @@ impl Desired {
             let verdict = if collided.contains(&folded) {
                 Some(Barred {
                     reason: RejectReason::Collision,
-                    detail: if 只差大小写 {
+                    detail: if file.kind == FileKind::Playlist {
+                        // 播放列表撞上的原因不是两块盘、也不是转格式：同一个目录里不止一套多碟游戏，剥掉碟片标记
+                        // 之后同名（`playlist` 模块文档）。说出是哪一套，人才知道该排除谁。
+                        format!(
+                            "不止一份播放列表要落到这条路径上：同一个目录里不止一套多碟游戏剥掉碟片标记之后同名；\
+                             这一份是 {} 的",
+                            file.variant,
+                        )
+                    } else if 只差大小写 {
                         format!(
                             "不止一份内容要落到这条路径上——目标大小写不敏感时它们是同一个文件；\
                              这一份来自 {}",

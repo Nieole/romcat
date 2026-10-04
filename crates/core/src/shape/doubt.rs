@@ -33,7 +33,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Entry, base_stem, last_component, parent_of, scope_of, strip_markers};
+use super::{Entry, base_stem, disc_markers, last_component, parent_of, scope_of, strip_markers};
 use crate::classify::{self, Category};
 use crate::path::{extension_lower, file_name_of_key, fold};
 use crate::platform::pattern::Pattern;
@@ -123,12 +123,7 @@ pub fn shaping_doubts(
 
 /// 多碟没合在一起的那几处。
 fn unmerged_discs(variants: &[Shaped<'_>], manifest: &Manifest) -> Vec<Doubt> {
-    let markers: Vec<Pattern> = manifest
-        .rules()
-        .iter()
-        .filter(|rule| rule.kind == ShapeKind::DiscFamily)
-        .flat_map(|rule| rule.disc_markers.iter().cloned())
-        .collect();
+    let markers = disc_markers(manifest);
     if markers.is_empty() {
         return Vec::new();
     }

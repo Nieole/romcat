@@ -8,7 +8,7 @@
 //! 遍历里，就得让线程之间互相等对方的结果——那正是票 01 用队列避开的东西。
 //!
 //! 跑在中立库上还白拿两件事：**它是键的纯函数**，因此完全测得动，不必碰磁盘；
-//! **改一条规则不必重扫 8.6 TiB**，`romcat shape` 重跑一遍就是了。
+//! **改一条规则不必重扫近 9 TiB 的主库**（见台账 `docs/library-facts.md`），`romcat shape` 重跑一遍就是了。
 //!
 //! ## 三步，顺序固定
 //!
@@ -25,8 +25,8 @@
 //!
 //! ## 范围边界
 //!
-//! 未映射到平台的顶层目录**整体不成型**（ADR-0011 修订段）：真库顶层 73 个条目里
-//! 混着 `存档`、`插件`、`杂志`、散落的裸归档，用户明确决定那部分手动处理。
+//! 未映射到平台的顶层目录**整体不成型**（ADR-0011 修订段）：真库里还没映射的顶层目录与库根散文件
+//! 各二十多个（见台账 `docs/library-facts.md`「规模」底下那张表），混着 `存档`、`插件`、`杂志`、散落的裸归档，用户明确决定那部分手动处理。
 //! 它们照样进**库体检**——报告的覆盖面本来就大于识别的覆盖面。
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -46,7 +46,7 @@ pub struct Entry {
     pub is_dir: bool,
     /// 字节数；**`None` 是「元数据读不到」而不是「0 字节」**（ADR-0021）。
     ///
-    /// 库里另有 4,317 个真正的空文件，两者混起来两个数都会说谎。用 `Option` 逼
+    /// 库里另有四千多个真正的空文件（见台账 `docs/library-facts.md`），两者混起来两个数都会说谎。用 `Option` 逼
     /// 每个用到它的地方显式挑一边——变体的容量因此是个**下界**，报告里说明白。
     pub len: Option<u64>,
 }
@@ -211,7 +211,7 @@ fn last_component(key: &str) -> &str {
 
 /// 对着一份中立库重新成型一遍：读条目、照人工纠正算变体、整批换掉。
 ///
-/// **不碰磁盘。** 改一条成型规则不必重扫 8.6 TiB，跑一次这个就够了。
+/// **不碰磁盘。** 改一条成型规则不必重扫近 9 TiB 的主库（见台账 `docs/library-facts.md`），跑一次这个就够了。
 /// 已有的作品与发行版链接会被保住（[`Catalog::replace_variants`]）。
 ///
 /// `overrides` 是这份主库的**人工纠正**。它**住沉淀库**，不在中立库里
@@ -240,6 +240,21 @@ pub fn reshape(
 /// 且不随重新成型消失——规则的缺陷不该永久污染库（CONTEXT 的 **成型规则** 词条）。
 #[must_use]
 pub fn plan(entries: &[Entry], manifest: &Manifest, overrides: &BTreeMap<String, String>) -> Plan {
+    let mut plan = shape_singly(entries, manifest, overrides);
+    merge_disc_families(&mut plan.variants, manifest);
+    plan.variants.sort_by(|a, b| a.key.cmp(&b.key));
+    plan
+}
+
+/// [`plan`] 里**多碟同族之前**的那几步：人工纠正、目录树、分卷、同名成组、一文件一变体。
+///
+/// 拆出来是因为**认一个多碟变体里的各张碟**也要走它（[`discs`]）：多碟同族把几个变体合成一个时，每张碟原本是这里
+/// 成出来的一个变体、有它自己的主文件——拿同一份成型把那几条成员再走一遍，认出来的就是各张碟，不另立一份判据（ADR-0024）。
+fn shape_singly(
+    entries: &[Entry],
+    manifest: &Manifest,
+    overrides: &BTreeMap<String, String>,
+) -> Plan {
     let overrides = &with_targets(overrides);
     let index = Index::build(entries);
     let tree_roots = find_tree_roots(entries, manifest, &index);
@@ -359,16 +374,13 @@ pub fn plan(entries: &[Entry], manifest: &Manifest, overrides: &BTreeMap<String,
         rule_of_variant.insert(main, rule_name);
     }
 
-    let mut variants = collect(
+    plan.variants = collect(
         entries,
         &assigned,
         &rule_of_variant,
         &manual_variants,
         manifest,
     );
-    merge_disc_families(&mut variants, manifest);
-    variants.sort_by(|a, b| a.key.cmp(&b.key));
-    plan.variants = variants;
     plan
 }
 
@@ -601,6 +613,19 @@ fn strip_markers(text: &str, markers: &[crate::platform::pattern::Pattern]) -> S
     current.to_string()
 }
 
+/// 平台清单里**全部多碟同族规则**的碟片标记，并在一起。
+///
+/// 没声明多碟同族的平台（FDS）也照这一套认碟片标记：成型存疑「多碟没合在一起」那一处与认一个多碟变体里的
+/// 各张碟（[`discs`]、[`disc_family`]）用的是这同一套。
+fn disc_markers(manifest: &Manifest) -> Vec<crate::platform::pattern::Pattern> {
+    manifest
+        .rules()
+        .iter()
+        .filter(|rule| rule.kind == ShapeKind::DiscFamily)
+        .flat_map(|rule| rule.disc_markers.iter().cloned())
+        .collect()
+}
+
 /// 一组同名文件里，哪一个当主文件。
 fn pick_main(members: &[&Entry], manifest: &Manifest) -> Option<String> {
     let rank = |key: &str| -> usize {
@@ -791,7 +816,9 @@ fn merge_disc_families(variants: &mut Vec<Variant>, manifest: &Manifest) {
         if group.len() < 2 || !has_marker {
             continue;
         }
-        // 键最小的那一份当代表：碟 1 排在碟 2 前面，结果与条目的先后无关。
+        // 键最小的那一份当代表，结果与条目的先后无关。多半就是碟 1（`(Disc 1)` 排在 `(Disc 2)` 前面）；
+        // **头一张碟不写标记的那一种例外**——`游戏 (Disc 2).chd` 的键比 `游戏.chd` 小，代表落在碟 2 上。
+        // 碟序不看这里：播放列表照 [`discs`] 排（代表要不要也照碟序挑，挂单 `Q1651`）。
         let mut keeper = variants[group[0]].clone();
         keeper.rule = rule_name;
         for index in &group {
@@ -850,10 +877,12 @@ fn strip_disc_markers(key: &str, rule: &Rule) -> String {
         .join("/")
 }
 
+mod disc;
 mod doubt;
 pub mod fix;
 mod stranded;
 
+pub use disc::{disc_family, discs};
 pub use doubt::{Doubt, DoubtKind, Shaped, shaping_doubts};
 pub use stranded::{CompanionKind, Stranded, stranded_companions};
 
@@ -973,7 +1002,7 @@ mod tests {
     fn zip_官方_split_的主文件是最后那个_zip() {
         // 最容易搞反的一条：APPNOTE §8.3.4 说末段用 `.zip` 扩展名，正是为了让中央目录
         // 一次读到。主文件指向 `.z01` 的话，那一段连中央目录都没有。
-        // 真库里 WIIU 那 4 组 `XenobladeX-…-WUP.z01…z04 + .zip` 就是这一种。
+        // 真库里 WIIU 那几组 `XenobladeX-…-WUP.z01…z04 + .zip` 就是这一种。
         let plan = 成型(&[
             ("WIIU/异度/游戏.z01", 4_000_000),
             ("WIIU/异度/游戏.z02", 4_000_000),
@@ -1005,7 +1034,7 @@ mod tests {
 
     #[test]
     fn 一个普通的容器不会被当成一组分卷() {
-        // 库里 34,808 个 zip 与 1,333 个 rar 全都长着「入口候选」的样子。
+        // 库里成千上万的 zip 与 rar 全都长着「入口候选」的样子（透明容器一共多少见台账 `docs/library-facts.md`）。
         let plan = 成型(&[("FC/甲.zip", 100), ("FC/乙.zip", 100), ("FC/丙.rar", 100)]);
         assert_eq!(变体键(&plan), ["FC/丙.rar", "FC/乙.zip", "FC/甲.zip"]);
         for key in ["FC/甲.zip", "FC/丙.rar"] {
@@ -1211,7 +1240,7 @@ mod tests {
 
     #[test]
     fn 合集目录不许把同级的几份转储吞成一个变体() {
-        // 真库里 `PSV/PSVENJP` 底下坐着 221 份转储。只要有一份的锚落在游戏名那一层
+        // 真库里 `PSV/PSVENJP` 底下坐着两百多份转储（台账没收这个数，出处是票 `rom-metadata-automation/05`，挂单 `Q1256`）。只要有一份的锚落在游戏名那一层
         // （这里是目录名自带 TitleID 的那种），`变体根 = 上级` 就会上溯到 `PSVENJP`，
         // 「外层的赢」再把同级已经正确成型的那些全吸进去——**几百个游戏塌成一个变体**。
         let plan = 成型(&[
@@ -1275,7 +1304,7 @@ mod tests {
 
     #[test]
     fn 元数据读不到的成员不当成零字节() {
-        // ADR-0021：库里另有 4,317 个真正的空文件，两者混起来两个数都会说谎。
+        // ADR-0021：库里另有四千多个真正的空文件（见台账 `docs/library-facts.md`），两者混起来两个数都会说谎。
         let entries = vec![
             目录(根),
             目录(&键("FC")),

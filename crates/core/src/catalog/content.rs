@@ -357,12 +357,23 @@ pub struct MemberFile {
     /// 同步靠它判「主库里这份变了没有」：只比大小的话，**原地改过、大小没变**的
     /// 文件会被静默判成不用重传——与增量扫描比的是同一个三元组。
     pub mtime_ns: Option<i64>,
-    /// 是这个变体的**主文件**吗。
+    /// 它在变体里的身份：主文件、附属文件、内部资源、附属内容。
     ///
-    /// 票 21 起要它：**能力档案判的是主文件**，因为主文件才是「用来交给模拟器启动
+    /// 票 21 起要它分出**主文件**（[`Self::is_main`]）：**能力档案判的是主文件**，因为主文件才是「用来交给模拟器启动
     /// 的那一个」（`CONTEXT.md`）。拿它去判每一个成员的话，一个 PSV 目录树变体底下
     /// 几千个**内部资源**会各自领一条「吃不下」，报告当场变成噪音。
-    pub is_main: bool,
+    ///
+    /// 票 `verdict-store-and-sync/11` 起要它整个身份：认一个多碟变体里的各张碟只看主文件与附属文件
+    /// （[`shape::discs`](crate::shape::discs)），内部资源是一份转储自己的数据、不是一张碟。
+    pub role: Role,
+}
+
+impl MemberFile {
+    /// 是这个变体的**主文件**吗。
+    #[must_use]
+    pub fn is_main(&self) -> bool {
+        self.role == Role::Main
+    }
 }
 
 /// 「这条键**直接**躺在 `?1` 那个目录里」这句 SQL：前缀对得上，而剩下那一截里没有第二道 `/`。
@@ -950,7 +961,7 @@ impl Catalog {
     /// 这件事就没人数得出来了。
     ///
     /// **搬的时候四种身份一视同仁**（挂账 D80）：同步要搬的是变体的全部文件成员。
-    /// 但 [`MemberFile::is_main`] 仍然读出来——**格式转换判的是主文件**（票 21），
+    /// 但 [`MemberFile::role`] 仍然读出来——**格式转换判的是主文件**（票 21），
     /// 那是「交给模拟器启动的那一个」，与「要不要搬」是两个问题。
     ///
     /// # Errors
@@ -993,8 +1004,9 @@ impl Catalog {
                 } else {
                     row.get(5).map_err(|source| self.err(source))?
                 },
-                is_main: row.get::<_, String>(6).map_err(|source| self.err(source))?
-                    == Role::Main.code(),
+                // 认不出的身份码当**内部资源**：既不是主文件（不转格式），也不算一张碟——宁可少认，不认错。
+                role: Role::from_code(&row.get::<_, String>(6).map_err(|source| self.err(source))?)
+                    .unwrap_or(Role::Internal),
             });
         }
         Ok(out)
