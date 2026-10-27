@@ -88,10 +88,10 @@ pub const REMOVE_ROOT: &str = "移除根";
 
 /// 「移除根」那一层里**文件动不动**那一条（设计稿原话）。**一个字节都不动是 ADR-0004**，
 /// 屏上说的与工具真干的是同一件事。
-const KEEPS_FILES: [(&str, bool); 3] = [
-    ("这个根上的文件", false),
-    ("一个字节都不动", true),
-    ("，工作目录里的库文件会变小。", false),
+const KEEPS_FILES: [look::ImpactPart<'static>; 3] = [
+    look::ImpactPart::plain("这个根上的文件"),
+    look::ImpactPart::strong("一个字节都不动"),
+    look::ImpactPart::plain("，工作目录里的库文件会变小。"),
 ];
 
 /// 「移除根」那一层里**只动这一支**那一条。
@@ -99,24 +99,18 @@ const KEEPS_FILES: [(&str, bool); 3] = [
 /// **稿上没有这一条，票面点名要它**（票 `gui-looks-like-the-design/26` 的 ⚠️：
 /// 「变体的键是「根名 + 相对路径」……所以移除一个根只影响它自己那一支……**这两句要说给用户听**」）。
 /// 另一句在 [`KEEPS_VERDICTS`] 里。两句合起来才是这一下敢按的全部理由。
-const ONLY_THIS_ROOT: [(&str, bool); 3] = [
-    ("别的根", false),
-    ("一条都不少", true),
-    (
-        "：变体的键是「根名 + 相对路径」，同名的东西在别的盘上各算各的。",
-        false,
-    ),
+const ONLY_THIS_ROOT: [look::ImpactPart<'static>; 3] = [
+    look::ImpactPart::plain("别的根"),
+    look::ImpactPart::strong("一条都不少"),
+    look::ImpactPart::plain("：变体的键是「根名 + 相对路径」，同名的东西在别的盘上各算各的。"),
 ];
 
 /// 「移除根」那一层里**留得住的那几样**（设计稿原话）：裁决、收藏与合集住**沉淀库**、锚在
 /// **内容锚**上，所以这个根加回来它们照旧生效（`CONTEXT.md`）。
-const KEEPS_VERDICTS: [(&str, bool); 3] = [
-    ("裁决、收藏、合集按文件内容记录，", false),
-    ("会保留", true),
-    (
-        "：以后重新添加这个根，或者同样的文件出现在别的根里，它们仍然有效。",
-        false,
-    ),
+const KEEPS_VERDICTS: [look::ImpactPart<'static>; 3] = [
+    look::ImpactPart::plain("裁决、收藏、合集按文件内容记录，"),
+    look::ImpactPart::strong("会保留"),
+    look::ImpactPart::plain("：以后重新添加这个根，或者同样的文件出现在别的根里，它们仍然有效。"),
 ];
 
 /// 盘不在位的根，上次扫描那一格挂的那枚小标签（设计稿原话，挂单 `Q829` 已裁：照稿；词表里原来那个「连接」改名「组合方式」）。
@@ -170,9 +164,9 @@ fn removal_impact_ui(ui: &mut egui::Ui, impact: &RootRemoval) {
     if impact.variants == 0 {
         look::impact(
             ui,
-            &[(
+            None,
+            &[look::ImpactPart::plain(
                 "这个根还没扫过，中立库里一条记录都没有——移除它不去掉任何变体。",
-                false,
             )],
         );
     } else {
@@ -185,18 +179,19 @@ fn removal_impact_ui(ui: &mut egui::Ui, impact: &RootRemoval) {
         } else {
             "。这些变体所属的作品在别的根里还有变体，浏览里一行都不会消失。".to_owned()
         };
-        look::impact_warn(
+        look::impact(
             ui,
+            Some(Tone::Caution),
             &[
-                ("从库中去掉 ", false),
-                (变体.as_str(), true),
-                (后半.as_str(), false),
+                look::ImpactPart::plain("从库中去掉 "),
+                look::ImpactPart::strong(变体.as_str()),
+                look::ImpactPart::plain(后半.as_str()),
             ],
         );
     }
-    look::impact(ui, &KEEPS_FILES);
-    look::impact(ui, &ONLY_THIS_ROOT);
-    look::impact(ui, &KEEPS_VERDICTS);
+    look::impact(ui, None, &KEEPS_FILES);
+    look::impact(ui, None, &ONLY_THIS_ROOT);
+    look::impact(ui, None, &KEEPS_VERDICTS);
     for one in &impact.sublibraries {
         let 那一句 = format!(
             "子库「{}」的选择集会少 {} 个变体，下次同步时会从设备上删除它们\
@@ -204,14 +199,18 @@ fn removal_impact_ui(ui: &mut egui::Ui, impact: &RootRemoval) {
             one.name,
             thousands(one.variants)
         );
-        look::impact_warn(ui, &[(那一句.as_str(), false)]);
+        look::impact(
+            ui,
+            Some(Tone::Caution),
+            &[look::ImpactPart::plain(那一句.as_str())],
+        );
     }
     if impact.entries > 0 {
         let 那一句 = format!(
             "下次导出时，前端里对应的 {} 个条目会被移除。",
             thousands(impact.entries)
         );
-        look::impact(ui, &[(那一句.as_str(), false)]);
+        look::impact(ui, None, &[look::ImpactPart::plain(那一句.as_str())]);
     }
 }
 

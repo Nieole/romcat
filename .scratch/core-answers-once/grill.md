@@ -166,12 +166,14 @@
 **纯活：** 删掉 Accepts::takes，只留 takes_key。
 核查（2026-09-23）：crates/core/src/capability.rs:166 `pub fn takes` 仍在，全仓零调用方（grep `.takes(` 无结果）
 （大小 S，来自票 `gui-looks-like-the-design/21`）
+**收于票 `core-answers-once/12`（2026-10-05）：settled。** `Accepts::takes` 删掉；唯一那一处调用（`sync/playlist.rs` 判吃不吃 `.m3u`）改问 `takes_key`。「全仓零调用方」在票落地前已被 `verdict-store-and-sync/11` 添了一个调用方，删的时候一并改过来。
 
 ### `Q984` — 两轴审查挑出的三处形状，本票按住没动（都与别的树在改的文件重叠）
 
 **纯活：** impact 并成 impact(ui,tone,parts)、(字,强调)具名类型、Entries::of 答 EntryKey。
 核查（2026-09-23）：crates/gui/src/look.rs:1232 impact 与 :1241 impact_warn 仍两支、parts 仍是 `&[(&str,bool)]`；crates/core/src/adapter/converge.rs:602 Entries::of 仍答 `(String, Anchor)`，crates/core/src/catalog/roots.rs:447 当 BTreeMap<(String,Anchor),bool> 键，converge.rs:512 另摆成 BTreeMap<String,BTreeMap<Anchor,_>>。等的票 22 已合
 （大小 S，来自票 `gui-looks-like-the-design/26`）
+**收于票 `core-answers-once/12`（2026-10-05）：settled。** `impact` 并成 `impact(ui, tone, parts)` 一支（`tone` 给 `None` 是寻常强调色、给 `Some(Tone)` 是那一档令牌色），`(字, 强调)` 换成具名的 `ImpactPart`；`Entries::of` 答具名的 `EntryKey`，`roots.rs` 与 `triage/merge.rs` 那几处当键用的地方跟着换。截图基线一张没动：截图套件原样全绿。
 
 ### `Q852` — 删减建议只带变体的键，没有作品名与平台
 
@@ -192,6 +194,7 @@
 **已裁定（2026-09-23 grill）：** 要：`!=` 白写时屏上说「这一条没排除掉任何东西」。
 核查（2026-09-23）：crates/core/src/sublibrary.rs:918 thin_clause 仍 `if clause.op != Op::Is` 直接不报；:872-879 ThinClause 只有 UnknownPlatform/NoCollection/NoSource 三支，没有「这一条没排除任何东西」
 （大小 S，来自票 `gui-looks-like-the-design/12`）
+**收于票 `core-answers-once/12`（2026-10-05）：settled。** 核心库立 `ThinClause::NothingExcluded`：`!=` 后面的值一个都认不出时交这一句「这一条没排除掉任何东西」；几个值里有一个认得出就不报（那一条真排掉了点什么）。`=` 那几支原有提醒照旧。界面照印，不另立判据。
 
 ### `Q764` — 稿上主库那一行的「N 个根」「硬盘未连接，仍可打开」「在文件系统中打开」没做
 

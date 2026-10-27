@@ -5007,6 +5007,38 @@ fn 筛不出东西的子句屏上逐条点名但不拦着() {
     );
 }
 
+/// **`!=` 后面写了库里没有的值：屏上说这一条什么都没排除**
+/// （票 `core-answers-once/12`，收挂单 `Q1101`）。
+///
+/// `平台=没这个平台` 是「一个变体都选不中」，`平台!=没这个平台` 却正相反：一个都排不掉。
+/// 判据照样在核心库那一处（`sublibrary::thin_clause`，ADR-0024），这一层只把它印出来。
+#[test]
+fn 不等号后面写了库里没有的值屏上说没排除掉任何东西() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-不等号白写"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    let rule = romcat_core::sublibrary::Rule::parse("平台!=没这个平台").expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::画出来的字(&headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui)));
+
+    // 断的是核心库交回来的那一句，不是「没这个平台」那几个字——那几个字在值那一格与规则原文里
+    // 本来就有。
+    let 那一句 = romcat_core::sublibrary::ThinClause::NothingExcluded(
+        romcat_core::sublibrary::Dimension::Platform,
+    )
+    .advice();
+    assert!(
+        屏上.contains(&那一句),
+        "这一条没被点名：「{那一句}」\n{屏上}"
+    );
+}
+
 /// **筛不出东西的那一条，提示就贴在它自己底下，默认窗口里不滚就整句看得见**
 /// （票 `gui-draws-the-rest-of-the-design/07`，收挂单 `Q1104`：拿主意的人裁「提示贴着条件组框里出问题的那一条子句」）。
 ///

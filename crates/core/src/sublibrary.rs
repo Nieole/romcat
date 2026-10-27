@@ -871,7 +871,8 @@ pub struct KnownValues<'a> {
     pub collections: &'a [String],
 }
 
-/// 一条子句**读得成规则、也存得进去，可库里没有对得上的东西**。
+/// 一条子句**读得成规则、也存得进去，可它对这批数据不起作用**：`=` 上是一个都选不中，
+/// `!=` 上一个都排不掉。
 ///
 /// 与 [`RuleError`] 是两件事，屏上的待遇也不一样：
 ///
@@ -889,6 +890,11 @@ pub enum ThinClause {
     UnknownPlatform(String),
     /// 这个**合集**眼下库里没有。
     NoCollection(String),
+    /// `!=` 后面的值**一个都认不出**：存得进去，可这一条一个变体都不排除。
+    ///
+    /// 与 [`Self::UnknownPlatform`] / [`Self::NoCollection`] 说的是同一批值，话正好相反：
+    /// `平台=没这个平台` 一个都选不中，`平台!=没这个平台` 一个都排不掉。
+    NothingExcluded(Dimension),
     /// 这一维**眼下没有源**：写得出规则，一条值都产不出来（`评分`，挂账 `D68`）。
     NoSource(Dimension),
 }
@@ -905,6 +911,10 @@ impl ThinClause {
             Self::NoCollection(name) => {
                 format!("合集「{name}」眼下还没有——这条规则存得进去，等你建出这个合集它就生效。")
             }
+            Self::NothingExcluded(dimension) => format!(
+                "这一条没排除掉任何东西：{}这一维没有对得上的值——存得进去，可它一个变体都不排除。",
+                dimension.label()
+            ),
             Self::NoSource(dimension) => format!(
                 "「{}」这一维眼下没有源：写得出规则，可中立库里还没有哪个源在写它，\
                  所以它筛不出东西。",
@@ -916,10 +926,11 @@ impl ThinClause {
 
 /// 这条子句**筛不筛得出东西**。读得成的子句才轮到它（[`Clause::build`] 先过）。
 ///
-/// **只在 `=` 上判值，`!=` 不判。** 两个都判是错的，而且错得正好反过来：
-/// `平台=没这个平台` 一个变体都选不中，可 `平台!=没这个平台` **全中**——认不出来的那个
-/// 值在 `!=` 上等于「这一条没起作用」，不是「选不中」。那是另一件事、另一句话，
-/// 而这个枚举眼下只说得出前一句（挂单 `Q1101`）。
+/// **`=` 与 `!=` 判的不是同一句话。** `平台=没这个平台` 一个变体都选不中，可
+/// `平台!=没这个平台` **全中**——认不出来的那个值在 `!=` 上等于「这一条什么都没排除」。
+/// 两边都提醒，话正好相反（[`ThinClause::UnknownPlatform`] 对
+/// [`ThinClause::NothingExcluded`]）。`!=` 只在**一个值都认不出**时提醒：几个值里有一个
+/// 认得出，这一条就真排掉了点什么，不是白写。
 ///
 /// **子串那三个运算符也不判**：`平台~GB` 本来就不是拿一个平台名去对——`GB` 撞得上
 /// `GBA`、也撞得上任何带这两个字母的串，拿平台清单去挑它的错是判错了题。
@@ -930,25 +941,40 @@ pub fn thin_clause(clause: &Clause, known: &KnownValues<'_>) -> Vec<ThinClause> 
     if clause.dimension.no_source() {
         return vec![ThinClause::NoSource(clause.dimension)];
     }
-    if clause.op != Op::Is {
-        return Vec::new();
-    }
     let Bound::Text(values) = &clause.bound else {
         return Vec::new();
     };
-    values
-        .iter()
-        .filter_map(|value| match clause.dimension {
-            Dimension::Platform => known
-                .platforms
-                .platform_named(value)
-                .is_none()
-                .then(|| ThinClause::UnknownPlatform(value.clone())),
-            Dimension::Collection => (!known.collections.iter().any(|one| one == value))
-                .then(|| ThinClause::NoCollection(value.clone())),
-            _ => None,
-        })
-        .collect()
+    match clause.op {
+        Op::Is => values
+            .iter()
+            .filter_map(|value| match clause.dimension {
+                Dimension::Platform => known
+                    .platforms
+                    .platform_named(value)
+                    .is_none()
+                    .then(|| ThinClause::UnknownPlatform(value.clone())),
+                Dimension::Collection => (!known.collections.iter().any(|one| one == value))
+                    .then(|| ThinClause::NoCollection(value.clone())),
+                _ => None,
+            })
+            .collect(),
+        // `!=` 的提醒是**整条**的，不是一个值一句：几个值里只要有一个认得出，这一条就真
+        // 排掉了点什么，不该说「什么都没排除」。
+        Op::IsNot => {
+            let 认得出 = |value: &str| match clause.dimension {
+                Dimension::Platform => known.platforms.platform_named(value).is_some(),
+                Dimension::Collection => known.collections.iter().any(|one| one == value),
+                // 别的维度不在这儿判值（同 `=` 那一支的 `_`）。
+                _ => true,
+            };
+            if values.is_empty() || values.iter().any(|value| 认得出(value)) {
+                Vec::new()
+            } else {
+                vec![ThinClause::NothingExcluded(clause.dimension)]
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// 按选择集在一批事实上求值。**纯函数**：不碰中立库、不碰磁盘、不看时钟。

@@ -161,12 +161,6 @@ pub enum Accepts {
 }
 
 impl Accepts {
-    /// 吃得下这个扩展名吗。
-    #[must_use]
-    pub fn takes(&self, extension: &str) -> bool {
-        self.takes_key(&format!("_.{extension}"))
-    }
-
     /// 吃得下这一份吗：`key` 是它的键或者文件名，看的是扩展名（[`Self::Bare`] 看它是不是透明容器）。
     #[must_use]
     pub fn takes_key(&self, key: &str) -> bool {
