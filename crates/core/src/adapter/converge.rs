@@ -532,41 +532,32 @@ pub(crate) fn layout(
         by_variant,
     };
 
-    // 平台 → 作品名（或变体的键）→ 那几个变体。
-    let mut grouped: BTreeMap<String, BTreeMap<Anchor, Vec<VariantRow>>> = BTreeMap::new();
+    // 条目键（平台 × 锚点）→ 那几个变体。
+    let mut grouped: BTreeMap<EntryKey, Vec<VariantRow>> = BTreeMap::new();
     for variant in variants {
         match entries.of(&variant) {
             Err(why) => out.excluded.push((why, variant.key)),
-            Ok((platform, anchor)) => grouped
-                .entry(platform)
-                .or_default()
-                .entry(anchor)
-                .or_default()
-                .push(variant),
+            Ok(key) => grouped.entry(key).or_default().push(variant),
         }
     }
 
-    for (platform, anchors) in grouped {
-        let planned = anchors
-            .into_iter()
-            .map(|(anchor, mut members)| {
-                // **首选变体排在最前。** 同一档之内按键排，同一份库跑两次结果必须一样。
-                let picked = overrides.get(&(anchor.name().to_string(), platform.clone()));
-                members.sort_by(|a, b| {
-                    let rank = |v: &VariantRow| {
-                        (preference_of(v, &marks, &releases, picked), v.key.clone())
-                    };
-                    rank(a).cmp(&rank(b))
-                });
-                let why = preference_of(&members[0], &marks, &releases, picked);
-                Planned {
-                    anchor,
-                    members,
-                    why,
-                }
-            })
-            .collect();
-        out.platforms.insert(platform, planned);
+    for (key, mut members) in grouped {
+        // **首选变体排在最前。** 同一档之内按键排，同一份库跑两次结果必须一样。
+        let picked = overrides.get(&(key.anchor.name().to_string(), key.platform.clone()));
+        members.sort_by(|a, b| {
+            let rank =
+                |v: &VariantRow| (preference_of(v, &marks, &releases, picked), v.key.clone());
+            rank(a).cmp(&rank(b))
+        });
+        let why = preference_of(&members[0], &marks, &releases, picked);
+        out.platforms
+            .entry(key.platform)
+            .or_default()
+            .push(Planned {
+                anchor: key.anchor,
+                members,
+                why,
+            });
     }
 
     Ok(out)
@@ -588,6 +579,19 @@ impl Anchor {
             Self::Work(name) | Self::Loose(name) => name,
         }
     }
+}
+
+/// **一个变体落进哪个前端条目**：平台 × 锚点。
+///
+/// 这一对在好几处当键用（导出摆料、移除一个根少几条、合并/移出前后各几条）。
+/// 从前各处自己摆裸元组 `(String, Anchor)`，两样同型的东西挨着传，写颠倒了编译照过
+/// （同 `NewRelease` 那一类形状）——给它一个名字，两处共用同一把键。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct EntryKey {
+    /// 条目落在哪个平台（合集按平台切）。
+    pub(crate) platform: String,
+    /// 条目挂在哪：一个作品，或者一个还没认出作品的变体。
+    pub(crate) anchor: Anchor,
 }
 
 /// **一个变体落进哪个前端条目**：平台 × 锚点，连「它根本做不成条目」那一档。
@@ -623,7 +627,7 @@ impl Entries {
     }
 
     /// 这个变体落进哪个前端条目；做不成条目的答 `Err`，连为什么。
-    pub(crate) fn of(&self, variant: &VariantRow) -> Result<(String, Anchor), NotAnEntry> {
+    pub(crate) fn of(&self, variant: &VariantRow) -> Result<EntryKey, NotAnEntry> {
         if let Some(why) = excluded(variant, &self.abnormal, &self.not_standalone) {
             return Err(why);
         }
@@ -635,7 +639,7 @@ impl Entries {
             Some(work) => Anchor::Work(work.clone()),
             None => Anchor::Loose(variant.key.clone()),
         };
-        Ok((platform, anchor))
+        Ok(EntryKey { platform, anchor })
     }
 }
 

@@ -933,7 +933,7 @@ fn 搭浏览现场(收起两栏: bool, 疑似: bool, 库在盘上: bool) -> 浏�
                 units: 1,
                 nkit: 0,
                 read_bytes: 0,
-                work_id: one.作品.map(&号),
+                work_id: one.作品.map(号),
                 release_id: None,
                 candidates,
             })

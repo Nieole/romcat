@@ -528,23 +528,25 @@ fn merge_body(ui: &mut egui::Ui, spot: &Spot) -> Option<usize> {
         Some((_, merged)) => {
             look::impact(
                 ui,
+                None,
                 &[
-                    ("主文件：", false),
-                    (&name_of(&merged.main), true),
-                    (
-                        &format!("（一共 {} 个文件成员）", thousands(数(merged.files()))),
-                        false,
-                    ),
+                    look::ImpactPart::plain("主文件："),
+                    look::ImpactPart::strong(&name_of(&merged.main)),
+                    look::ImpactPart::plain(&format!(
+                        "（一共 {} 个文件成员）",
+                        thousands(数(merged.files()))
+                    )),
                 ],
             );
             // **附属文件逐条列出来**（票面第 2 条「预览合成后的主文件与**附属文件**」）：
             // 只说个数的话，人看不出合进来的是不是他勾的那几份。长了就说「另有 N 个」。
             look::impact(
                 ui,
-                &[(
-                    &format!("附属文件 {} 个：", thousands(数(merged.companions.len()))),
-                    false,
-                )],
+                None,
+                &[look::ImpactPart::plain(&format!(
+                    "附属文件 {} 个：",
+                    thousands(数(merged.companions.len()))
+                ))],
             );
             // **缩进到与上面那一条「会怎样」的字同一条线上**：`look::impact` 把圆点摆进
             // `impact-column` 那一列，再由 `horizontal_top` 隔一个 `item_spacing.x` 才画字
@@ -569,10 +571,11 @@ fn merge_body(ui: &mut egui::Ui, spot: &Spot) -> Option<usize> {
             // 与这一层末尾那一句各说过一次了，第三遍只会把这几条「这一下会怎样」冲淡。
             look::impact(
                 ui,
-                &[(
-                    &format!("勾中的 {} 个变体合成 1 个。", thousands(数(picked.len()))),
-                    false,
-                )],
+                None,
+                &[look::ImpactPart::plain(&format!(
+                    "勾中的 {} 个变体合成 1 个。",
+                    thousands(数(picked.len()))
+                ))],
             );
         }
         None => {

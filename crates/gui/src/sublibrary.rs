@@ -4464,20 +4464,25 @@ impl Screen {
                 ui.add_space(step(2));
                 look::impact(
                     ui,
+                    None,
                     &[
-                        ("设备上已经同步的文件", false),
-                        ("不会删除", true),
-                        ("。删除后它们成为清单外的文件，工具不再管理。", false),
+                        look::ImpactPart::plain("设备上已经同步的文件"),
+                        look::ImpactPart::strong("不会删除"),
+                        look::ImpactPart::plain("。删除后它们成为清单外的文件，工具不再管理。"),
                     ],
                 );
                 look::impact(
                     ui,
-                    &[(
+                    None,
+                    &[look::ImpactPart::plain(
                         "如果想同时清空设备：先移除全部规则并同步一次，再删除子库。",
-                        false,
                     )],
                 );
-                look::impact(ui, &[("主库和元数据不受影响。", false)]);
+                look::impact(
+                    ui,
+                    None,
+                    &[look::ImpactPart::plain("主库和元数据不受影响。")],
+                );
                 if let Some((picked, bytes)) = picked {
                     ui.add_space(step(2));
                     look::help(
@@ -4639,33 +4644,32 @@ impl Screen {
                 "收回之后清单记下设备上眼下这一份，差量预览不再把它们列进「{}」。",
                 SurpriseKind::Changed.shown()
             );
-            look::impact(ui, &[(不再列进.as_str(), false)]);
-            look::impact_warn(
+            look::impact(ui, None, &[look::ImpactPart::plain(不再列进.as_str())]);
+            look::impact(
                 ui,
+                Some(look::Tone::Caution),
                 &[
-                    ("工具此后有权更新或删除它们", true),
-                    ("：主库那一份变了就用它覆盖，选择集不要了就删掉。", false),
+                    look::ImpactPart::strong("工具此后有权更新或删除它们"),
+                    look::ImpactPart::plain("：主库那一份变了就用它覆盖，选择集不要了就删掉。"),
                 ],
             );
             let 不要了 = ask.files.iter().filter(|file| !file.still_wanted).count();
             if 不要了 > 0 {
-                look::impact_warn(
+                look::impact(
                     ui,
-                    &[(
-                        &format!(
-                            "其中 {} 份选择集已经不要了：收回之后下一趟同步会删掉它们。",
-                            thousands(不要了 as u64)
-                        ),
-                        false,
-                    )],
+                    Some(look::Tone::Caution),
+                    &[look::ImpactPart::plain(&format!(
+                        "其中 {} 份选择集已经不要了：收回之后下一趟同步会删掉它们。",
+                        thousands(不要了 as u64)
+                    ))],
                 );
             }
             look::impact(
                 ui,
-                &[(
+                None,
+                &[look::ImpactPart::plain(
                     "这一下只改清单，并在沉淀库里记一笔审计（谁、何时、哪几份）；\
                      设备上的文件与主库一个字节都不动。",
-                    false,
                 )],
             );
         });
@@ -4777,9 +4781,17 @@ impl Screen {
                     ),
                     None => "移除之后选中的变体会变；少多少，按「算一遍容量」之后才看得见。".to_string(),
                 };
-                look::impact(ui, &[(会怎样.as_str(), false)]);
-                look::impact(ui, &[("排过的差量预览跟着作废，同步前要重新生成。", false)]);
-                look::impact(ui, &[("设备上的文件与主库都不受影响。", false)]);
+                look::impact(ui, None, &[look::ImpactPart::plain(会怎样.as_str())]);
+                look::impact(
+                    ui,
+                    None,
+                    &[look::ImpactPart::plain("排过的差量预览跟着作废，同步前要重新生成。")],
+                );
+                look::impact(
+                    ui,
+                    None,
+                    &[look::ImpactPart::plain("设备上的文件与主库都不受影响。")],
+                );
             });
         match shown.pressed {
             None => {}

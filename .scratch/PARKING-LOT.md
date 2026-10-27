@@ -3188,7 +3188,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q946` | 待确认屏与刮削弹层里的单选框还是 egui 自带的黑点，没换成共用的 `look::radio_option` | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
 | `Q947` | 分大小写那块盘没挂上时，编译在 `ring` / `zstd-sys` 处退出 1，报的却是 clang 的错 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（门禁、测试与约定） |
 | `Q948` | ego-browser 窗口停在 maximized 时截不出图，CDP 一直超时 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（门禁、测试与约定） |
-| `Q949` | `Accepts::takes` 眼下一个调用方都没有，而且多段扩展名会判错 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q949` | `Accepts::takes` 眼下一个调用方都没有，而且多段扩展名会判错 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/12` 做掉了（settled）：`Accepts::takes` 删掉，唯一那一处调用（`sync/playlist.rs` 判吃不吃 `.m3u`）改问 `takes_key` |
 | `Q950` | 目标设置弹层照稿还差两处：容量填错时按钮照样按得动、选择集空时「设备上的位置」整格不画 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
 | `Q951` | 成型存疑的判据由票 27 立在核心库，票 29「同结构的其他几组列在库体检里」照它读 | **记** | 迁回票 `gui-looks-like-the-design/27`；已落地：票 gui-looks-like-the-design/29 |
 | `Q952` | 重复拷贝：词表写「同一个内容锚」，实现与屏上是「同名且同大小」 | **岔** | 迁回票 `gui-looks-like-the-design/27`；裁：词表改成实际口径「同名且同大小」 |
@@ -3211,7 +3211,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q975` | 共用弹层没有「标头那一排」与「页脚说明字」两个槽，手动例外那两样只好挪进内容区 | **记** | 迁回票 `gui-looks-like-the-design/22`；已落地：票 gui-looks-like-the-design/22（crate::dialog Dialog::head / footer_note） |
 | `Q976` | 开窗时优先级表读不动**静默退回内置那份**，屏上一个字都不说 | **活** | 迁回票 `gui-looks-like-the-design/22`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
 | `Q983` | 算「移除这个根的代价」那一下跑在画帧那条线程上，真库量级上可能卡过一秒 | **活** | 迁回票 `gui-looks-like-the-design/26`；托给票 `queue-followups/09` |
-| `Q984` | 两轴审查挑出的三处形状，本票按住没动（都与别的树在改的文件重叠） | **活** | 迁回票 `gui-looks-like-the-design/26`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q984` | 两轴审查挑出的三处形状，本票按住没动（都与别的树在改的文件重叠） | **活** | 迁回票 `gui-looks-like-the-design/26`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/12` 做掉了（settled）：`impact` 并成 `impact(ui, tone, parts)` 一支，`(字, 强调)` 换成具名的 `ImpactPart`；`Entries::of` 答具名的 `EntryKey`，三处当键用的地方跟着换 |
 | `Q985` | 移除一个根之后，子库屏缓着的那几台是整批作废的，没按「这一台真受影响吗」挑 | **记** | 迁回票 `gui-looks-like-the-design/26`；记下，无事可做 |
 | `Q993` | `release.revision` 眼下只有 DAT 那一条路在写，刮削那一侧的「修订」没有落点 | **记** | 迁回票 `gui-looks-like-the-design/34`；记下，无事可做 |
 | `Q994` | 卡带内部头读出来的版本号仍只躺在 JSON 里，与「第几版」那条链不通 | **活** | 迁回票 `gui-looks-like-the-design/34`；无家可归 → `/grill-with-docs`（沉淀库该收、还没收的人手写的东西） |
@@ -3285,7 +3285,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q1098` | 卡片工具条那个下拉：`(作品, 倒着)` 照样显示「默认」 | **记** | 迁回票 `gui-looks-like-the-design/11`；已落地：票 gui-looks-like-the-design/12（卡片下拉拆成默认/名称两档） |
 | `Q1099` | 屏上那句「搜索结果按匹配程度排序。」现在只在默认排法下成立 | **记** | 迁回票 `gui-looks-like-the-design/11`；已落地：票 gui-looks-like-the-design/11（那句只在搜索时画，有断言） |
 | `Q1100` | 截图夹具从来不折标题，于是截图门上排序标题那一列恒为 NULL | **记** | 迁回票 `gui-looks-like-the-design/11`；记下，无事可做 |
-| `Q1101` | `!=` 上认不出的值等于「这一条没起作用」，屏上眼下不说 | **活** | 迁回票 `gui-looks-like-the-design/12`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q1101` | `!=` 上认不出的值等于「这一条没起作用」，屏上眼下不说 | **活** | 迁回票 `gui-looks-like-the-design/12`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/12` 做掉了（settled）：核心库立 `ThinClause::NothingExcluded`，`!=` 后面的值一个都认不出时屏上说「这一条没排除掉任何东西」；`=` 那几支原有的提醒照旧 |
 | `Q1102` | 那几颗批量按钮从屏头挪回表格上方那一条，推翻了 `Q876` 的落点 | **记** | 迁回票 `gui-looks-like-the-design/12`；已落地：票 gui-looks-like-the-design/12（三条照稿，16 张基线已入库） |
 | `Q1103` | 「加入合集」弹层里稿上那句「其中 N 个只能按路径记录」，印不出那个 N | **记** | 迁回票 `gui-looks-like-the-design/13`；记下，无事可做 |
 | `Q1104` | 默认窗口下左栏那句「有 N 条筛不出东西」在折线以下，眼下余量是零 | **活** | 迁回票 `gui-looks-like-the-design/13`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴）；票 `gui-draws-the-rest-of-the-design/07` 做掉了（settled） |

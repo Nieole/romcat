@@ -124,7 +124,7 @@ fn card(
                 ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.y = tokens.layout.suspicion_reason_gap;
                     for reason in one.reasons() {
-                        look::impact(ui, &[(reason.as_str(), false)]);
+                        look::impact(ui, None, &[look::ImpactPart::plain(reason.as_str())]);
                     }
                 });
                 ui.horizontal(|ui| {
