@@ -13,8 +13,8 @@ rust-version.workspace = true
 # 关掉之后 `demo` 模块与 `--demo` / `--bench*` 全部不进二进制。
 #
 # 测试与实测：`cargo test --features demo`；门禁一律用 `--all-features`，
-# 否则下面那**七个**测试文件**整份都不编译**（不是逐条跳过——`required-features` 没满足，
-# 这七个测试目标压根不生成二进制）。连同别处被 `cfg` 掐掉的，不带 `--all-features`
+# 否则下面那些声明了 `required-features` 的测试目标**整份都不编译**（不是逐条跳过——
+# 依赖没满足，它们压根不生成二进制）。连同别处被 `cfg` 掐掉的，不带 `--all-features`
 # 全仓库少跑一百多条。**少跑不报错，退出码照样是 0。**
 # （**这儿不再抄那两个确切的数。** 抄一份就有两处要同步，而那正是挂单 `Q198` / `Q268` /
 #   `Q380` 记了三次的病。全仓测试条数只在 `README.md` 里写一处，带着标记，由门禁那一条
@@ -25,7 +25,7 @@ demo = []
 name = "romcat-gui"
 path = "src/main.rs"
 
-# 这七个测试要合成数据撑场面，因此声明依赖。门禁不带 `--all-features` 就跑不到它们。
+# 这几个测试要合成数据撑场面，因此声明依赖。门禁不带 `--all-features` 就跑不到它们。
 [[test]]
 name = "close"
 required-features = ["demo"]
