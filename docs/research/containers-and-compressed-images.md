@@ -1,3 +1,11 @@
+---
+id: ref-containers-and-compressed-images
+type: reference
+title: 压缩容器与压缩光盘镜像在 ROM 识别管线中的处理
+status: active
+parent: architecture
+---
+
 # 压缩容器与压缩光盘镜像在 ROM 识别管线中的处理
 
 > **调研日期**：2026-08-31

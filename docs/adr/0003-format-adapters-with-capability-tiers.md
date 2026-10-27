@@ -1,3 +1,11 @@
+---
+id: adr-0003
+type: architecture-design
+title: 每个前端格式是一个适配器，并显式声明能力档位
+status: active
+parent: architecture
+---
+
 # 每个前端格式是一个适配器，并显式声明能力档位
 
 需要支持的前端格式在访谈中迅速膨胀到七个以上（Pegasus、ES/ES-DE gamelist、RetroArch .lpl、LaunchBox、Playnite，以及若干安卓端前端），且方向是双向。把它们全部做到无损往返会让工程重心整个偏离需求 1（汉化版识别）。因此格式支持做成插件式适配器，每个适配器显式声明自己的能力档位：只读 / 只写 / 双向 / 无损往返。

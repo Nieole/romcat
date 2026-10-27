@@ -1,3 +1,11 @@
+---
+id: adr-0008
+type: architecture-design
+title: 自动识别只保证做到发行版级，变体标识靠裁决沉淀
+status: active
+parent: architecture
+---
+
 # 自动识别只保证做到发行版级，变体标识靠裁决沉淀
 
 GBA 与 NDS 是中文玩家存量最大的两个平台，却是汉化版数据覆盖最差的（TOSEC 的 GBA 中文条目仅 26 条，NDS 无 DAT，RetroArch 数据库中文条目仅 13 条）。但缺口不在「这是什么游戏」——GBA 头里的 game code、NDS 头里的 gamecode 汉化补丁通常不改，发行版级识别是可行的；缺口只在「这是谁汉化的第几版」。而在作品级收敛的前提下，汉化组与版本对前端展示几乎没有影响，只影响库里挑哪个文件作首选启动。因此自动识别只保证做到发行版级。

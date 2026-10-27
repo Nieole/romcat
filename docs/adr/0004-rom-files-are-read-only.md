@@ -1,3 +1,11 @@
+---
+id: adr-0004
+type: architecture-design
+title: v1 对 ROM 文件只读
+status: active
+parent: architecture
+---
+
 # v1 对 ROM 文件只读
 
 识别对汉化版是有损的（见 ADR-0002），而重命名、移动、去 header、重新压缩这些「整理」操作不可逆、作用于 10T 真实数据，且会打断其他设备上前端已记录的路径。拿一个可能错的识别结论去改真实文件，是这个项目里唯一能造成真正损失的动作。因此 v1 只写元数据文件与媒体目录，ROM 文件一个字节都不改。

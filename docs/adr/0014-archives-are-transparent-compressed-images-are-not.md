@@ -1,3 +1,11 @@
+---
+id: adr-0014
+type: architecture-design
+title: 归档穿透识别、压缩镜像原样对待；rar 转换是独立的显式操作
+status: active
+parent: architecture
+---
+
 # 归档穿透识别、压缩镜像原样对待；rar 转换是独立的显式操作
 
 库里大量 ROM 以 rar / zip / 7z 打包，光盘类大量使用 chd / cso / pbp。这两类东西性质相反，处理方式必须分开：

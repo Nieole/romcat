@@ -1,3 +1,11 @@
+---
+id: ref-android-frontends
+type: reference
+title: 安卓端/掌机端模拟器前端：游戏元数据格式与导入导出能力调研
+status: active
+parent: architecture
+---
+
 # 安卓端/掌机端模拟器前端：游戏元数据格式与导入导出能力调研
 
 > 调研日期：2026-08-31

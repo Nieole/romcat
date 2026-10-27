@@ -1,3 +1,11 @@
+---
+id: ref-rom-identification-part2
+type: reference
+title: 模拟器 ROM 自动识别技术调研 · 第二部分（补齐 8 个平台）
+status: active
+parent: architecture
+---
+
 # 模拟器 ROM 自动识别技术调研 · 第二部分（补齐 8 个平台）
 
 > **调研日期**：2026-08-31
