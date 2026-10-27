@@ -328,8 +328,8 @@ pub fn run_within(
     launch: &BTreeMap<String, Launch>,
 ) -> Result<Converged, CatalogError> {
     let layout = layout(catalog, only)?;
-    // 票 15 挑出来的**显示标题**与**排序标题**。这一层一个字都不改它。
-    let chosen = chosen_titles(catalog, priorities)?;
+    // 票 15 挑出来的**显示标题**与**排序标题**，按平台各挑一次。这一层一个字都不改它。
+    let chosen = chosen_titles(&layout, catalog, priorities)?;
 
     let mut out = Converged {
         variants: layout.variants,
@@ -397,7 +397,7 @@ pub fn run_within(
                 platform,
                 layout.values(one),
                 layout.head_values(one),
-                chosen.get(one.anchor.name()),
+                chosen.get(&(one.anchor.name().to_string(), platform.clone())),
                 priorities,
                 one.why,
                 launch,
@@ -466,20 +466,42 @@ impl Layout {
     }
 }
 
-/// 每部作品的**显示标题**与**排序标题**（票 15 的 [`title::choose`]），键是作品名。
+/// `(作品名, 平台)` → 那个平台上挑好的**显示标题**与**排序标题**。
+pub(crate) type Titles = BTreeMap<(String, String), Chosen>;
+
+/// 每部作品在每个平台上的**显示标题**与**排序标题**（票 15 的 [`title::choose`]），键是
+/// `(作品名, 平台)`。
+///
+/// **按平台各挑一次**（票 `core-answers-once/05`，挂单 `Q783`）：一部作品横跨几个平台时，
+/// 每个平台上的条目按那个平台的覆盖挑——ADR-0010 定的「街机以 MAME 为权威」于是落到
+/// **认出作品**的变体头上，与没认出作品的那些一致。没有平台语境的那几处（浏览屏列表、
+/// 标题报告、合并向导）照旧问 [`title::choose`]，一部作品只有一个显示标题。
 ///
 /// 与 [`Layout`] 一样，导出与「换一份优先级表之前哪几处显示值会变」共用。
 pub(crate) fn chosen_titles(
+    layout: &Layout,
     catalog: &Catalog,
     priorities: &Priorities,
-) -> Result<BTreeMap<String, Chosen>, CatalogError> {
-    Ok(title::work_titles(catalog)?
-        .into_iter()
-        .map(|set| {
-            let picked = title::choose(&set, priorities);
-            (set.work, picked)
-        })
-        .collect())
+) -> Result<Titles, CatalogError> {
+    let all = title::work_titles(catalog)?;
+    let sets: BTreeMap<String, &title::TitleSet> =
+        all.iter().map(|set| (set.work.clone(), set)).collect();
+    let mut out = BTreeMap::new();
+    for (platform, planned) in &layout.platforms {
+        for one in planned {
+            let Anchor::Work(work) = &one.anchor else {
+                continue;
+            };
+            let Some(set) = sets.get(work) else {
+                continue;
+            };
+            out.insert(
+                (work.clone(), platform.clone()),
+                title::choose_on(set, priorities, Some(platform)),
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// 摆料：见 [`Layout`]。`only` 给了就只摆这几个变体。
@@ -737,8 +759,8 @@ fn has_chinese_language(languages: &str) -> bool {
 /// 优先级表之前算「哪几处显示值会变」照它比
 /// （[`scrape::priority::shifts`](crate::scrape::priority::shifts)，ADR-0024）。
 ///
-/// - **标题**：认出了作品的，是标题集合挑出来的那一个（`chosen`，票 15）；没认出作品的，
-///   照这张表挑一条。
+/// - **标题**：认出了作品的，是标题集合挑出来的那一个（`chosen`，票 15，按这个条目的平台
+///   重挑）；没认出作品的，照这张表挑一条。
 /// - **汉化组**：挂在变体上（ADR-0012），从首选变体身上取（`head_values`）。
 /// - **开发商、发行商、类型**：集合字段，胜出那个源的全部值（[`Priorities::pick_all`]）。
 /// - **年份、简介**：挑一条（[`Priorities::pick`]）。

@@ -306,8 +306,8 @@ impl Catalog {
     /// 一个变体的详情；库里没有这个键时是 `None`。
     ///
     /// `priorities` 用来挑**显示标题**——与导出走的是同一个函数
-    /// （[`title::choose`](crate::title::choose)），于是面板上写着的那个标题，
-    /// 就是同步到掌机上会看见的那个。
+    /// （[`title::choose_on`](crate::title::choose_on)，按**这个变体所在的平台**），于是面板上
+    /// 写着的那个标题，就是导出到那个平台时会看见的那个。
     ///
     /// `pool` 给了就顺便查一遍**媒体池**里那些文件在不在。不给就只按库里记着的引用算，
     /// [`MediaHave::in_pool`] 那一栏留空——**「没查」不等于「没有」**。
@@ -349,15 +349,18 @@ impl Catalog {
             work: work.clone(),
             entries: titles.clone(),
         });
+        // **按变体所在的平台重挑**（票 `core-answers-once/05`）：导出到那个平台时写的就是
+        // 这一个，于是详情页与导出结果对得上；街机那一栏的覆盖也管得到认出作品的变体。
+        let platform = row.platform.as_deref();
         let display = set
             .as_ref()
-            .map(|set| crate::title::choose(set, priorities));
+            .map(|set| crate::title::choose_on(set, priorities, platform));
         let also_known_as = set
             .as_ref()
-            .map(|set| crate::title::also_known_as(set, priorities));
+            .map(|set| crate::title::also_known_as_on(set, priorities, platform));
         let chinese_title = set
             .as_ref()
-            .and_then(|set| crate::title::best_chinese(set, priorities))
+            .and_then(|set| crate::title::best_chinese_on(set, priorities, platform))
             .cloned();
         let preferred = match (&work, &row.platform) {
             (Some(work), Some(platform)) => self.preferred_variant(work, platform)?,

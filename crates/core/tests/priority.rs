@@ -145,6 +145,9 @@ fn 说(source: &str, value: &str) -> Said {
 ///   导出只写挑出来的那一条，**不算**。
 /// - 「超时空之轮」（SFC）的标题集合里两条同一档的英文官方名，一条 No-Intro、一条 TOSEC——
 ///   通用那条里两家换了先后，显示标题就换了。
+/// - 「街机作品」（街机）的标题集合里同样是两条同一档的英文官方名（No-Intro 一条、MAME 一条），
+///   而**街机那一栏的覆盖把 MAME 排到 No-Intro 前面**（ADR-0010）：导出到街机、详情页按变体所在的
+///   平台挑出来的都是 MAME 那一条；通用那条里换了先后它不跟着变（票 `core-answers-once/05`）。
 /// - FC 与街机各一个**没认出作品**的变体，No-Intro 与 MAME 各给一个标题——通用那条换了，
 ///   FC 那个变、街机那个不变（街机那条覆盖整条替换通用顺序）。
 /// - 街机 `BIOS/` 底下一个没认出作品的**非游戏资产**，两家各给一个标题——它不导出，**不算**。
@@ -158,6 +161,7 @@ fn 小库() -> Catalog {
         ("FC/只有一家.nes", "只有一家"),
         ("FC/双年份.nes", "双年份"),
         ("SFC/超时空之轮.sfc", "超时空之轮"),
+        ("街机/从街机认出.zip", "街机作品"),
     ];
     let 散的 = ["FC/魂斗罗.nes", "街机/contra.zip", "街机/BIOS/neogeo.zip"];
     let variants: Vec<Variant> = 名下
@@ -302,6 +306,10 @@ fn 小库() -> Catalog {
         .put_titles(&[
             英文官方名("超时空之轮", "Chrono Trigger", "No-Intro"),
             英文官方名("超时空之轮", "Chrono Trigger (1995)(Square)", "TOSEC"),
+            // 街机作品：两条同一档，只有源名次分先后——通用那条是 No-Intro 在前，
+            // 街机那一栏的覆盖反过来（ADR-0010）。
+            英文官方名("街机作品", "Contra (World)", "No-Intro"),
+            英文官方名("街机作品", "Contra", "MAME"),
         ])
         .expect("写得进标题集合");
     catalog
@@ -527,5 +535,78 @@ fn 条目上每个字段写出去的是什么与导出同一处算_各个源说�
         写过.offered.len(),
         3,
         "中文离线源与 ScreenScraper 那两句照旧列着"
+    );
+}
+
+// ── 认出作品的街机也听按平台的标题覆盖（票 `core-answers-once/05`，挂单 `Q783`） ──
+//
+// ADR-0010 定的是「街机上 MAME 是权威」，那张表早就写在内置优先级里（`街机` 那一栏的
+// `标题` 覆盖把 MAME 排在 No-Intro 前面）。从前它只管**没认出作品**的变体：认出作品的那些
+// 显示标题由标题集合挑，而挑的时候平台一律传 `None`。这三条验的是同一份库上有平台语境的两处
+// （导出、详情）按那个平台重挑，没有平台语境的那一处（浏览屏列表）照旧一个显示标题。
+
+/// 小库里那部**认出了作品的街机**：一条 No-Intro 的英文官方名、一条 MAME 的。
+const 街机变体: &str = "主库/街机/从街机认出.zip";
+
+#[test]
+fn 认出作品的街机导出时显示标题照街机那一栏挑() {
+    use romcat_core::adapter::converge;
+    use romcat_core::adapter::pegasus::Pegasus;
+
+    let catalog = 小库();
+    let 收敛 = converge::run(&catalog, &Priorities::builtin(), &Pegasus).expect("收敛得出条目");
+    let 街机 = 收敛
+        .files
+        .iter()
+        .find(|file| file.collection == "街机")
+        .expect("街机那一份合集");
+    let 条目 = 街机
+        .doc
+        .entries
+        .iter()
+        .filter_map(romcat_core::adapter::Entry::game)
+        .find(|game| game.files.iter().any(|file| file == "街机/从街机认出.zip"))
+        .expect("街机作品那一个条目");
+    assert_eq!(
+        条目.title, "Contra",
+        "导出到街机时显示标题没取 MAME 那一个（认出了作品的变体不听按平台的覆盖）"
+    );
+}
+
+#[test]
+fn 作品详情按变体所在的平台看到同一个标题() {
+    let catalog = 小库();
+    let detail = catalog
+        .variant_detail(街机变体, &Priorities::builtin(), None)
+        .expect("读得出详情")
+        .expect("这个变体在库里");
+    let display = detail.display.expect("认出了作品，有显示标题");
+    assert_eq!(
+        display.display, "Contra",
+        "详情页的显示标题没跟着变体所在的平台重挑，与导出结果对不上"
+    );
+    // 大标题底下那一句用的也是同一个平台的那把次序：No-Intro 那一条被列为「还叫什么」，
+    // 不是反过来把 MAME 那一条列进去、把大标题再说一遍。
+    let also = detail.also_known_as.expect("认出了作品，有别的叫法");
+    assert_eq!(also.official.as_deref(), Some("Contra (World)"));
+    assert!(also.others.is_empty(), "别的叫法里重复了：{also:?}");
+}
+
+#[test]
+fn 浏览屏列表上那部作品的显示标题照旧一个() {
+    use romcat_core::catalog::browse::WorkQuery;
+
+    let catalog = 小库();
+    let rows = catalog
+        .work_page_with_titles(&WorkQuery::default(), 0, 100, &Priorities::builtin())
+        .expect("取得出一页");
+    let row = rows
+        .iter()
+        .find(|row| row.name == "街机作品")
+        .expect("街机作品那一行");
+    assert_eq!(
+        row.display.as_deref(),
+        Some("Contra (World)"),
+        "浏览屏列表没有平台语境，一部作品只该有一个显示标题（通用那条 No-Intro 在前）"
     );
 }
