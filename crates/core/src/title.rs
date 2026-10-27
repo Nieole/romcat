@@ -344,12 +344,30 @@ pub struct Chosen {
 /// 6. **有几个变体这么叫**，多的优先——同一档、同一个源之内，几十个文件都这么写的
 ///    那个比孤零零一个的可信；
 /// 7. **字典序**——前六层平手时定死顺序，同一份库跑两次挑出来的必须是同一条。
+///
+/// ## 平台管不管得着
+///
+/// **没有平台语境的地方问 [`choose`]**：浏览屏主列表、标题报告、合并向导——一个作品
+/// 只有一个显示标题，列表不会因为平台栏不同跳来跳去。
+///
+/// **有平台语境的地方问 [`choose_on`]**：导出到某个平台的条目、作品详情里按变体所在的
+/// 平台。那时第 5 层换用**那个平台**的按平台覆盖，于是 ADR-0010 定的「街机以 MAME 为
+/// 权威」落到**认出作品**的变体头上——从前它只管没认出作品的那些。
 #[must_use]
 pub fn choose(set: &TitleSet, priorities: &Priorities) -> Chosen {
+    choose_on(set, priorities, None)
+}
+
+/// 有**平台语境**时的那一支：第 5 层按这个平台的覆盖挑（票 `core-answers-once/05`，挂单 `Q783`）。
+///
+/// `platform` 是 `None` 时与 [`choose`] 逐字相同。两个入口**只有这一处排序键**，别在
+/// 调用方另拼一套——导出、详情与浏览屏三处给出两个答案，正是这张票要收掉的那种毛病。
+#[must_use]
+pub fn choose_on(set: &TitleSet, priorities: &Priorities, platform: Option<&str>) -> Chosen {
     let best = set
         .entries
         .iter()
-        .min_by_key(|entry| rank(entry, priorities));
+        .min_by_key(|entry| rank(entry, priorities, platform));
     let chinese_names = set
         .entries
         .iter()
@@ -386,7 +404,7 @@ pub fn choose(set: &TitleSet, priorities: &Priorities) -> Chosen {
         .entries
         .iter()
         .filter(|entry| sortable(&entry.value))
-        .min_by_key(|entry| rank(entry, priorities))
+        .min_by_key(|entry| rank(entry, priorities, platform))
     {
         (latin.value.as_str(), SortFrom::LatinTitle)
     } else if sortable(&set.work) {
@@ -438,10 +456,20 @@ pub fn choose(set: &TitleSet, priorities: &Priorities) -> Chosen {
 /// 界面要说得出「有」还是「没有」，用户也要搜得到。
 #[must_use]
 pub fn best_chinese<'a>(set: &'a TitleSet, priorities: &Priorities) -> Option<&'a TitleRow> {
+    best_chinese_on(set, priorities, None)
+}
+
+/// 有**平台语境**时的 [`best_chinese`]：按这个平台的覆盖照同一条排序键挑（详情页用）。
+#[must_use]
+pub fn best_chinese_on<'a>(
+    set: &'a TitleSet,
+    priorities: &Priorities,
+    platform: Option<&str>,
+) -> Option<&'a TitleRow> {
     set.entries
         .iter()
         .filter(|entry| entry.language == Language::Chinese)
-        .min_by_key(|entry| rank(entry, priorities))
+        .min_by_key(|entry| rank(entry, priorities, platform))
 }
 
 /// 一部作品**还叫什么**：标题集合里类型为**官方名称**的那一条，与其余几条叫法（由 [`also_known_as`] 挑）。
@@ -467,9 +495,20 @@ pub struct AlsoKnownAs {
 /// 同一串字在集合里出现好几次（几个源、几种类型都这么叫）只留一次。
 #[must_use]
 pub fn also_known_as(set: &TitleSet, priorities: &Priorities) -> AlsoKnownAs {
-    let display = choose(set, priorities).display;
+    also_known_as_on(set, priorities, None)
+}
+
+/// 有**平台语境**时的 [`also_known_as`]（详情页用）：显示标题按这个平台重挑，其余叫法
+/// 照同一条排序键排——否则大标题与它底下那一句会用两个平台的次序，同一句叫法重复一遍。
+#[must_use]
+pub fn also_known_as_on(
+    set: &TitleSet,
+    priorities: &Priorities,
+    platform: Option<&str>,
+) -> AlsoKnownAs {
+    let display = choose_on(set, priorities, platform).display;
     let mut ranked: Vec<&TitleRow> = set.entries.iter().collect();
-    ranked.sort_by_cached_key(|entry| rank(entry, priorities));
+    ranked.sort_by_cached_key(|entry| rank(entry, priorities, platform));
     let official = ranked
         .iter()
         .find(|entry| entry.kind == TitleKind::Official && entry.value != display)
@@ -487,7 +526,7 @@ pub fn also_known_as(set: &TitleSet, priorities: &Priorities) -> AlsoKnownAs {
 }
 
 /// 一条叫法在回退链上排第几。数字小的排前面。七层的含义见 [`choose`]。
-fn rank(entry: &TitleRow, priorities: &Priorities) -> Rank {
+fn rank(entry: &TitleRow, priorities: &Priorities, platform: Option<&str>) -> Rank {
     let bucket = match (entry.language, entry.kind) {
         (Language::Chinese, TitleKind::Translated) => 1,
         (Language::Chinese, TitleKind::Official) => 2,
@@ -525,9 +564,10 @@ fn rank(entry: &TitleRow, priorities: &Priorities) -> Rank {
             Confidence::Medium => 1,
             Confidence::Low => 2,
         },
-        // 平台传 `None`：一个作品可以横跨几个平台，按哪个平台取覆盖都不对。
-        // 按平台的覆盖是导出到某个平台的子库时才用得上的，那是票 18 的活。
-        priorities.rank(Field::Title.label(), None, &entry.source),
+        // 平台只在**有平台语境**时才传（[`choose_on`]）：导出到某个平台的条目、详情里按
+        // 变体所在的平台。一部作品可以横跨几个平台，那几处各自问各自的那个平台；
+        // 没有平台语境的调用传 `None`，用的就是通用那条顺序。
+        priorities.rank(Field::Title.label(), platform, &entry.source),
         std::cmp::Reverse(entry.seen),
         entry.value.clone(),
     )

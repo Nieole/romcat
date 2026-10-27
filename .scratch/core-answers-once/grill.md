@@ -54,7 +54,8 @@
 
 **已裁定（2026-09-23 grill）：** 要：有平台语境的地方（导出、详情按变体平台）按平台重挑显示标题，ADR-0010 的 MAME 权威落到认出作品的街机上。
 核查（2026-09-23）：crates/core/src/title.rs:486-487 仍「平台传 None……按平台的覆盖是导出到某个平台的子库时才用得上」；crates/core/src/adapter/converge.rs:735-740 标题那支有 chosen 就不看平台
-依赖／可并：Q976（同一份优先级表）
+**收于票 `core-answers-once/05`（2026-10-05）：settled。** 挑显示标题的入口在核心库收成两个：`title::choose`（无平台语境，`rank` 的源名次那一层传 `None`）与 `title::choose_on`（有平台语境，传那个平台），共一处排序键；`also_known_as_on` / `best_chinese_on` 同形，详情页三样都用平台那一支。有平台语境的两处接上去：导出/同步的 `converge::chosen_titles` 按 `(作品, 平台)` 各挑一次（`Layout.platforms` 里每个平台问一次），`Catalog::variant_detail` 按 `row.platform` 问。没有平台语境的那几处（浏览屏主列表、标题报告、合并向导）照旧问 `choose`。`scrape::priority::shifts` 跟着改问 `(作品, 平台)`——否则「换一份表哪几处显示值会变」会以为街机那部认出作品的标题会变，而导出其实不变（`crates/core/tests/priority.rs` 那条 `works: 1` 钉着）。屏上那句实话在 `crates/gui/src/priority.rs::override_note`。测试：`crates/core/tests/priority.rs` 三条（导出、详情、浏览屏列表）。截图基线一张没变（界面夹具里没有认出作品的街机）。
+依赖／可并：Q976（同一份优先级表）；新挂单 `Q1337`–`Q1340`（子库例外列表、标题报告、词表显示标题条、截图夹具没有街机）。
 （大小 M，来自票 `gui-looks-like-the-design/30`）
 
 ## 第二组：核心库只说事实，两个壳各补去处
