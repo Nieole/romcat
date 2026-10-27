@@ -113,7 +113,18 @@ CREATE TABLE IF NOT EXISTS identification(
     -- NULL 是没人裁过（也包括加这一列之前识别的那些行），那正是加它之前的唯一可能。
     -- 写库时 `None` **不盖掉**库里已有的那个，理由同 `platform`：识别那一趟不说这件事。
     -- 这一列由 `add_columns` 给老库补上。
-    edition     TEXT
+    edition     TEXT,
+    -- **落点平台**（票 `core-answers-once/03`，词表「平台」条下那一条）：导出与同步把
+    -- 这个变体放到哪个平台。**有平台纠正听纠正，否则照目录声明**——卡带头与目录的分歧
+    -- 只在库体检里报，不自动搬家（ADR-0011）。
+    --
+    -- **它不是 `platform` 那一列的另一种写法**：那一列没有纠正时听卡带头（识别判定的
+    -- 平台），这一列没有纠正时听目录。两者只在一个变体撞上了**人定过的**那一组时才对得上。
+    -- 判断与 `platform` 同一处（`identify::platform_of`，ADR-0024），这里是它的结论。
+    --
+    -- NULL 是识别没判过（加这一列之前识别的那些行）：读的时候退回 `variant.platform`
+    -- （`placement_platform_sql!`）。这一列由 `add_columns` 给老库补上。
+    placement   TEXT
 ) STRICT;
 
 -- 算过的哈希。**同一份内容的两套口径都在这里**：`crc32`/`size` 是含头（原样），
@@ -329,6 +340,7 @@ pub(super) fn add_columns(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     super::add_column(conn, "content_hash", "bare_sha1", "TEXT")?;
     super::add_column(conn, "identification", "platform", "TEXT")?;
     super::add_column(conn, "identification", "edition", "TEXT")?;
+    super::add_column(conn, "identification", "placement", "TEXT")?;
     if super::add_column(conn, "identification", "standalone", "TEXT")? {
         conn.execute(
             "UPDATE identification SET standalone = ?1 WHERE state = ?2 AND instr(reason, ?3) = 1",
@@ -710,6 +722,19 @@ macro_rules! identified_platform_sql {
     };
 }
 pub(super) use identified_platform_sql;
+
+/// **落点平台**在 SQL 里的那一种读法：`COALESCE(i.placement, v.platform)`。
+///
+/// 识别那一趟判过的（`identification.placement`，判断只在 `identify::platform_of` 那一处
+/// 的同一个决定上）就是它；识别没判过的——还没识别，或者是加这一列之前识别的——退回目录
+/// 声明的那个。与 [`identified_platform_sql`] **不是同一句**：没有平台纠正时，那一句听卡带头，
+/// 这一句听目录（ADR-0011 不自动搬家）。用它的查询里变体那张表叫 `v`、结论那张叫 `i`，
+/// 结论是 `LEFT JOIN` 进来的。
+macro_rules! placement_platform_sql {
+    () => {
+        "COALESCE(i.placement, v.platform)"
+    };
+}
 
 /// **命中里只靠某一个源的候选**的变体数，按平台。
 ///
@@ -2980,6 +3005,138 @@ impl Catalog {
             .map_err(|source| self.err(source))?;
         rows.collect::<Result<_, _>>()
             .map_err(|source| self.err(source))
+    }
+
+    /// 每个变体的**落点平台**：变体的键 → 平台。一个平台都说不出的变体不在里面。
+    ///
+    /// **有平台纠正听纠正，否则照目录声明**（词表「平台」条下那一条，票 `core-answers-once/03`）。
+    /// 导出与同步把变体放到哪个平台，问的就是它。
+    ///
+    /// 它与 [`identified_platforms`](Self::identified_platforms) **不是同一件事**：那一处没有纠正
+    /// 时听卡带头（识别判定的平台），这一处没有纠正时听目录——卡带头与目录的分歧只在库体检里报，
+    /// 不自动搬家（ADR-0011）。两者只在一个变体撞上了**人定过的**那一组时答同一个。
+    ///
+    /// 判断只在 `identify::platform_of` 一处（ADR-0024），结论由识别那一趟落进
+    /// `identification.placement`；这里只读它，识别没判过的退回变体表上目录声明的那一列
+    /// （`variant.platform`）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn placement_platforms(&self) -> Result<BTreeMap<String, String>, CatalogError> {
+        let mut statement = self
+            .conn
+            .prepare(concat!(
+                "SELECT v.key, ",
+                placement_platform_sql!(),
+                " FROM variant v LEFT JOIN identification i ON i.variant_key = v.key
+                 WHERE ",
+                placement_platform_sql!(),
+                " IS NOT NULL",
+            ))
+            .map_err(|source| self.err(source))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| self.err(source))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|source| self.err(source))
+    }
+
+    /// 每个变体的**落点目录**：变体的键 → 它在子库与导出里占的那一级目录。
+    ///
+    /// 没有平台纠正的变体就是键里那一级目录（[`path::platform_of_key`](crate::path::platform_of_key)）
+    /// ——与加这一问之前一模一样，一个字节都不因它改变。纠正过的那个落到**它那一组改成的平台**
+    /// 用着的目录：先数库里那个平台自己用着哪个目录（只数没被搬走的那些），数不出来就照**平台清单**
+    /// 里这个平台的头一个目录，清单里也没有才退回平台名。
+    ///
+    /// **为什么得从清单上拿一眼**：库里那个平台的变体全被纠正走了的时候，盘上一个目录都数不出来——
+    /// 而卡上前端认平台靠的正是那级目录名（ADR-0013），拿平台名顶上去（`GBC` 而不是 `gbc`）在
+    /// 大小写敏感的目标上一个都对不上。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn placement_directories(
+        &self,
+        manifest: &crate::platform::Manifest,
+    ) -> Result<BTreeMap<String, String>, CatalogError> {
+        let placed = self.placement_platforms()?;
+        // 变体的键 → 它的键里那一级目录与它折回的平台。两趟都要：第一趟数每个平台自己用着哪几个目录，
+        // 第二趟才说得出口「它被搬去了哪个目录」。
+        let mut declared: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
+        for key in placed.keys() {
+            let Some(dir) = crate::path::platform_of_key(key) else {
+                continue;
+            };
+            let platform = manifest
+                .platform_for_dir(dir)
+                .map_or(dir, |one| one.name.as_str());
+            declared.insert(key.as_str(), (dir, platform));
+        }
+        let mut native: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (key, platform) in &placed {
+            let Some((dir, from)) = declared.get(key.as_str()) else {
+                continue;
+            };
+            // 只在**本来就住这个平台目录里**的变体上数目录：被纠正走的那些的键还留在旧目录下。
+            if from == platform {
+                native.entry(platform.as_str()).or_default().insert(dir);
+            }
+        }
+        let mut out = BTreeMap::new();
+        for (key, platform) in &placed {
+            let Some((dir, from)) = declared.get(key.as_str()) else {
+                continue;
+            };
+            let landing = if from == platform {
+                dir.to_string()
+            } else {
+                match native.get(platform.as_str()) {
+                    Some(dirs) if dirs.len() == 1 => dirs
+                        .iter()
+                        .next()
+                        .map(|only| (*only).to_string())
+                        .unwrap_or_else(|| platform.clone()),
+                    _ => manifest
+                        .platform_named(platform)
+                        .and_then(|one| one.dirs.first())
+                        .cloned()
+                        .unwrap_or_else(|| platform.clone()),
+                }
+            };
+            out.insert(key.clone(), landing);
+        }
+        Ok(out)
+    }
+
+    /// 记下这一趟识别判的**落点平台**（变体的键 → 平台）。
+    ///
+    /// 与 [`put_cart_facts`](Self::put_cart_facts) 同类：识别这一趟顺手落库的事实。
+    /// 它单独写而不是跟着 [`Identification`] 一起写，是因为**裁决落成的结论不判平台**
+    /// （`identify::Projector::project` 交的是 `platform: None`）——拿一条不带平台的结论去盖，
+    /// 人裁完一条，识别按目录与纠正判定的落点平台就跟着没了。
+    ///
+    /// # Errors
+    /// 写库失败时返回错误。
+    pub fn put_placements(&mut self, rows: &[(String, String)]) -> Result<(), CatalogError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let path = self.path.clone();
+        let to_err = |source| CatalogError::Sqlite {
+            path: path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(to_err)?;
+        {
+            let mut update = tx
+                .prepare("UPDATE identification SET placement = ?2 WHERE variant_key = ?1")
+                .map_err(to_err)?;
+            for (key, platform) in rows {
+                update.execute(params![key, platform]).map_err(to_err)?;
+            }
+        }
+        tx.commit().map_err(to_err)
     }
 
     /// 每个**不能独立运行**的变体：变体的键 → 补丁还是附属内容。能跑的、结论没说的都不在里面。

@@ -49,6 +49,7 @@
 核查（2026-09-23）：导出：crates/core/src/adapter.rs:432 与 crates/core/src/sync.rs:1642 用 path::platform_of_key（crates/core/src/path.rs:355，键里那级目录）；同步：crates/core/src/sublibrary.rs:1006、:1191 platform: variant.platform（目录声明）。判定平台已有物化结论 Catalog::identified_platforms（crates/core/src/catalog/identify.rs:2933）。屏上已改口 crates/gui/src/health.rs:78「导出与同步眼下仍按目录放置」。
 依赖／可并：Q1046（同一处 adapter/sync 落点）、Q945（同为落点）、Q1022（清单旧落点清理）
 （大小 L，来自票 `gui-looks-like-the-design/28`）
+**收于票 `core-answers-once/03`（2026-10-05）：settled。** 核心库立了**落点平台**一问（词表「平台」条下有了这个名字）：`identify::platform_of` 一次答两个——**识别判定的平台**与**落点的**（有平台纠正听纠正，否则照目录声明，同一个决定打头），落进中立库 `identification.placement`；读法是 `Catalog::placement_platforms` / `Catalog::placement_directories`。导出按它分合集（`converge::Entries`），同步按它问能力档案、按它决定卡上那一级目录（`sync::Footprint`，落点路径与跳媒体/前端元数据都跟着走，没纠正过的原样不动），旧落点由下一趟同步照清单删、新落点新增，清单之外的一律不碰（ADR-0015）。库体检那一句改成「导出与同步按纠正后的平台放置」。
 
 ### `Q783` — 街机那条标题覆盖管不到已经认出作品的显示标题，屏上照实说了
 
