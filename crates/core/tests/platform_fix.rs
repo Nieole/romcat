@@ -9,10 +9,12 @@
 //! 外加一件同一条回退链上的事（挂单 `Q602`）：**人裁决过的变体照样按卡带头判平台**。裁决说的是
 //! 它是哪个发行版，不是它属于哪个平台；放错目录的一张卡被认真裁过之后，平台不许反而退回目录声明的那个。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+use romcat_core::adapter;
+use romcat_core::capability::Profile;
 use romcat_core::catalog::identify::CartFactRow;
 use romcat_core::catalog::{Catalog, Roots};
 use romcat_core::dat::Convention;
@@ -27,6 +29,8 @@ use romcat_core::report::{CorrectionGroup, CorrectionGroups, HealthReport};
 use romcat_core::scan::aggregate::{ConflictEvidence, Limits};
 use romcat_core::scan::{self, CancelToken, Jobs, ScanOptions};
 use romcat_core::scrape::{self, Priorities, ScrapeReport};
+use romcat_core::sublibrary::{self, Rule, Selection};
+use romcat_core::sync;
 use romcat_core::task::Handle;
 use romcat_core::testing::cart as real;
 use romcat_core::testing::container::{ZipEntrySpec, zip_container};
@@ -1172,4 +1176,279 @@ fn 快照(dir: &Path) -> BTreeMap<String, Vec<u8>> {
         }
     }
     out
+}
+
+// ───────────────────── 落点平台：导出与同步听纠正（票 `core-answers-once/03`）
+
+/// 把全库都选进来：三条规则并起来就是「每一个变体」（规则读的是**目录声明的平台**，
+/// 纠正不改它——人写规则时看见的就是盘上那几级目录）。
+fn 全选(现场: &现场) -> sublibrary::Selected {
+    let selection = Selection {
+        rules: ["平台=FC", "平台=GBA", "平台=PSP"]
+            .into_iter()
+            .map(|text| Rule::parse(text).expect("规则读得懂"))
+            .collect(),
+        exceptions: Vec::new(),
+    };
+    let facts = sublibrary::facts(&现场.catalog).expect("折得出事实");
+    sublibrary::select(&selection, &facts)
+}
+
+/// 一份选择集在**导出**里折出来的合集名，按名字排；带一句「这个合集里有哪些文件」。
+fn 导出里的合集(现场: &现场) -> BTreeMap<String, Vec<String>> {
+    let adapter = adapter::find("Pegasus").expect("带着 Pegasus 适配器");
+    let 导出 = adapter::converge::run(&现场.catalog, &Priorities::builtin(), adapter.as_ref())
+        .expect("导得出");
+    let mut out = BTreeMap::new();
+    for file in &导出.files {
+        let mut 文件 = Vec::new();
+        for entry in &file.doc.entries {
+            if let Some(game) = entry.game() {
+                文件.extend(game.files.iter().cloned());
+            }
+        }
+        文件.sort();
+        out.insert(file.collection.clone(), 文件);
+    }
+    out
+}
+
+/// 同步计划里这个子库的**落点**：变体的键 → 它在卡上的路径。
+fn 同步落点(现场: &现场) -> (Vec<String>, BTreeMap<String, String>) {
+    let selected = 全选(现场);
+    let footprint = sync::Footprint::gather(&现场.catalog, &selected, &Manifest::builtin())
+        .expect("读得出脚印");
+    let desired = footprint.desired(&Profile::unclaimed());
+    let 落点 = desired
+        .files
+        .iter()
+        .map(|file| (file.variant.clone(), file.path.clone()))
+        .collect();
+    (footprint.platforms(), 落点)
+}
+
+#[test]
+fn 做过平台纠正的变体_导出把它放进纠正后的平台_同步把它落到纠正后的平台目录() {
+    // 用户故事 8、9：人在库体检里把 FC → FDS 那一组「按内容改」之后，导出与同步都得听。
+    let mut 现场 = 建现场();
+    let 之前 = 快照(现场.dir.path());
+    现场
+        .store
+        .set_platform_correction(LIBRARY, "FC", "FDS", PlatformDecision::ByContent)
+        .expect("记得下");
+    现场.catalog.clear_identifications().expect("清得掉上一趟");
+    跑一趟识别(&mut 现场, true);
+
+    // 一、导出：两条 `.fds` 进 FDS 那个合集，FC 那个合集整个不见了。
+    let 合集 = 导出里的合集(&现场);
+    assert_eq!(
+        合集.keys().collect::<Vec<_>>(),
+        vec!["FDS", "GBA", "PSP"],
+        "导出的合集照落点平台分：FC → FDS 那一组听着纠正"
+    );
+    assert_eq!(
+        合集["FDS"],
+        vec!["fc/合集/银河战士.fds", "fc/日版/塞尔达传说.fds"],
+        "条目里的路径照旧指着主库里的真位置：导出不搬文件（ADR-0004）"
+    );
+
+    // 二、同步：同一个变体落到卡上的是 `fds/` 那一级目录。
+    let (平台, 落点) = 同步落点(&现场);
+    assert_eq!(
+        平台,
+        vec!["FDS", "GBA", "PSP"],
+        "同步问能力档案用的也是落点平台"
+    );
+    assert_eq!(
+        落点[&变体键(&现场, "fc/日版/塞尔达传说.fds")],
+        "fds/日版/塞尔达传说.fds",
+        "纠正过的那一条落到 `fds/` 下，不留在 `fc/` 里"
+    );
+    assert_eq!(
+        落点[&变体键(&现场, "fc/合集/银河战士.fds")],
+        "fds/合集/银河战士.fds"
+    );
+
+    // **主库一个字节都不动**（ADR-0004）：纠正、识别、导出与排一趟同步下来，盘上的文件
+    // 逐字节相同——**卡上换目录是卡上的事**。
+    assert_eq!(
+        之前,
+        快照(现场.dir.path()),
+        "导出与同步听纠正不移动、不改名、不改写主库里的任何一个文件"
+    );
+}
+
+#[test]
+fn 没纠正过而卡带头与目录分歧的变体_落点照旧是目录的() {
+    // 用户故事 10、ADR-0011：卡带头与目录的分歧**只在库体检里报**，不自动搬家。
+    // `psp/` 底下那张卡的头说它是 GBC——没人在平台纠正里定过，落点照旧是 PSP。
+    let mut 现场 = 建现场();
+    跑一趟识别(&mut 现场, true);
+    assert_eq!(
+        按哪个平台算(&现场, 放错目录的卡带).as_deref(),
+        Some("GBC"),
+        "前提：识别判定的平台听卡带头"
+    );
+
+    let (平台, 落点) = 同步落点(&现场);
+    assert_eq!(
+        平台,
+        vec!["FC", "GBA", "PSP"],
+        "没纠正过的那几张照旧按目录声明分：FC、GBA、PSP"
+    );
+    assert_eq!(
+        落点[&变体键(&现场, 放错目录的卡带)],
+        "psp/放错的/007 黑日危机 繁体修正版.gbc",
+        "卡带头与目录分歧不搬家：落点照旧是目录那个"
+    );
+    let 合集 = 导出里的合集(&现场);
+    assert!(
+        合集["PSP"]
+            .iter()
+            .any(|file| file.ends_with("繁体修正版.gbc")),
+        "导出也照旧把它放在 PSP 那个合集里：{:?}",
+        合集["PSP"]
+    );
+}
+
+#[test]
+fn 已同步过的变体纠正之后_下一趟同步把旧落点列为删除_新落点列为新增_清单之外的一律不碰() {
+    // 验收第 3 条 + ADR-0015：旧落点只在**清单记着**的时候才删；清单之外的一律不碰。
+    let 卡 = temp_dir("platform-fix-卡");
+    let mut 现场 = 建现场();
+    跑一趟识别(&mut 现场, true);
+
+    // 纠正之前先同步过一趟：清单记着那两份 `.fds` 落在 `fc/` 下，卡上也躺着它们。
+    let 先的 = {
+        let selected = 全选(&现场);
+        let footprint = sync::Footprint::gather(&现场.catalog, &selected, &Manifest::builtin())
+            .expect("读得出脚印");
+        footprint.desired(&Profile::unclaimed())
+    };
+    let mut 清单 = sync::Manifest::default();
+    let mut 目标 = sync::TargetState::default();
+    for file in &先的.files {
+        清单.files.push(sync::ManifestFile {
+            path: file.path.clone(),
+            kind: file.kind,
+            stamp: file.source_stamp,
+            source: file.source.clone(),
+            source_stamp: file.source_stamp,
+            variant: file.variant.clone(),
+            absent: false,
+        });
+        目标.files.push(sync::TargetFile {
+            path: file.path.clone(),
+            stamp: Some(file.source_stamp),
+        });
+    }
+    assert!(
+        清单
+            .files
+            .iter()
+            .any(|file| file.path == "fc/日版/塞尔达传说.fds"),
+        "前提：上一趟同步把它放在 `fc/` 下"
+    );
+    // 清单之外、也不是期望里的：人在掌机上手抄进去的一份存档。
+    let 存档 = "存档/007.sav".to_string();
+    目标.files.push(sync::TargetFile {
+        path: 存档.clone(),
+        stamp: Some(sync::Stamp {
+            bytes: 1024,
+            mtime_ns: Some(1_700_000_000_000_000_000),
+        }),
+    });
+
+    // 纠正之后下一趟：旧落点不要了，新落点要。
+    现场
+        .store
+        .set_platform_correction(LIBRARY, "FC", "FDS", PlatformDecision::ByContent)
+        .expect("记得下");
+    现场.catalog.clear_identifications().expect("清得掉上一趟");
+    跑一趟识别(&mut 现场, true);
+    let selected = 全选(&现场);
+    let footprint = sync::Footprint::gather(&现场.catalog, &selected, &Manifest::builtin())
+        .expect("读得出脚印");
+    let 后 = footprint.desired(&Profile::unclaimed());
+
+    let 子库 = sublibrary::Sublibrary::at("掌机", 卡.path(), "Pegasus", None);
+    let plan = sync::plan(&子库, &后, &清单, &目标, sync::Options::default());
+    let 一步 = |路径: &str| {
+        plan.steps
+            .iter()
+            .find(|step| step.path == 路径)
+            .map(|step| step.act)
+    };
+    for 旧 in ["fc/日版/塞尔达传说.fds", "fc/合集/银河战士.fds"] {
+        assert_eq!(
+            一步(旧),
+            Some(sync::Act::Delete),
+            "{旧} 是清单里的旧落点，该删"
+        );
+    }
+    for 新 in ["fds/日版/塞尔达传说.fds", "fds/合集/银河战士.fds"] {
+        assert_eq!(一步(新), Some(sync::Act::Add), "{新} 是新落点，该新增");
+    }
+    assert_eq!(
+        一步("psp/放错的/007 黑日危机 繁体修正版.gbc"),
+        None,
+        "没动过的变体一步都不用走"
+    );
+    assert_eq!(一步(&存档), None, "清单之外的一律不碰");
+}
+
+#[test]
+fn 纠正之后卡上的前端元数据也写在新平台那一份里() {
+    // 用户故事 9 的另一半：卡上的前端元数据（Pegasus 一个平台一份）也得跟着走——
+    // 合集名照**落点平台**，条目里那条 `file:` 是卡上真落着的那一份。
+    let mut 现场 = 建现场();
+    现场
+        .store
+        .set_platform_correction(LIBRARY, "FC", "FDS", PlatformDecision::ByContent)
+        .expect("记得下");
+    现场.catalog.clear_identifications().expect("清得掉上一趟");
+    跑一趟识别(&mut 现场, true);
+
+    let selected = 全选(&现场);
+    let adapter = adapter::find("Pegasus").expect("带着 Pegasus 适配器");
+    let manifest = Manifest::builtin();
+    let footprint =
+        sync::Footprint::gather(&现场.catalog, &selected, &manifest).expect("读得出脚印");
+    let profile = Profile::unclaimed();
+    let mut desired = footprint.desired(&profile);
+    desired.screen(&profile.filesystem, 0);
+    let playlists =
+        sync::playlist::lay(&footprint, &desired, adapter.as_ref(), &profile, &manifest);
+    desired.add_and_screen(playlists.files.iter().cloned(), &profile.filesystem, 0);
+    let on_card = footprint.launching(&desired, &playlists, &BTreeSet::new());
+    let 前端 = sync::frontend::lay(
+        &现场.catalog,
+        adapter.as_ref(),
+        &Priorities::builtin(),
+        &selected,
+        &BTreeMap::new(),
+        &on_card,
+    )
+    .expect("折得出前端元数据");
+
+    // 一份一个平台，**文件名叫的是那级目录**（`converge` 一直如此），合集名说的是落点平台。
+    let 落点: Vec<&str> = 前端.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(
+        落点,
+        vec![
+            "fds.metadata.pegasus.txt",
+            "gba.metadata.pegasus.txt",
+            "psp.metadata.pegasus.txt"
+        ],
+        "一个平台一份，搬过的那一份叫 `fds.`——不是 `fc.`"
+    );
+    let 正文 = String::from_utf8(前端.bytes["fds.metadata.pegasus.txt"].clone()).expect("UTF-8");
+    assert!(
+        正文.contains("collection: FDS"),
+        "合集名照落点平台：\n{正文}"
+    );
+    assert!(
+        正文.contains("fds/日版/塞尔达传说.fds"),
+        "条目里那条 `file:` 是卡上真落着的那一份（`fds/`，不是 `fc/`）：\n{正文}"
+    );
 }

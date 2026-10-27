@@ -2817,6 +2817,66 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **谁来裁：** 拿主意的人
 - **状态：** open
 
+### Q1317 — 导出到主库那一侧，平台纠正之后的合集元数据文件名仍按**内容实际在的那一级目录**，与卡上的不一致
+
+- **来自：** 票 `core-answers-once/03`（收 `Q1033` 时路过）
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/adapter/converge.rs` 的 `run_within`（`platform_directory` 那一处）；`crates/core/src/adapter.rs` 的 `Adapter::metadata_path`、`crates/core/src/adapter/gamelist.rs` 的 `metadata_path`
+- **为什么没停线：** 「那一级目录叫什么」要从**平台清单**上取一眼（库里那个平台的变体全被纠正走了时一个目录都数不出来），而导出那条路（`adapter::converge::run` → `transfer::export_task` → `export`）手上没有平台清单；递进去要改四处公开签名与三十来个测试调用点，不出这一票。
+- **这张票实际做了什么：** 甲。导出折出来的合集名与条目分组照**落点平台**（`FDS`），而 `Collection.directory` 与元数据文件名照**内容实际在的那一级目录**（`fc.metadata.pegasus.txt`，ES-DE 是 `gamelists/fc/gamelist.xml`）——主库里那些文件确实躺在 `fc/` 下，导出一个字节都不搬（ADR-0004），指向真实位置才对。**同步那一侧不是这样**：卡上的目录是我们自己摆的，落点目录就是纠正之后那一级（`fds.metadata.pegasus.txt`）。
+- **两条路：** 甲（本票做的）：导出照内容实际在的目录。乙：把平台清单递进 `converge` / `export_task`，两边都用落点目录（Pegasus 的文件名与 ES-DE 的 `gamelists/<目录>/` 都跟着变）。
+- **建议留：** 乙——但等票 `core-answers-once/04`（平台清单的查找链提进核心库）落地之后再动，那时导出手上本来就该有一份清单，不必为这件事单开一条参数。乙还要答一句：ES-DE 的 `es_systems.xml` 里那个 system 的 `<path>` 指着 `fc/`，gamelist 摆在 `gamelists/fds/` 下算不算对。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1318 — 落点平台要**重跑一趟识别**才生效：只纠正不识别，导出与同步照旧用旧的落点
+
+- **来自：** 票 `core-answers-once/03`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/identify.rs` 的 `flush`（`Catalog::put_placements`）；`crates/core/src/catalog/identify.rs` 的 `placement_platforms`（`COALESCE(i.placement, v.platform)`）；界面上那一句 `crates/gui/src/health.rs` 的 `PLATFIX_FOOTNOTE`
+- **为什么没停线：** 这与会话里「**识别判定的平台**」是同一条约定（那一列也要下一趟识别才更新，`CONTEXT.md` 平台条与票 `one-criterion-per-thing/03` 都这么写），落点跟着它就是一致的；要改成当场生效得让读落点的那一侧带上沉淀库，或者纠正那一下就地写一行——那是另一条设计，不该由这张票顺手定。
+- **这张票实际做了什么：** 甲。落点平台与识别判定的平台出自**同一个决定**、同一趟落库；纠正之后跑一趟识别（增量那趟不算——它只算还没识别的），导出与同步就跟着变。屏上那句照实写「下次识别时按新平台重新匹配；导出与同步按纠正后的平台放置」。
+- **两条路：** 甲（本票做的）：照识别的物化结论。乙：纠正那一刻就写出落点（`set_platform_correction` 那一处顺带重算，或者在读落点时把沉淀库带上），屏上那句也改成「立刻生效」。
+- **建议留：** 甲。它在整条线上只有一个「什么时候生效」的答案，而乙会让「识别判定的平台」与「落点平台」两个说法在时间上错开——同一个决定，一处立刻生效一处等下一趟。人在纠正那一层按下去之后本来就要跑一趟识别（那一层的末句就这么说）。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1319 — 子库报告的「按平台」那一栏仍按**目录声明的平台**分组，纠正之后卡上的落点已经换了
+
+- **来自：** 票 `core-answers-once/03`（路过 `sublibrary::report`）
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/sublibrary/report.rs` 的 `Report::build`（`picked.platform`）；`crates/core/src/sublibrary.rs` 的 `Picked::platform`（`select` 从 `VariantFacts::platform` 折出来，那是目录声明的那一列）
+- **为什么没停线：** 那张报告分平台的口径这一票没被要求改；改它要动 `VariantFacts` 或 `Picked` 的语义（规则求值也读 `VariantFacts.platform`，那是**目录声明**的口径，不许被纠正带着走），不出这张票。
+- **这张票实际做了什么：** 没动。报告里按平台那一栏照旧是目录声明的平台；卡上怎么摆照落点平台（`sync::Footprint::platforms`）。
+- **两条路：** 甲（本票做的）：报告照旧。乙：`Picked` 上多一格落点平台，报告按它分组（规则求值照旧读目录声明那一格）。
+- **建议留：** 乙。一个纠正过的变体，报告说它属于 `PSP`、差量预览说它落在 `gbc/`，读报告的人分不出是两套口径还是算错了。乙只动 `Picked` 与报告两处。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q1320 — 落点目录与 `platform_directory` 在「一个平台散在几个目录里」时退回的东西不一样
+
+- **来自：** 票 `core-answers-once/03`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/catalog/identify.rs` 的 `placement_directories`（退回平台清单里这个平台的**头一个目录**）；`crates/core/src/adapter/converge.rs` 的 `platform_directory`（数不出唯一那个时交 `None`，调用方退回**平台名**）
+- **为什么没停线：** 这条支路只在「纠正的目标平台在这个库里散在两个以上目录里」时走到——真库上二十来个平台各自只用一个目录（见台账 `docs/library-facts.md`），而这张票的验收全在单目录的夹具上。
+- **这张票实际做了什么：** 甲。搬过去的变体落进平台清单里该平台的头一个目录（`gb`、`gameboy` → `gb`）；没搬的变体照旧走 `platform_directory`（散在几个目录里退回平台名）。
+- **两条路：** 甲（本票做的）：落点目录退回清单里的头一个。乙：与 `platform_directory` 同样退回平台名（`GBC/`），两边一个口径，代价是那个目录名在大小写敏感的目标上可能对不上任何 system。
+- **建议留：** 甲。搬过去的变体总得落进**某个**具体目录，而清单里那个名字至少是用户确认过的；乙会让两个平台的内容落到同一个以平台名命名的目录里。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q1321 — 这台机器上的 `cargo` 是 Homebrew 的 1.99.1，仓库钉的是 1.98.1：门禁的 `clippy` 因此红在两处与本次改动无关的旧代码上
+
+- **来自：** 票 `core-answers-once/03`（跑门禁时撞上；`slot2` / `slot3` 同一趟门禁上一模一样）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/gui/tests/snapshot.rs:936`（`needless_borrows_for_generic_args`：`one.作品.map(&号)`）；`crates/core/src/scrape/priority.rs:671`（`type_complexity`）。两处都在 `117eb7f` 上就是这样，本票一个字节没碰
+- **为什么没停线：** 它们不是这一票的代码，也不是这一票的行为；改它们是两处与落点无关的 lint 修
+- **这张票实际做了什么：** 没动。`rust-toolchain.toml` 钉的 1.98.1 这一版 `clippy` 不报这两条（落那一版时实测过），而这台机器上 `which cargo` 是 `/opt/homebrew/bin/cargo`（1.99.1）、没有 rustup 可切
+- **两条路：** 甲：门禁照旧，谁跑谁看见这两条红并知道是工具链的事。乙：把那两处就地改掉（`&号` → `号`；`(BTreeMap<…>, BTreeMap<…>)` 提成两个类型），让 1.99 也绿。丙：给门禁的 `clippy` 那一条钉一条 `rustup run 1.98.1`（要先有 rustup）
+- **建议留：** 乙。两处都是机械改，改完 1.98 与 1.99 都绿，门禁的「全绿」才重新是一个能咬住的断言。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
 ---
 
 ## 结算索引（第四轮收口，`Q364`–`Q448`）
@@ -3238,7 +3298,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q1030` | 「目录与内容平台不符」在核心库有**两处**判据，而稿上打头的 GB↔GBC 两组今天一条都出不来 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
 | `Q1031` | 平台清单：界面一律用内置那一份，命令行走工作目录那条链 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
 | `Q1032` | 「平台纠正」屏上叫「记为裁决」，词表里它是**人工纠正** | **记** | 迁回票 `gui-looks-like-the-design/28`；已落地：票 gui-looks-like-the-design/28（health.rs「记为人工纠正」＋反向断言） |
-| `Q1033` | 导出与同步还不读平台纠正：照旧按目录放置 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘） |
+| `Q1033` | 导出与同步还不读平台纠正：照旧按目录放置 | **记** | 迁回票 `gui-looks-like-the-design/28`；**settled**：票 `core-answers-once/03` 在核心库立了**落点平台**（有平台纠正听纠正，否则照目录声明，`identify::platform_of` 一处判、落库成 `identification.placement`，导出与同步都读它），卡上那一级目录跟着走、旧落点由下一趟同步照清单清掉（ADR-0015）；库体检那一句改成实话 |
 | `Q1034` | 平台标的字号与字距与设计稿差半号，全仓没有「字距」这一维 | **记** | 迁回票 `gui-looks-like-the-design/28`；记下，无事可做 |
 | `Q1035` | 平台色只给了六个平台，其余一律兜底灰 | **记** | 迁回票 `gui-looks-like-the-design/28`；记下，无事可做 |
 | `Q1036` | 定过的那一组不调淡、回话画在弹层里而不是弹提示条 | **记** | 迁回票 `gui-looks-like-the-design/28`；记下，无事可做 |

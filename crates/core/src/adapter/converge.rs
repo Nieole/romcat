@@ -359,7 +359,22 @@ pub fn run_within(
             planned
                 .iter()
                 .flat_map(|one| &one.members)
-                .map(|variant| variant.key.as_str()),
+                // **落点**：卡上/子库里真要住的那一份（`Launch`）。平台纠正搬过的变体换了头一级目录，
+                // 那一段就体现现在这里；导出（主库里写元数据）没有 `Launch`，数的是键本身。
+                .map(|variant| {
+                    launch.get(&variant.key).map_or_else(
+                        || variant.key.clone(),
+                        |launch| {
+                            crate::path::join_root(
+                                crate::path::root_of_key(&variant.key),
+                                &launch.file,
+                            )
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str),
         );
         // **不给 `shortname`。** Pegasus 拿它去对第三方资源目录（Skraper、ES 的
         // system 名），而那套名字与我们的平台名不是一回事——FC 在那边叫 `nes`。
@@ -607,6 +622,9 @@ pub(crate) struct Entries {
     abnormal: BTreeMap<String, String>,
     /// 识别那一趟判过的「自己不能独立运行」，读落了库的结论即可（ADR-0024 推论 3）。
     not_standalone: BTreeMap<String, Standalone>,
+    /// 变体的键 → **落点平台**（有平台纠正听纠正，否则照目录声明，
+    /// `Catalog::placement_platforms`）：一个变体进哪个前端合集问它。
+    placement: BTreeMap<String, String>,
 }
 
 impl Entries {
@@ -619,6 +637,7 @@ impl Entries {
             works: catalog.work_names()?,
             abnormal: catalog.abnormal_main_members()?,
             not_standalone: catalog.not_standalone()?,
+            placement: catalog.placement_platforms()?,
         })
     }
 
@@ -627,9 +646,10 @@ impl Entries {
         if let Some(why) = excluded(variant, &self.abnormal, &self.not_standalone) {
             return Err(why);
         }
-        let platform = variant
-            .platform
-            .clone()
+        let platform = self
+            .placement
+            .get(&variant.key)
+            .cloned()
             .unwrap_or_else(|| crate::report::UNKNOWN_PLATFORM_LABEL.to_string());
         let anchor = match variant.work_id.and_then(|id| self.works.get(&id)) {
             Some(work) => Anchor::Work(work.clone()),
