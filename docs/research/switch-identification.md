@@ -1,3 +1,11 @@
+---
+id: ref-switch-identification
+type: reference
+title: Nintendo Switch 转储格式识别方法
+status: active
+parent: architecture
+---
+
 # Nintendo Switch 转储格式识别方法
 
 调研日期：2026-08-31。本文覆盖 `.xci` / `.nsp` / `.nsz` / `.xcz` 四种扩展名，回答「不解密能不能认出游戏」这一核心问题。

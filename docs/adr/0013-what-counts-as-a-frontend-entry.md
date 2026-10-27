@@ -1,3 +1,11 @@
+---
+id: adr-0013
+type: architecture-design
+title: 前端条目的边界：能否独立运行，而非目录名
+status: active
+parent: architecture
+---
+
 # 前端条目的边界：能否独立运行，而非目录名
 
 资源站的分类名会骗人：「XBOX360 XBLA DLC全集」「Wii DLC+WiiWare+VC全集」是混装的——`XBLA`、`WiiWare`、`VC`、`DSiWare`、`minis` 全都是独立可玩的数字发行游戏，只有真正的追加内容（剧情包、曲包、角色包）才是附属物。因此判定依据是**能否独立运行**，绝不能按目录名一刀切。

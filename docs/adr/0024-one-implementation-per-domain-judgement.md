@@ -1,3 +1,11 @@
+---
+id: adr-0024
+type: architecture-design
+title: 一个领域判断只有一处实现
+status: active
+parent: architecture
+---
+
 # 一个领域判断只有一处实现
 
 ADR-0005 有半句写着「两处各挑一次迟早挑出两个答案」，可它挂在**界面那条红线**底下

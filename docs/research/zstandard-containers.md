@@ -1,3 +1,11 @@
+---
+id: ref-zstandard-containers
+type: reference
+title: Zstandard（`.zst` / `.tar.zst`）作为 ROM 库归档格式的识别可行性
+status: active
+parent: architecture
+---
+
 # Zstandard（`.zst` / `.tar.zst`）作为 ROM 库归档格式的识别可行性
 
 > **调研日期**：2026-08-31

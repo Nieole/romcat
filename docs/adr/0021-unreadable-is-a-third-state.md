@@ -1,3 +1,11 @@
+---
+id: adr-0021
+type: architecture-design
+title: 读不到元数据的文件是第三态，且禁止改用 getattrlistbulk 提速
+status: active
+parent: architecture
+---
+
 # 读不到元数据的文件是第三态，且禁止改用 getattrlistbulk 提速
 
 实测确认库里有 **4,085 个文件（1.59%）**在 macOS 的 fskit NTFS 驱动下读不到元数据（`Operation not supported`，errno 45）。比先前估的「约 1%」更多，而且比预想更彻底：**`stat` / `lstat` / `open` / `read` 全部失败，只有 `readdir` 有效**——文件名拿得到，其余一无所知。

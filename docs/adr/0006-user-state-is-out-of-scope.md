@@ -1,3 +1,11 @@
+---
+id: adr-0006
+type: architecture-design
+title: 工具完全不管理用户状态
+status: active
+parent: architecture
+---
+
 # 工具完全不管理用户状态
 
 收藏、游玩次数、游玩时长、通关状态这类数据是用户在前端里玩出来的历史，覆盖掉就真的没了；而各前端的存放位置极其分散（Pegasus 在 `favorites.txt` 与 `stats.db`，ES 在 gamelist.xml 内，LaunchBox 在库文件里），多设备并用时还存在无解的合并语义。因此工具既不读也不写用户状态，全部交给前端自己管。

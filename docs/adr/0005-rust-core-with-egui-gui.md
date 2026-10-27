@@ -1,3 +1,11 @@
+---
+id: adr-0005
+type: architecture-design
+title: Rust 核心 + egui 原生 GUI
+status: active
+parent: architecture
+---
+
 # Rust 核心 + egui 原生 GUI
 
 核心能力（二进制头部解析、并发哈希、10T 目录遍历）是 Rust 的主场，且核心必须是独立的库 + CLI，因为 10T 规模的扫描迟早要挂后台或扔到别的机器上跑，只能靠点按钮驱动的程序不可接受。GUI 选 egui：单一二进制、无 WebView 依赖、部署最简单、渲染性能好。

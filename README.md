@@ -129,7 +129,8 @@ CONTEXT.md     词表。动手前先读它，输出用它的词
 
 | 你要做什么 | 先读 |
 |---|---|
-| 动手改代码 | `CONTEXT.md`（词表）+ 相关的 ADR |
+| 动手改代码 | `CONTEXT.md`（词表）+ 相关的 ADR + `docs/spec/` 里那一域 |
+| 搞清某一层为什么这样分 | `goal-and-requirements.md`、`architecture.md`、`docs/spec/` |
 | 搞清某个数字哪来的 | `docs/library-facts.md` |
 | 加一个平台 | `docs/platforms.md` |
 | 出票、接票 | `docs/agents/issue-tracker.md` |

@@ -1,3 +1,11 @@
+---
+id: ref-metadata-formats
+type: reference
+title: 主流前端/启动器的游戏元数据格式及其相互转换可行性
+status: active
+parent: architecture
+---
+
 # 主流前端/启动器的游戏元数据格式及其相互转换可行性
 
 > 调研日期：2026-08-30

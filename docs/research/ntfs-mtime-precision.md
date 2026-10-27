@@ -1,3 +1,11 @@
+---
+id: ref-ntfs-mtime-precision
+type: reference
+title: NTFS 与 APFS 修改时间精度实测 —— `(路径, 大小, 修改时间)` 够不够支撑增量扫描
+status: active
+parent: architecture
+---
+
 # NTFS 与 APFS 修改时间精度实测 —— `(路径, 大小, 修改时间)` 够不够支撑增量扫描
 
 > **调研日期**：2026-08-31

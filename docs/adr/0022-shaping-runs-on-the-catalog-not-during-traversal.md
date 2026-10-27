@@ -1,3 +1,11 @@
+---
+id: adr-0022
+type: architecture-design
+title: 成型跑在中立库上，不跑在遍历途中
+status: active
+parent: architecture
+---
+
 # 成型跑在中立库上，不跑在遍历途中
 
 **成型规则**要看的是一整棵子树。PSV 的 `app/<TitleID>` 与 `patch/<TitleID>` 是同一个**变体**的两半；`游戏.cue` 与 `游戏 (Track 02).bin` 是同一个变体的两块；三张碟分在三个兄弟目录里，也还是一个变体。
