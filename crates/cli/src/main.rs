@@ -1343,7 +1343,7 @@ fn open_catalog(
 /// （`site::rescue`，连首选变体、亲手加的叫法与详情页上改过的字段一起）：那句话叫人删掉它重扫，删之前得先救出来——与开现场、
 /// 开场列举是同一个函数。没救成就说没救成的那一句（核心库的原话）。
 fn unopened(workspace: &Path, path: &Path, error: &CatalogError) -> String {
-    if matches!(error, CatalogError::Version { .. })
+    if matches!(error, CatalogError::Version(_))
         && let Err(stranded) = romcat_core::site::rescue(workspace, path, error)
     {
         return stranded.to_string();

@@ -443,14 +443,20 @@ fn 工作目录() -> PathBuf {
     PathBuf::from("~/.local/share/romcat")
 }
 
-/// 一份开得了的库：主库原名、变体数、上次扫描时刻（UNIX 纪元起的秒，屏上按 UTC 画）。
+/// 一份开得了的库：主库原名、根数、变体数、上次扫描时刻（UNIX 纪元起的秒，屏上按 UTC 画）。
 fn 开得了(
-    工作目录: &Path, 原名: &str, 主库标识: &str, 变体: u64, 扫于: i64
+    工作目录: &Path,
+    原名: &str,
+    主库标识: &str,
+    根: u64,
+    变体: u64,
+    扫于: i64,
 ) -> CatalogEntry {
     CatalogEntry {
         path: 工作目录.join("catalog").join(format!("{主库标识}.sqlite3")),
         name: 原名.to_owned(),
         state: CatalogState::Openable(Ok(CatalogFacts {
+            roots: 根,
             variants: 变体,
             scanned_at: Some(扫于),
         })),
@@ -463,19 +469,19 @@ fn 有库(工作目录: &Path) -> Listing {
     let 旧库 = 工作目录
         .join("catalog")
         .join("旧库-0824-5e0b1c2d3a4f6978.sqlite3");
-    // 那句话是**核心库的原话**，这里拿核心库那个错误类型折出来，不抄一段字。
-    let 原话 = CatalogError::Version {
-        path: romcat_core::path::display(&旧库),
-        found: 4,
-        expected: SCHEMA_VERSION,
-    }
-    .to_string();
+    // 那两半是**核心库的原话**（短话与细节），这里拿核心库那个错误类型折出来，不抄一段字。
+    let 版本 = romcat_core::catalog::VersionMismatch::new(
+        romcat_core::path::display(&旧库),
+        4,
+        SCHEMA_VERSION,
+    );
     Listing::Catalogs(vec![
         // 2026-09-03 14:58（UTC）
         开得了(
             工作目录,
             "主库",
             "主库-f5c61109a2b3c4d5",
+            2,
             46_444,
             1_788_447_480,
         ),
@@ -484,6 +490,7 @@ fn 有库(工作目录: &Path) -> Listing {
             工作目录,
             "掌机整理",
             "掌机整理-0c9e7d1b24a6f358",
+            1,
             3_102,
             1_788_037_800,
         ),
@@ -493,7 +500,8 @@ fn 有库(工作目录: &Path) -> Listing {
             state: CatalogState::SchemaMismatch {
                 found: 4,
                 expected: SCHEMA_VERSION,
-                said: 原话,
+                said: 版本.brief(),
+                details: 版本.details(),
             },
         },
     ])
@@ -554,6 +562,162 @@ fn 开场_读不动_暗色() {
     拍("opening/unreadable-dark", Theme::Dark, move |ui| {
         drop(开场.ui(ui));
     });
+}
+
+/// **读不动的一份**：文件在、刚列出来，只是这会儿打不开（权限不够、被别的程序占着那一类）。
+///
+/// 那一格是**核心库判出来的**：这里只把「别的程序正锁着它」时 SQLite 真报的那一条错
+/// （`SQLITE_BUSY` / `database is locked`）交进去，那句话它自己会折——不抄一段字、也不假装
+/// 一份库读不动。锁着的那一份真造得出来（另开一条连接 `BEGIN EXCLUSIVE`），但那份要在
+/// `busy_timeout` 上等十秒，而这一张图要的只是那一行**长什么样**。
+fn 读不动的一份(工作目录: &Path) -> Listing {
+    let 文件 = 工作目录
+        .join("catalog")
+        .join("被锁着-7b1c2d3e4f5a6978.sqlite3");
+    let 原话 = CatalogError::Sqlite {
+        path: romcat_core::path::display(&文件),
+        source: rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_owned()),
+        ),
+    }
+    .unreadable()
+    .expect("被锁着的那一份该判成读不动");
+    Listing::Catalogs(vec![
+        开得了(
+            工作目录,
+            "主库",
+            "主库-f5c61109a2b3c4d5",
+            2,
+            46_444,
+            1_788_447_480,
+        ),
+        CatalogEntry {
+            path: 文件,
+            name: "被锁着".to_owned(),
+            state: CatalogState::Unreadable { said: 原话 },
+        },
+    ])
+}
+
+#[test]
+fn 开场_有一份库读不动_浅色() {
+    let mut 开场 = Screen::listed(工作目录(), 读不动的一份(&工作目录()));
+    拍(
+        "opening/unreadable-library-light",
+        Theme::Light,
+        move |ui| {
+            drop(开场.ui(ui));
+        },
+    );
+}
+
+#[test]
+fn 开场_有一份库读不动_暗色() {
+    let mut 开场 = Screen::listed(工作目录(), 读不动的一份(&工作目录()));
+    拍("opening/unreadable-library-dark", Theme::Dark, move |ui| {
+        drop(开场.ui(ui));
+    });
+}
+
+#[test]
+fn 开场_读不动的那一份写着读不动_下一步是修权限() {
+    // ADR-0021 那条再修订、挂单 `Q613`：**四态**里那两态在屏上得认得出不同——文件坏了是
+    // 「打不开」、下一步删掉重扫；读不动是「读不动」、下一步去修权限或关掉占着它的程序。
+    // 造不出一份真读不动的文件也没关系：这一条只看**核心库那句话交到屏上之后**画出来的是什么，
+    // 而那句话本身由核心库造（`CatalogError::unreadable`）。
+    let ctx = headless::context();
+    look::install(&ctx);
+    let mut 开场 = Screen::listed(工作目录(), 读不动的一份(&工作目录()));
+    let mut out = headless::frame(&ctx, headless::input(), |ui| {
+        drop(开场.ui(ui));
+    });
+    for _ in 0..2 {
+        out = headless::frame(&ctx, headless::input(), |ui| {
+            drop(开场.ui(ui));
+        });
+    }
+    let 屏上 = shared::画出来的字(&out);
+    assert!(
+        正好画着的每一处(&out, "读不动").len() == 1,
+        "那一行上没有一枚写着「读不动」的标签：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("关掉占用它的程序"),
+        "读不动那一行没说下一步（关掉占用它的程序）：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("删掉"),
+        "读不动那一行让人删库——那正是这一条要治的：\n{屏上}"
+    );
+    // 好的那一份照旧：根数、变体数、上次扫描一样不少。
+    assert!(
+        屏上.contains("2 个根 · ") && 屏上.contains("个变体 · 上次扫描"),
+        "开得了的那一行没写根数（照稿是「N 个根 · N 个变体 · 上次扫描 …」）：\n{屏上}"
+    );
+}
+
+#[test]
+fn 开场_版本对不上那一行只有一行高_细节在悬停里() {
+    // 挂单 `Q841`：那句话从前是五个分句的长话，在这张卡里折成六行，比别的行高出一大截。
+    // 现在那一行只印**短话**（一行高），细节——删库留得住什么、会跟着丢什么——挂在悬停里，
+    // 一个字不少（ADR-0001 的修订）。
+    let ctx = headless::context();
+    look::install(&ctx);
+    let mut 开场 = Screen::listed(工作目录(), 有库(&工作目录()));
+    let mut 跑 = |ctx: &egui::Context| {
+        let mut out = headless::frame(ctx, headless::input(), |ui| {
+            drop(开场.ui(ui));
+        });
+        for _ in 0..2 {
+            out = headless::frame(ctx, headless::input(), |ui| {
+                drop(开场.ui(ui));
+            });
+        }
+        out
+    };
+    let out = 跑(&ctx);
+    // 量的是**那一行底下那句字有多高**：别的行底下那句小字是一行，版本对不上的那一行从前是
+    // 五个分句的长话、折成六行，于是这一行比别的行高出一大截。（比行距看不出来——它在最后
+    // 一行，撑高自己不影响底下任何一行的位置。）
+    let 那一段 = |字: &str| {
+        let 处 = 画着的每一处含(&out, 字);
+        let [一段] = 处.as_slice() else {
+            panic!(
+                "「{字}」屏上该正好画着一处，画了 {} 处：\n{}",
+                处.len(),
+                shared::画出来的字(&out)
+            );
+        };
+        *一段
+    };
+    let 别的行的一句 = 那一段("上次扫描 2026-09-03").height();
+    let 这一行的一句 = 那一段("结构版本是 4").height();
+    assert!(
+        这一行的一句 < 别的行的一句 * 1.5,
+        "版本对不上的那一行比别的行高（{} 点 对 {} 点）：\n{}",
+        这一行的一句,
+        别的行的一句,
+        shared::画出来的字(&out)
+    );
+    // 那一行上画着的是**短话**，不是那一整段。
+    let 屏上 = shared::画出来的字(&out);
+    assert!(
+        屏上.contains("结构版本是 4，本程序认得的是 7。删掉它重扫一遍即可"),
+        "那一行没印短话：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("会跟着丢的"),
+        "那一行把整段细节也印出来了：\n{屏上}"
+    );
+    // **细节在悬停里**：指针停在那一行上就看得到。
+    let 停住之后 = shared::悬停在(&ctx, "结构版本是 4", |ui| {
+        drop(开场.ui(ui));
+    });
+    assert!(
+        停住之后.contains("会跟着丢的有两样") && 停住之后.contains("手动加的例外"),
+        "悬停里没有那段细节：\n{停住之后}"
+    );
 }
 
 #[test]

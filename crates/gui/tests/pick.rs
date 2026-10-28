@@ -206,6 +206,60 @@ fn 向导里选中一个目录填进选根那一步开始扫描照旧往下走()
 }
 
 #[test]
+fn 向导起名那一问撞名时说得出下一步() {
+    // 挂单 `Q615`：向导第一步拦下时说的是**核心库那句原话**（ADR-0005），而那句话从前只说
+    // 「已经在了」，没告诉人下一步——换个名字，或者去开那一份。
+    let 工作目录 = temp_dir("gui-pick-向导-撞名-工作目录");
+    建一份库(工作目录.path(), "我的主库");
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut 向导 = Wizard::new(工作目录.path().to_path_buf());
+    shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
+    shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
+
+    shared::打字(&ctx, "主库原名，例如", "我的主库", |ui| {
+        drop(向导.show(ui.ctx()))
+    });
+    let 屏上 = shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
+
+    assert!(
+        屏上.contains("换个名字") && 屏上.contains("去开那一份"),
+        "起名那一问撞了名，却没说下一步：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("romcat "),
+        "屏上画出了一条终端命令（ADR-0023：界面得自己给出去处）：\n{屏上}"
+    );
+}
+
+#[test]
+fn 向导起名那一问空着时不带按空名字折出来的路径() {
+    // 挂单 `Q615`：空名字那句从前带着一条**按空名字折出来的路径**（`catalog/library-<哈希>
+    // .sqlite3` 那种怪东西），人只会以为自己填错的是路径。这儿钉的是**屏上**没有那串路径。
+    let 工作目录 = temp_dir("gui-pick-向导-空名字-工作目录");
+    let ctx = headless::context();
+    romcat_gui::look::install(&ctx);
+    let mut 向导 = Wizard::new(工作目录.path().to_path_buf());
+    shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
+    shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
+
+    // 全是空格：框不算空（问过了），可名字是空白（核心库那条判断）。
+    shared::打字(&ctx, "主库原名，例如", "   ", |ui| {
+        drop(向导.show(ui.ctx()))
+    });
+    let 屏上 = shared::跑一帧(&ctx, |ui| drop(向导.show(ui.ctx())));
+
+    assert!(
+        屏上.contains("主库原名不能是空白"),
+        "起名那一问空着时没说「空白不是名字」：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains(".sqlite3") && !屏上.contains("catalog/"),
+        "屏上画出了一条按空名字折出来的路径：\n{屏上}"
+    );
+}
+
+#[test]
 fn 向导里取消选择器不进下一步也不动已经打的字() {
     let 工作目录 = temp_dir("gui-pick-向导取消-工作目录");
     let ctx = headless::context();

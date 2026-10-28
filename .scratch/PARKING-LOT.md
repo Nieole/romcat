@@ -2981,6 +2981,30 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **谁来裁：** 收尾
 - **状态：** open
 
+### Q1357 — 「读不动」这个词不在词表里，而它从票 04 起已经上了两屏
+
+- **来自：** 票 `core-answers-once/07`（写那一行的时候撞上）
+- **类别：** 规格没说
+- **在哪：** `CONTEXT.md`「库的状况」那一节有**不可读**（说的是文件元数据读不到，ADR-0021 的第一段），没有「读不动」；而它已经用在：票 04 开窗那一行「工作目录里那份优先级表读不动：…」、`sources::SourceState::label` 那一档（票 10）、本票开场那一行的标签与句子（`CatalogError::unreadable`）
+- **为什么没停线：** 词表是拿主意的人的东西（`docs/agents/domain.md` 那条「要用的概念词表里没有，是个信号」），这一票照 ADR-0021 再修订的原词写，不去自己立词条；而它已经三处用着同一个意思，不是一处的随手话。
+- **这张票实际做了什么：** 一个字没往 `CONTEXT.md` 里加，屏幕上的词照 ADR-0021 再修订与票 04 的先例（「读不动」），句子由核心库一处出（`CatalogError::unreadable`）。
+- **两条路：** 甲：在词表「库的状况」下补一条**读不动**（与**不可读**并排，说清前者说的是「这一份库这会儿打不开」、后者说的是「这一个文件元数据读不到」）。乙：不立词条，把 ADR-0021 再修订那一段当作它的定义，代码里指过去。
+- **建议留：** 甲。两份概念只差一个字，而「不可读」是文件级的、「读不动」是库级的——不写清，下一个人会当成同一个。
+- **谁来裁：** 拿主意的人（`/domain-modeling`）
+- **状态：** open
+
+### Q1358 — 读不动那一行把整串路径也印了出来，与版本对不上那一行的取舍不一样
+
+- **来自：** 票 `core-answers-once/07`（重批开场基线上看见的）
+- **类别：** 岔
+- **在哪：** `CatalogError::unreadable()`（`crates/core/src/catalog.rs`）那句「中立库 {path} 这会儿读不动（{原话}）——…」；对照的是 `VersionMismatch::brief()` 那一句已经从短话里把路径拿掉（那一行左边已经印着这份库叫什么）。图上：`crates/gui/tests/snapshots/opening/unreadable-library-light.png`
+- **为什么没停线：** 判据是「照印原话」——SQLite 那句自己就把路径写在里头（`unable to open database file: /…`），剥掉它等于改核心库的原话；而这一行的行高没有像版本那一行那样的硬约束（票面只说「下一步是修权限或关掉占用它的程序」）。
+- **这张票实际做了什么：** 甲（留着）。代价是那一行折成三行、左边那个名字重复了一遍。
+- **两条路：** 乙：核心库为「上屏」与「终端」各交一句，屏上那句只说「这会儿读不动（database is locked）——去修权限，或者关掉占用它的程序」，路径不上屏（与版本那一行同一个取舍，代价是两处措辞从此可能漂，得指着一处生成）。丙：路径留着、折成两行封顶（截断加悬停），照根名那一列的办法。
+- **建议留：** 乙，但要拿主意的人点头——它改的是屏幕上那一行的字数与行数，不只是措辞。
+- **谁来裁：** 拿主意的人（对照材料：`/Users/nicoer/dev/game-wt/logs/cao-07-compare/CHANGED.md`）
+- **状态：** open
+
 ---
 
 ## 结算索引（第四轮收口，`Q364`–`Q448`）
@@ -3151,9 +3175,9 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q606` | 「识别判定的平台」词表里没有，没往 `CONTEXT.md` 加 | **活** | 迁回票 `one-criterion-per-thing/03`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
 | `Q611` | 「目录写不动」那一问只在 Unix 上答得出，Windows 上交给建库那一下自己报错 | **岔** | 迁回票 `no-mute-spots-opening-a-catalog/04`；追认，维持现状 |
 | `Q612` | 中立库住的那个目录列不开时，建库、改名与向导第一步都「查不了重名就不收」 | **记** | 迁回票 `no-mute-spots-opening-a-catalog/04`；记下，无事可做 |
-| `Q613` | 一份中立库文件自己读不动（权限、被锁），落在「文件坏了」那一支 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘） |
+| `Q613` | 一份中立库文件自己读不动（权限、被锁），落在「文件坏了」那一支 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘）；票 `core-answers-once/07` 做掉了（**settled**）：`workspace::CatalogState` 多一支 `Unreadable`，分法在核心库一处 `CatalogError::unreadable()`（照打开时 SQLite 的错码逐条判：`SQLITE_PERM` / `SQLITE_CANTOPEN` / `SQLITE_BUSY` / `SQLITE_LOCKED`，**判不准的归「文件坏了」并照印原话**），那句话带下一步「去修这份文件与它那个目录的权限，或者关掉占用它的程序」；开场那一行画一枚「读不动」标签，不画「打不开」也不叫人删库。测试 `crates/core/tests/catalog_list.rs::一份中立库的读权限被收掉时列举交出读不动`（收权限造不出来就如实跳过）、`crates/gui/tests/snapshot.rs::开场_读不动的那一份写着读不动_下一步是修权限`；新基线 `opening/unreadable-library-{light,dark}.png`（待点头） |
 | `Q614` | `Site::open` 先问一句 `catalog.exists()`，目录读不动时说的是「还没有这份库，先跑一次 scan」 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘）；票 `core-answers-once/11` 做掉了（settled）：`Site::open`／`Site::open_file` 的「在不在」换成 `try_exists`，说不出来时交 `SiteError::Unreadable`——「中立库住的那个目录读不动：…（系统怎么说的）。说不准里头那份中立库在不在——先去修那个目录的权限，或者关掉占着它的程序」，不再说成「还没有这份库」。测试 `crates/core/tests/catalog_list.rs::工作目录读不动时打开现场说的也是读不动不是还没有这份库`（收权限造不出来就如实跳过）；命令行那六处开库前的预问仍照旧，见 `Q1398` |
-| `Q615` | 向导第一步拦下时说的是核心库原话，「换个名字，或者去开那一份」那半句没了 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q615` | 向导第一步拦下时说的是核心库原话，「换个名字，或者去开那一份」那半句没了 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/07` 做掉了（**settled**）：`CatalogError::AlreadyExists` 补上「换个名字，或者去开那一份」（不带命令，ADR-0023）；`CatalogError::BlankLibraryName` 改成不带路径（那一句里从前印着 `catalog/library-<哈希>.sqlite3` 那种按空名字折出来的怪东西）。测试 `crates/core/tests/library_name.rs::撞名与空名字那两句都说得出下一步`、`crates/gui/tests/pick.rs::向导起名那一问撞名时说得出下一步` 与 `::向导起名那一问空着时不带按空名字折出来的路径` |
 | `Q616` | 「不许写进任何一份主库」那道守卫在中立库目录读不动时照旧放行 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘）；票 `core-answers-once/11` 做掉了（settled）：照 ADR-0004 修订段——`refuse_writing_into_any_library` 查不出主库的根时交 `Writing::OnlyNew`，落点**已存在就拒**并说清「这一趟查不出主库的根（…），没法确认它不落在某一份主库里——已有的文件一个字节都不覆盖，换一个新的文件名再导出」；落点不在就用 `create_new` 写（不肯覆盖由系统那一下兜住，不靠「先问一遍再写」）。「开不动的那几份跳过」那套口径没翻：能比的根照旧比，新文件碰不到任何已有的字节。测试 `crates/cli/tests/triage.rs::中立库目录读不动时导出只放行新建_已存在的拒掉且一个字节不动`（收权限造不出来就如实跳过） |
 | `Q621` | 逐条流里 `U` 撤的仍是本进程刚落下的那一批，不是沉淀库里最新在册的那一批 | **岔** | 迁回票 `gui-answers-all-six/06`；追认，维持现状 |
 | `Q622` | 被后来的一批盖住时那句话原样画，里面带着一句命令行指路 | **活** | 迁回票 `gui-answers-all-six/06`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
@@ -3214,7 +3238,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q761` | 截图门的依赖 `egui_kittest` 钉死 `=0.36.1`，不跟补丁版 | **记** | 迁回票 `gui-looks-like-the-design/05`；记下，无事可做 |
 | `Q762` | 单行输入框高 28，不照设计稿 `.input` 的 30 | **记** | 迁回票 `gui-looks-like-the-design/05`；已落地：票 gui-looks-like-the-design/05 |
 | `Q763` | 向导标头那一排「走到第几问」长在 `Dialog` 上，不在向导自己的内容区里 | **记** | 迁回票 `gui-looks-like-the-design/05`；记下，无事可做 |
-| `Q764` | 稿上主库那一行的「N 个根」「硬盘未连接，仍可打开」「在文件系统中打开」没做 | **活** | 迁回票 `gui-looks-like-the-design/05`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q764` | 稿上主库那一行的「N 个根」「硬盘未连接，仍可打开」「在文件系统中打开」没做 | **活** | 迁回票 `gui-looks-like-the-design/05`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/07` 做掉了前一件（**settled**，后两件按裁定不做）：「N 个根」——核心库 `CatalogFacts` 多交一个 `roots`，界面照稿画成「2 个根 · 46,444 个变体 · 上次扫描 …」。测试 `crates/core/tests/catalog_list.rs::开得了的那一份说得出它有几个根`，基线 `opening/catalogs-{light,dark}.png` 重批 |
 | `Q765` | 开场列一遍库，就在每份中立库旁边留下 `-wal` / `-shm` | **记** | 迁回票 `gui-looks-like-the-design/05`；记下，无事可做 |
 | `Q766` | 截图基线出自 macOS，Windows 那台验证机上会不会红没有量过 | **活** | 迁回票 `gui-looks-like-the-design/05`；托给票 `rom-metadata-automation/28` |
 | `Q767` | 工作目录读不动时，开场右栏不摆「添加主库」 | **记** | 迁回票 `gui-looks-like-the-design/05`；记下，无事可做 |
@@ -3280,7 +3304,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q838` | 等待中那一行的「移除」：设计稿是小号幽灵按钮，`look` 里没有幽灵那一档，眼下是小号普通按钮 | **记** | 迁回票 `gui-looks-like-the-design/25`；已落地：票 gui-looks-like-the-design/25（look::ghost_button） |
 | `Q839` | 任务屏与设计稿还差的几处小节（空台卡片、抬头、任务名、「约剩」、页脚那句），并成一条 | **记** | 迁回票 `gui-looks-like-the-design/25`；已落地：票 gui-looks-like-the-design/25 |
 | `Q840` | 任务屏几处字号取令牌里最近的一档：表头 11.5→11、历史行 12.5→13/12、屏头说明 12.5→12 | **记** | 迁回票 `gui-looks-like-the-design/25`；已落地：票 gui-looks-like-the-design/25（令牌加两档） |
-| `Q841` | 旧库版本对不上那句核心库原话，在开场上折成六行，比别的行高出一截 | **活** | 迁回票 `gui-looks-like-the-design/05`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q841` | 旧库版本对不上那句核心库原话，在开场上折成六行，比别的行高出一截 | **活** | 迁回票 `gui-looks-like-the-design/05`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/07` 做掉了（**settled**）：`CatalogError::Version` 的载荷换成 `catalog::VersionMismatch`，`brief()` 是一行短话（不带路径）、`details()` 是那段「留得住什么、会跟着丢什么」、`Display` 是两半合起来的整句（终端里一个字不少）；开场那一行只画短话，细节挂悬停。测试 `crates/gui/tests/snapshot.rs::开场_版本对不上那一行只有一行高_细节在悬停里`（红时 136 点 对 17 点）、`crates/core/tests/catalog_list.rs::结构版本对不上的库照列并说清是哪个版本对哪个版本`；基线 `opening/catalogs-{light,dark}.png` 重批 |
 | `Q851` | 核心库「目标不在位」那句带着命令行命令与系统错误原文，界面该不该一律用自己的话 | **活** | 迁回票 `gui-looks-like-the-design/20`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
 | `Q852` | 删减建议只带变体的键，没有作品名与平台 | **活** | 迁回票 `gui-looks-like-the-design/20`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/09` 做掉了（settled）：`sublibrary::Trim` 带上 `title`（认出作品的取作品名，认不出的取正题，走 `Catalog::trim_names` 那一处）与 `platform`；界面与两处文本报告照印，不自己凑「这个变体叫什么」 |
 | `Q853` | 卡头标签：稿上「未连接」撞词表**连接**；颜色与用词都已裁成照稿 | **记** | 迁回票 `gui-looks-like-the-design/20`；已落地：票 gui-looks-like-the-design/20 |
