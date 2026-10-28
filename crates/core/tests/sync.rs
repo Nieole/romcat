@@ -752,6 +752,86 @@ fn 差量预览那几件怪事只说事实与去处的名字_是哪一种交成�
     );
 }
 
+/// 一台记着 `retroarch-exfat` 的子库：那份档案的核实日期是 2026-08-31（`capability/profiles.toml`），
+/// [`romcat_core::capability::STALE_DAYS`] 是 180 天。
+fn 记着一份带核实日期的档案(catalog: &mut Catalog, 目标: &Path) {
+    let mut 那一台 = 子库(目标, None);
+    那一台.capability = Some("retroarch-exfat".to_string());
+    catalog.put_sublibrary(&那一台).expect("子库写得进");
+}
+
+/// 照排计划那条线排一趟，**「今天」由 `Request::today` 给**（不给就是真钟）。
+fn 排计划照今天(catalog: &Catalog, 工作区: &Path, 今天: Option<&str>) -> sync::Prepared {
+    sync::prepare(
+        catalog,
+        工作区,
+        "掌机",
+        &sync::Request {
+            today: 今天,
+            ..sync::Request::default()
+        },
+        &Handle::new(),
+    )
+    .expect("排得出计划")
+}
+
+#[test]
+fn 排计划收一个今天_给了就照它判档案陈旧() {
+    // 票 `core-answers-once/14`（挂单 `Q1354`）：差量预览底下那句「这份能力档案里有 N 条声明超过半年没核实」
+    // 判的是**这一趟的「今天」**，不是排计划那一刻的系统时钟。
+    let dir = 建库();
+    let 工作区 = temp_dir("sync-today-ws");
+    let 目标 = temp_dir("sync-today-card");
+    let mut catalog = 扫成库(dir.path());
+    记着一份带核实日期的档案(&mut catalog, 目标.path());
+
+    // 核实日期之后 200 天（2026-08-31 + 200 天 = 2027-03-19）：超过半年，那一条该在。
+    let 过了半年 = 排计划照今天(&catalog, 工作区.path(), Some("2027-03-19"));
+    let 陈旧 = 过了半年
+        .concerns()
+        .into_iter()
+        .find(|concern| matches!(concern, sync::Concern::StaleClaims(_)));
+    let 陈旧 = 陈旧.unwrap_or_else(|| {
+        panic!(
+            "给了「今天」= 2027-03-19，计划里该有陈旧声明那一条：{:?}",
+            过了半年.concerns()
+        )
+    });
+    assert!(
+        陈旧.to_string().contains("超过半年没核实"),
+        "那一条说的是哪件事：{陈旧}"
+    );
+
+    // 核实日期之后 10 天（2026-09-10）：没超过半年，那一条一条都不该有。
+    let 不到半年 = 排计划照今天(&catalog, 工作区.path(), Some("2026-09-10"));
+    assert!(
+        !不到半年
+            .concerns()
+            .iter()
+            .any(|concern| matches!(concern, sync::Concern::StaleClaims(_))),
+        "给了「今天」= 2026-09-10，档案刚核实过，不该说它陈旧：{:?}",
+        不到半年.concerns()
+    );
+}
+
+#[test]
+fn 排计划不给今天时照真钟判档案陈旧() {
+    // 票 `core-answers-once/14`：不给就是真钟（`capability::today`）——同一份档案、同一个子库，
+    // 计划报出的陈旧条数得与「照系统时钟算一遍」一致。
+    let dir = 建库();
+    let 工作区 = temp_dir("sync-real-today-ws");
+    let 目标 = temp_dir("sync-real-today-card");
+    let mut catalog = 扫成库(dir.path());
+    记着一份带核实日期的档案(&mut catalog, 目标.path());
+
+    let 真钟 = 排计划照今天(&catalog, 工作区.path(), None);
+    let 该有几条 = romcat_core::capability::Roster::builtin()
+        .find("retroarch-exfat")
+        .expect("内置名册里有这份档案")
+        .stale_claims(&romcat_core::capability::today());
+    assert_eq!(真钟.stale_claims, 该有几条, "不给「今天」时照的是系统时钟");
+}
+
 #[test]
 fn 超出目标容量时给出超出量与裁剪建议_一个都不砍() {
     let dir = 建库();
