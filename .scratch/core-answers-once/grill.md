@@ -183,6 +183,7 @@
 核查（2026-09-23）：crates/core/src/sublibrary.rs:578-588 Trim 仍只有 variant/bytes/cumulative；界面 trim_ui 照印键
 依赖／可并：Q819（同一处 plan 折 trim_suggestions，可一票）、浏览屏「认不出作品显示正题」那一处取法
 （大小 M，来自票 `gui-looks-like-the-design/20`）
+**收于票 `core-answers-once/09`（2026-10-28）：settled。** `sublibrary::Trim` 带上 `title` 与 `platform`：认出作品的取作品名，认不出的取那个变体主文件剥出来的**正题**（`browse::loose_title`，与浏览屏主列表、手动例外那张表同一处剥），取法是 `Catalog::trim_names`（按选择集整份问一次，剥正题要的那份剥离规则由 `sync::prepare` 交进来）。缺的那一格退回**变体的键**，不留空。界面 `trim_ui` 照新字段画（作品名粗体 + `平台 · 键` 弱体），两处文本报告也改印「作品名（平台） · 键」——`--exclude` 要的仍是那一串键。
 
 ### `Q819` — 删减建议的「累计腾出」按计划器记账，作品共用的媒体记在头一个变体名下，「排除到这一项就能放下」可能偏乐观
 
@@ -190,6 +191,7 @@
 核查（2026-09-23）：crates/core/src/sublibrary.rs:657-665 fits_after 文档自认「计划器口径下的估计」；作品级媒体记在头一个变体名下（crates/core/src/sync/media.rs:105 lay_for）
 依赖／可并：Q852（同改 Trim / plan 折建议那段）
 （大小 M，来自票 `gui-looks-like-the-design/20`）
+**收于票 `core-answers-once/09`（2026-10-28）：settled。** 计划器的媒体记账按作品：铺媒体那一刻认出这一份挂在**作品**锚点上，就给 `DesiredFile::work` 记上那部作品；折删减建议时文件按变体记、作品级媒体按作品记（`sublibrary::TrimPool`），这个作品的变体**全被排除**才跟着算进那一条的 `bytes`。于是「累计腾出」是准数，「排除到这一项就能放下」也是——不再有「计划器口径下的估计」那句话。`Trim::bytes` 于是不保证从上往下不增（某一条顺手腾出了共用媒体），排序照变体自己的文件，见挂单 `Q1378`。
 
 ### `Q1101` — `!=` 上认不出的值等于「这一条没起作用」，屏上眼下不说
 

@@ -121,6 +121,7 @@ fn 摆好现场(组合们: &[(String, 组合)]) -> (Desired, Manifest, TargetSta
                 source: path.clone(),
                 source_stamp: 记着,
                 variant: path.clone(),
+                work: None,
                 convert: None,
             });
         }
@@ -326,6 +327,7 @@ fn 补回之后新增几个_开没开补回答的是同一个数_勾上之后等
         source: 记着不补.clone(),
         source_stamp: 戳,
         variant: 记着不补.clone(),
+        work: None,
         convert: None,
     });
     manifest.files.push(ManifestFile {
@@ -409,6 +411,7 @@ fn 命令行的差量预览印得出被修改过的哪一样变了与文件名�
                 mtime_ns: None,
             },
             variant: "库/PSP/最终幻想 纷争012: 前传.iso".to_string(),
+            work: None,
             convert: None,
         }],
         ..Desired::default()
@@ -1005,6 +1008,7 @@ fn 一份(根: &str, 相对路径: &str, bytes: u64) -> DesiredFile {
             mtime_ns: Some(1_700_000_000_000_000_000),
         },
         variant: key,
+        work: None,
         convert: None,
     }
 }
@@ -1448,6 +1452,7 @@ fn 前端在卡上改过的元数据文件同步不写回去_游玩记录与收�
                 mtime_ns: None,
             },
             variant: sync::frontend::NOT_A_VARIANT.to_string(),
+            work: None,
             convert: None,
         }],
         ..Desired::default()
@@ -1498,6 +1503,7 @@ fn 同步不碰卡上pegasus的收藏与游玩时长文件() {
                 mtime_ns: None,
             },
             variant: sync::frontend::NOT_A_VARIANT.to_string(),
+            work: None,
             convert: None,
         }],
         ..Desired::default()
