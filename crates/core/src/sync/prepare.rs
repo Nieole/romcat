@@ -633,6 +633,15 @@ pub fn prepare_selected(
     // 脚印留着（与 `super::desired` 是同一条线，ADR-0024）：给多碟变体折播放列表还要它认好的各张碟与平台。
     let (footprint, platform_manifest) = gather(catalog, workspace, selected)?;
     let mut desired = footprint.desired(&profile);
+    // 删减建议那几行**屏上叫它什么、什么平台**在这里补（[`Catalog::trim_names`]）：认不出作品的
+    // 变体要剥**正题**，剥它要工作目录里那份**剥离规则**——而折期望状态那一半是纯的，手上没有规则。
+    // 与刮削、与浏览屏交的是同一份规则。
+    let rules =
+        crate::sources::rules(workspace).map_err(|error| format!("剥离规则读不动：{error}"))?;
+    let picked: Vec<&str> = selected.picked.iter().map(|one| one.key.as_str()).collect();
+    desired.trim_names = catalog
+        .trim_names(&picked, &rules)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
     // **放不进目标存储的在这里就被拦下来**（ADR-0017 补充段）：FAT32 那 4 GiB 的
     // 单文件上限、文件名不收的字符、路径太长。拦在排计划**之前**，于是它们连成为一条
     // 步骤的路径都没有——「传到一半失败」这件事在构造上不会发生。

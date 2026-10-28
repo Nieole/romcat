@@ -80,7 +80,9 @@ use crate::catalog::{Catalog, CatalogError, MemberFile};
 use crate::container::Contents;
 use crate::path;
 use crate::platform::Manifest as PlatformManifest;
-use crate::sublibrary::{Selected, Sublibrary, Trim, over_capacity, trim_suggestions};
+use crate::sublibrary::{
+    Selected, Sublibrary, Trim, TrimName, TrimPool, over_capacity, trim_suggestions,
+};
 
 pub use execute::{Outcome, Placement, Sources};
 pub use observe::{ObserveError, observe};
@@ -191,6 +193,14 @@ pub struct DesiredFile {
     pub source_stamp: Stamp,
     /// 属于哪个**变体**。报告按它把文件数折回用户认得的那个数。
     pub variant: String,
+    /// 这一份是**作品级媒体**吗：挂在**作品**上的封面、截图、视频（[`AnchorKind::Work`](crate::scrape::AnchorKind)），
+    /// 记在这部**作品**名下。
+    ///
+    /// 同一份媒体被这个作品的几个变体共用、目标上只铺一次，于是「排除一个变体腾出多少」
+    /// 要把它算在**作品**那一本账上（[`TrimPool`]，挂单 `Q819`）：
+    /// 这个作品的变体全被排除才算腾出。`variant` 那一格照旧记**头一个**引用到它的变体
+    /// （报告按变体折账）；两格回答的是两个问题。
+    pub work: Option<String>,
     /// 这一份是**转换产物**吗；`None` 就是原样搬（票 21、ADR-0017）。
     ///
     /// 有值时 [`Self::path`] 已经是**产物**的落点（`.7z` 变 `.zip`、容器变裸文件），
@@ -220,6 +230,7 @@ impl DesiredFile {
                 mtime_ns: Some(0),
             },
             variant,
+            work: None,
             // 生成物不转格式：折出来的就是目标要的那一份。
             convert: None,
         }
@@ -325,6 +336,14 @@ pub struct Desired {
     /// （[`Filesystem::max_file_fact`]）。记在筛的那一刻，于是屏上说的就是真拦过这一趟的那一份——
     /// 事后照子库记着的档案名再去名册里查一遍的话，名册改过就会说出另一份的话来。
     pub filesystem: Filesystem,
+    /// 删减建议那几行要的**库侧事实**：变体的键 → 它属于哪部作品、屏上叫什么、什么平台
+    /// （[`TrimName`]）。
+    ///
+    /// **由 `sync::prepare` 补上**（`Catalog::trim_names`）：认不出作品的变体要剥**正题**，
+    /// 剥它要工作目录里那份**剥离规则**——折期望状态这一层是纯的，手上没有规则。
+    /// 手工拼一份 `Desired` 时这一格是空的：那时删减建议那一行退回**变体的键**与没有平台，
+    /// 不是凭空的字。
+    pub trim_names: BTreeMap<String, TrimName>,
 }
 
 impl Desired {
@@ -1503,23 +1522,28 @@ pub fn plan(
         .unwrap_or(0);
     out.over_capacity = over_capacity(sublibrary.capacity, out.after_bytes);
     if out.over_capacity.is_some() {
-        // **裁剪建议落在变体上**（[`Trim`]）：它的去处是一条排除例外，而例外记的是变体的键。
+        // **删减建议落在变体上**（[`Trim`]）：它的去处是一条排除例外，而例外记的是变体的键。
         // 前端元数据挂在一个记号名下（[`frontend::NOT_A_VARIANT`]），它不是变体、排除不掉——
         // 列进建议里，子库屏上那颗「排除」就会记下一条指着「（前端元数据）」的例外。它照旧占着
         // 卡上的地方（算在同步之后那个数里），于是「全排除也还差多少」里有它。
-        let mut by_variant: BTreeMap<&str, u64> = BTreeMap::new();
+        //
+        // **两种口径分开记**（[`TrimPool`]，挂单 `Q819`）：变体自己的文件按变体记；作品级媒体
+        // （挂作品锚点的那几份）按**作品**记，于是这个作品的变体全被排除时才跟着腾出。
+        let mut pool = TrimPool {
+            names: desired.trim_names.clone(),
+            ..TrimPool::default()
+        };
         for file in desired
             .files
             .iter()
             .filter(|file| is_variant(&file.variant))
         {
-            *by_variant.entry(file.variant.as_str()).or_default() += file.bytes;
+            match &file.work {
+                Some(work) => *pool.works.entry(work.clone()).or_default() += file.bytes,
+                None => *pool.variants.entry(file.variant.clone()).or_default() += file.bytes,
+            }
         }
-        out.trim_suggestions = trim_suggestions(
-            by_variant
-                .into_iter()
-                .map(|(variant, bytes)| (variant.to_string(), bytes)),
-        );
+        out.trim_suggestions = trim_suggestions(&pool);
     }
     out
 }
@@ -2029,6 +2053,7 @@ impl Footprint {
                     mtime_ns: member.mtime_ns,
                 },
                 variant: member.variant_key.clone(),
+                work: None,
                 convert: conversion,
             });
             if member.len.is_none() {
@@ -2415,6 +2440,7 @@ mod tests {
             source: path.to_string(),
             source_stamp: 戳(bytes),
             variant: path.to_string(),
+            work: None,
             convert: None,
         }
     }

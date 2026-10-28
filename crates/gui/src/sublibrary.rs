@@ -6469,7 +6469,22 @@ fn trim_ui(ui: &mut egui::Ui, room: &Room) -> Option<String> {
                         None,
                         宽,
                         |ui| {
-                            ui.add(egui::Label::new(等宽(trim.variant.clone())).truncate());
+                            // 稿 `.trim` 那一行：**作品名**在前、平台在后，变体的键当副行。
+                            // 名字与平台都是**核心库说的**（[`romcat_core::sublibrary::Trim`]，
+                            // `Catalog::trim_names` 取的：认出作品的取作品名，认不出的取正题），
+                            // 这儿不凑「这个变体叫什么」（ADR-0024、挂单 `Q852`）。
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Label::new(font::strong(trim.title.clone())));
+                                let 副行 = match trim.platform.as_deref() {
+                                    Some(platform) => format!("{platform} · {}", trim.variant),
+                                    None => trim.variant.clone(),
+                                };
+                                ui.add(egui::Label::new(等宽(副行).weak()).truncate())
+                                    .on_hover_text(format!(
+                                        "{}\n变体的键：{}",
+                                        trim.title, trim.variant
+                                    ));
+                            });
                         },
                         |ui| {
                             ui.label(数目(human_bytes(trim.bytes)));
@@ -6500,8 +6515,8 @@ fn trim_ui(ui: &mut egui::Ui, room: &Room) -> Option<String> {
                         宽,
                         |ui| {
                             ui.colored_label(放下字, "排除到这一项就能放下").on_hover_text(
-                                "照计划器记的账估的：作品共用的媒体记在头一个变体名下，同一作品还有\
-                                 别的变体留着时，排除它未必省下那几份。按下「排除」之后会当场重算。",
+                                "照着上面这张表从上往下排除算出来的准数：作品共用的媒体（封面、截图）\
+                                 要那个作品的变体全都排除才算腾出，不计在头一个变体名下。",
                             );
                         },
                         |_| {},

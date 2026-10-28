@@ -259,6 +259,7 @@ mod tests {
                         mtime_ns: Some(1),
                     },
                     variant: member.variant_key.clone(),
+                    work: None,
                     convert: None,
                 })
                 .collect(),
