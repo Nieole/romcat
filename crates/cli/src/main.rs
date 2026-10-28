@@ -2067,6 +2067,18 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         let _ = stdout.write_all(text.as_bytes());
         let _ = stdout.flush();
     }
+    // **「这一趟没读它」那半句的去处由命令行补**（票 `core-answers-once/13`）：核心里那句理由只说事实，
+    // 界面上没有「读 zst」这一项（挂单 `Q1797`）。认的是核心里那个常量，不是一句话的字（ADR-0024）。
+    if outcome
+        .report
+        .no_evidence
+        .iter()
+        .any(|row| row.reason.contains(identify::NOT_READ_NOTE))
+    {
+        eprintln!(
+            "内部构成没读的那几份：`romcat scan --zst` 读一趟，结论落进中立库，往后的扫描原样沿用。"
+        );
+    }
     eprintln!(
         "识别用了 {:.1} 秒，回盘读了 {}（{} 份内容），另有 {} 份哈希是从中立库直接取回来的。",
         started.elapsed().as_secs_f64(),
@@ -4912,6 +4924,21 @@ fn warn_about(ready: &sync::Prepared, restore: bool) {
         if let Some(hint) = hint {
             eprintln!("{hint}");
         }
+    }
+    // **差量预览里「转不了」那一栏**：核心里那句只说事实（`capability::UnsupportedReason` 的 `Display`），
+    // 命令是命令行自己的去处，照**种类**在这儿补（ADR-0023 修订段、ADR-0024；票 `core-answers-once/13`）。
+    // 界面上这两件事今天都没有落点——库屏的扫描没有「读 zst」这一项（挂单 `Q1797`）、库体检屏也没有
+    // 「透明容器：内部构成」那一节（挂单 `Q1798`）。
+    if ready
+        .plan
+        .unsupported
+        .iter()
+        .any(|row| row.why == romcat_core::capability::UnsupportedReason::ContentsUnknown)
+    {
+        eprintln!(
+            "内部构成读不出来的那几份：`romcat scan --zst` 读一趟，结论落进中立库、往后的扫描原样沿用；\n\
+             卡在哪一类，`romcat report` 说得出。"
+        );
     }
 }
 

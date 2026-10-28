@@ -392,3 +392,45 @@ fn 价目表导得出底稿() {
     assert!(text.contains("claude-opus-5"));
     assert!(text.contains("核实日期"), "价目表必须自带核实日期");
 }
+
+#[test]
+fn 穿不透的容器那句理由只说事实_命令行补上读一趟那条命令() {
+    // 票 `core-answers-once/13`（挂单 `Q1349`）：那几句理由从前带着「（`romcat scan --zst`）」，
+    // 而界面把它们原样画在侧边详情「为什么没定下来」那一行上。**事实留在核心库，命令由命令行补**
+    // （ADR-0023 修订段）；界面上没有「读 zst」这一项（挂单 `Q1797`）。
+    let (library, workspace) = 现场();
+    fs::write(
+        library.path().join("FC/某个合集.zip.zst"),
+        b"not a real zstd frame, and this scan never reads one",
+    )
+    .expect("能写");
+    扫(library.path(), workspace.path());
+
+    let out = 跑(&[
+        "identify",
+        &library.path().to_string_lossy(),
+        "--library",
+        "小库",
+        "--workspace",
+        &workspace.path().to_string_lossy(),
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stdout}{stderr}");
+
+    // 报告里那句事实在（前提：这一份真的落进「无判据」那一栏了）。
+    let 那一行 = stdout
+        .lines()
+        .find(|line| line.contains(romcat_core::identify::NOT_READ_NOTE))
+        .unwrap_or_else(|| panic!("报告里没有那句事实：{stdout}"));
+    // **核心那句只说事实**：那一行里不带终端命令。
+    assert!(
+        !那一行.contains("romcat "),
+        "核心那句里还带着终端命令：{那一行}"
+    );
+    // **命令由命令行补**。
+    assert!(
+        stderr.contains("`romcat scan --zst`"),
+        "命令行没补上读一趟那条命令：{stderr}"
+    );
+}

@@ -28,7 +28,7 @@ use romcat_gui::browse::{self, suspicion};
 use romcat_gui::headless;
 
 mod shared;
-use shared::{点一下, 跑一帧};
+use shared::{悬停在, 点一下, 跑一帧};
 
 const 根: &str = "主库";
 /// 这一对疑似是同一个：两边的名字在中文离线源里指向同一条条目，平台与年份也一致。
@@ -220,6 +220,33 @@ fn 建议卡上的理由逐条列出来_逐字就是核心库交回来的那几�
     assert!(
         屏上.contains(suspicion::NOT_SAME),
         "卡上没有那颗按钮：\n{屏上}"
+    );
+}
+
+#[test]
+fn 不是同一个的悬停里不带终端命令_也不编一个撤回的去处() {
+    // 票 `core-answers-once/13`（挂单 `Q1349`）：那颗按钮的悬停从前写着「要撤回请用命令行
+    // `romcat triage same-work --not-same … --undo`」。而界面上**没有撤回这一条的地方**
+    // （记过的那些只在体检那一趟被读回来、谁也不列出来），所以照 ADR-0023 修订段**只说事实**，
+    // 不编一个去处——缺的那件事挂在挂单 `Q1801` 上。
+    let ctx = headless::context();
+    let mut app = 界面();
+    跑一帧(&ctx, |ui| app.ui(ui));
+    点一下(&ctx, suspicion::FACET, |ui| app.ui(ui));
+    点一下(&ctx, 乙的译名, |ui| app.ui(ui));
+    let 悬停 = 悬停在(&ctx, suspicion::NOT_SAME, |ui| app.ui(ui));
+    assert!(
+        悬停.contains("它不是一条裁决"),
+        "悬停里得说清它不是裁决：\n{悬停}"
+    );
+    // 认的是「命令那一截」：临时目录名里也带着 `romcat-`（票 `core-answers-once/06` 同一条口径）。
+    assert!(
+        !悬停.contains("romcat "),
+        "悬停里不该出现终端命令：\n{悬停}"
+    );
+    assert!(
+        !悬停.contains("裁决记录里撤销"),
+        "界面上没有撤回它的地方，不该指一个不存在的去处：\n{悬停}"
     );
 }
 

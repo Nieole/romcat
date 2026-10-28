@@ -1408,6 +1408,14 @@ fn 读不懂的规则在改子库那条横幅里扔得掉而且别的一条都�
         !卡上.contains("扔掉这条"),
         "子库屏上长出了一颗删规则的按钮——票 11 把规则增删搬去浏览屏那一条破了：{卡上}",
     );
+    // **这一行的悬停里不带终端命令**（票 `core-answers-once/13`）：从前它写着「命令行那条路也还在：
+    // `romcat sublibrary rule <子库> --remove <序号>`」。去处就是上面这一行自己指的那一处，
+    // 再兼一个命令行指路是把「这件事界面做不到」写上了屏（ADR-0023 修订段）。
+    let 悬停 = 悬停在(&ctx, "读不懂的这", |ui| 场.app.ui(ui));
+    assert!(
+        !悬停.contains("romcat "),
+        "读不懂的规则那一行的悬停里画出了终端命令：\n{悬停}"
+    );
 
     // **出路在浏览屏筛选栏顶上那条横幅里**：原文原样摆着，跟着一颗「扔掉这条」。
     // 摆在这儿而不是底下那块面板里，是因为那儿要滚一屏才看得见。
@@ -5593,6 +5601,56 @@ fn 四类异常分栏列出_每一栏写明工具不会做什么() {
     assert_eq!(这一类几条(&场, SurpriseKind::Gone), 1);
     assert_eq!(这一类几条(&场, SurpriseKind::Changed), 1);
     assert!(这一类几条(&场, SurpriseKind::Occupied) >= 1);
+}
+
+#[test]
+fn 目标吃不下而转不了那几行的悬停只说事实_不带终端命令也不编一个去处() {
+    // 票 `core-answers-once/13`（挂单 `Q1349`）：那几行的悬停从前是核心库 `capability::decide` 的原话，
+    // 里面带着「（zst 要 `romcat scan --zst`）」与「`romcat report` 说得出它卡在哪一类」。
+    // 而界面上这两件事今天都没有落点（库屏的扫描没有「读 zst」这一项——挂单 `Q1797`；库体检屏也没有
+    // 「透明容器：内部构成」那一节——挂单 `Q1798`），所以照 ADR-0023 修订段**只说事实**。
+    let ctx = headless::context();
+    let mut 场 = 现场::摆好();
+    场.建子库("掌机", "");
+    场.加规则("掌机", "平台=SFC");
+    // 一份 `.zst`：扫描默认不为它付全量解压的代价（ADR-0014），内部构成没读。
+    // 而 Snes9x 只吃 zip——要转它就转不了，那正是这一栏。
+    写(
+        &场.库.path().join("SFC/幻想传说 汉化版.zip.zst"),
+        b"not a real zstd frame, and this scan never reads one",
+    );
+    场.重扫();
+    换档案(&mut 场, "掌机", "独立模拟器-exfat");
+    // `换档案` 走的是 `save` 那一半，弹层由按下「保存」的那一下关——这里自己关掉，好把卡上看清楚。
+    场.app.sublibrary_and_site().0.leave_target_settings();
+    场.排预览();
+    let (行, 一行写什么) = {
+        let plan = &场.app.sublibrary().prepared().expect("排得出来").plan;
+        let 行 = plan
+            .unsupported
+            .first()
+            .unwrap_or_else(|| panic!("前提：那一份转不了：{:?}", plan.unsupported));
+        (
+            行.why.to_string(),
+            format!("{}｜{}｜要的是 {}", 行.path, human_bytes(行.bytes), 行.want),
+        )
+    };
+    assert!(
+        一行写什么.contains("幻想传说"),
+        "前提：转不了的是那份 .zst：{一行写什么}"
+    );
+    // 差量那一块在折线以下：先把这一屏滚到底，让那一行真落在视口里，再把指针停上去。
+    shared::滚到底(&ctx, |ui| 场.app.ui(ui));
+    let 悬停 = 悬停在(&ctx, &一行写什么, |ui| 场.app.ui(ui));
+    // 悬停里那句话会折行，认它的一截就够（`画出来的字` 把一段的换行照留着）。
+    assert!(
+        悬停.contains("内部构成读不出来"),
+        "悬停里没照核心那句事实说（{行}）：\n{悬停}"
+    );
+    assert!(
+        !悬停.contains("romcat "),
+        "目标吃不下那几行的悬停里画出了终端命令：\n{悬停}"
+    );
 }
 
 /// 把这一台的能力档案换成 `档案`（「目标设置」里挑一份、保存），跟着摊开它。保存会把缓着的差量作废，要重排。
