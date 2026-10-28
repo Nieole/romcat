@@ -6416,6 +6416,11 @@ fn refuse_writing_into_any_library(workspace: &Path, target: &Path) -> Result<Wr
             | romcat_core::workspace::CatalogState::Broken { said } => {
                 format!("{} 打不开：{said}", path::display(&entry.path))
             }
+            // 票 `core-answers-once/07` 把「读不动」从「打不开」里分了出来（ADR-0021 再修订）。
+            // 对这条守卫来说两种一样：这一份的根查不出来，落点于是只放行新建。
+            romcat_core::workspace::CatalogState::Unreadable { said } => {
+                format!("{} 读不动：{said}", path::display(&entry.path))
+            }
             romcat_core::workspace::CatalogState::Openable(_) => {
                 format!("{} 打不开", path::display(&entry.path))
             }
