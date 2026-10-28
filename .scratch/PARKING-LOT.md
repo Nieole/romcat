@@ -3372,7 +3372,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q973` | 手动例外只撤得掉一条，撤不掉「刚加进来的那一整个作品」 | **活** | 迁回票 `gui-looks-like-the-design/22`；无家可归 → `/grill-with-docs`（沉淀库该收、还没收的人手写的东西） |
 | `Q974` | 手动例外弹层里搜作品搜不到「还没识别」的那几份，也没有翻页 | **岔** | 迁回票 `gui-looks-like-the-design/22`；裁：补一句「还有 N 个，去浏览屏筛」加跳转；产出一件活 |
 | `Q975` | 共用弹层没有「标头那一排」与「页脚说明字」两个槽，手动例外那两样只好挪进内容区 | **记** | 迁回票 `gui-looks-like-the-design/22`；已落地：票 gui-looks-like-the-design/22（crate::dialog Dialog::head / footer_note） |
-| `Q976` | 开窗时优先级表读不动**静默退回内置那份**，屏上一个字都不说 | **活** | 迁回票 `gui-looks-like-the-design/22`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q976` | 开窗时优先级表读不动**静默退回内置那份**，屏上一个字都不说 | **活** | 迁回票 `gui-looks-like-the-design/22`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/04` 做掉了（settled）：`App::new` 那处 `if let Ok(priorities)` 不再吞掉，开窗屏最上方一行说「工作目录里那份优先级表读不动：…。眼下用的是内置那一份；去修那一份的权限，或者关掉占着它的程序。」；`sync::prepare::priorities` 的问法从 `Path::exists()` 换成 `try_exists`，「说不出来在不在」按读不动办。测试 `crates/gui/tests/manifest.rs::开窗时优先级表读不动也说出来`（收权限造不出来就如实跳过，`testing::revoke_file` 印那一行） |
 | `Q983` | 算「移除这个根的代价」那一下跑在画帧那条线程上，真库量级上可能卡过一秒 | **活** | 迁回票 `gui-looks-like-the-design/26`；托给票 `queue-followups/09` |
 | `Q984` | 两轴审查挑出的三处形状，本票按住没动（都与别的树在改的文件重叠） | **活** | 迁回票 `gui-looks-like-the-design/26`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/12` 做掉了（settled）：`impact` 并成 `impact(ui, tone, parts)` 一支，`(字, 强调)` 换成具名的 `ImpactPart`；`Entries::of` 答具名的 `EntryKey`，三处当键用的地方跟着换 |
 | `Q985` | 移除一个根之后，子库屏缓着的那几台是整批作废的，没按「这一台真受影响吗」挑 | **记** | 迁回票 `gui-looks-like-the-design/26`；记下，无事可做 |
@@ -3399,7 +3399,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q1028` | 排差量那趟活没有稿上那句副标题「只读取库和设备上的目录，不写入文件」 | **活** | 迁回票 `gui-looks-like-the-design/24`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
 | `Q1029` | 勾一下「补回」会让台上那一趟白跑；「放不进目标」那一行的容量把撞车的几份各算一遍 | **活** | 迁回票 `gui-looks-like-the-design/24`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘） |
 | `Q1030` | 「目录与内容平台不符」在核心库有**两处**判据，而稿上打头的 GB↔GBC 两组今天一条都出不来 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
-| `Q1031` | 平台清单：界面一律用内置那一份，命令行走工作目录那条链 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q1031` | 平台清单：界面一律用内置那一份，命令行走工作目录那条链 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/04` 做掉了（settled）：那条链在核心库立成一处 `Manifest::locate(given, workspace)`（`platform::Choice`：眼下用哪一份、从哪儿来、读不动时的原因），命令行只把 `--manifest` 交进去、读不动照旧停下（`Choice::strict`），`sources::manifest` 收成它的壳；界面七处（库体检、平台纠正、重新成型、扫描、筛选器、成型存疑、平台全名与合并向导组头）改读开窗那一刻挑好的那一份。测试 `crates/core/tests/platform_lookup.rs` 四条、`crates/gui/tests/manifest.rs` 三条 |
 | `Q1032` | 「平台纠正」屏上叫「记为裁决」，词表里它是**人工纠正** | **记** | 迁回票 `gui-looks-like-the-design/28`；已落地：票 gui-looks-like-the-design/28（health.rs「记为人工纠正」＋反向断言） |
 | `Q1033` | 导出与同步还不读平台纠正：照旧按目录放置 | **记** | 迁回票 `gui-looks-like-the-design/28`；**settled**：票 `core-answers-once/03` 在核心库立了**落点平台**（有平台纠正听纠正，否则照目录声明，`identify::platform_of` 一处判、落库成 `identification.placement`，导出与同步都读它），卡上那一级目录跟着走、旧落点由下一趟同步照清单清掉（ADR-0015）；库体检那一句改成实话 |
 | `Q1034` | 平台标的字号与字距与设计稿差半号，全仓没有「字距」这一维 | **记** | 迁回票 `gui-looks-like-the-design/28`；记下，无事可做 |
@@ -3486,3 +3486,6 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q1183` | 「加入子库」那一层有三处没照稿画 | **活** | 迁回票 `gui-looks-like-the-design/23`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
 | `Q1184` | `replace_rules` 把名字抹成 `NULL`，「改选择」那条回程会连别的规则一起清掉 | **活** | 迁回票 `gui-looks-like-the-design/23`；无家可归 → `/grill-with-docs`（缺陷：先修，别等整摊） |
 | `Q1185` | 「只加入勾选的」在「全选筛选结果」那一档按得动，稿上是禁的 | **活** | 迁回票 `gui-looks-like-the-design/23`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
+| `Q1327` | 工作目录里那几份配置的「在不在」还是 `Path::exists()`：`sources::rules`（`name-rules.toml`）、`sources::load_registry`（`sources.toml`）、`capability::Roster::in_workspace` | **活** | 与 `Q1031` / `Q976` 同一个病：目录读不动时 `exists()` 报「不在」，那份配置就静静换成了内置那份，屏上（或命令行）一个字都没有。核心库那一处已经改成 `try_exists`（`Manifest::locate`、`sync::prepare::priorities`），这三处照同一形状改；谁来裁：拿主意的人 |
+| `Q1328` | 工作目录里那份平台清单与优先级表只在**开窗那一刻**读一次，外面改了要重开窗才生效 | **记** | 界面都是开窗时挑好、交给各屏（`App::new`），屏上没有重读的路。优先级那一份从界面上保存时有回程（`set_priorities`），手工改文件就没有；那句「读不动」的提示同理，修好之后不会自己消失。记下，无事可做（重开窗不贵）；谁来裁：拿主意的人 |
+| `Q1329` | 合成数据那三处（`crates/gui/src/demo.rs`）用 `Manifest::default()` 校验造出来的变体 | **记** | 它不是「界面读上屏那张表」——演示库压根不读工作目录里那份清单，`App::new` 挑的那一份只管屏上。留给照着 grep「界面不许取内置清单」复核的人一句解释：这三处是有意留的；谁来裁：拿主意的人 |

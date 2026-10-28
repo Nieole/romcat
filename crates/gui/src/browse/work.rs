@@ -678,7 +678,7 @@ impl Screen {
         page.platform_names = self.work.as_ref().map_or_else(String::new, |work| {
             work.platforms
                 .iter()
-                .map(|code| platform_full_name(code))
+                .map(|code| platform_full_name(&self.manifest, code))
                 .collect::<Vec<_>>()
                 .join(" / ")
         });
@@ -686,7 +686,7 @@ impl Screen {
         // 跟前那一小块捞出来问一遍（`Catalog::shaping_doubts_near`）。
         let 存疑 = {
             let 借: Vec<&str> = keys.iter().map(String::as_str).collect();
-            match catalog.shaping_doubts_near(&借, &romcat_core::platform::Manifest::builtin()) {
+            match catalog.shaping_doubts_near(&借, &self.manifest) {
                 Ok(doubts) => doubts,
                 Err(error) => {
                     self.error = Some(format!("中立库读不动：{error}"));
@@ -3736,14 +3736,14 @@ fn head_of<'a>(work: &WorkDetail, details: &'a [VariantDetail]) -> Option<&'a st
 /// 一个平台的**全名**（核心库平台表 `Manifest::full_name`）；表里没写全名的退回代号。头上「平台」那一格、合并向导第二步的组头
 /// 都问这一处。内置那张表里三十四个平台都写了带厂名的英文全名（拿主意的人 2026-10-02 裁，票
 /// `gui-draws-the-rest-of-the-design/04`），退回代号只剩读一份没写全名的平台表时才走得到。
-pub(super) fn platform_full_name(code: &str) -> &str {
-    // **内置清单只解一次**：`Manifest::builtin()` 要解一遍 TOML，合并向导每帧都问。
-    static 平台表: std::sync::OnceLock<romcat_core::platform::Manifest> =
-        std::sync::OnceLock::new();
-    平台表
-        .get_or_init(romcat_core::platform::Manifest::builtin)
-        .full_name(code)
-        .unwrap_or(code)
+///
+/// `manifest` 是**开窗那一刻挑好的那一份**（挂单 `Q1031`）：工作目录里自己放了一份平台表，
+/// 屏上印的就是那一份里的全名——与命令行看见的是同一张表。
+pub(super) fn platform_full_name<'a>(
+    manifest: &'a romcat_core::platform::Manifest,
+    code: &'a str,
+) -> &'a str {
+    manifest.full_name(code).unwrap_or(code)
 }
 
 /// 平台色块标签（设计稿 `.hplat`）：平台色底、小号加粗的平台代号。字取令牌 `[color.platform-badge]`——两套主题都是白字，

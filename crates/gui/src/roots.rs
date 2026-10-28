@@ -280,6 +280,11 @@ pub struct Screen {
     /// 工作目录：加根时拿它守住「中立库不许被圈进主库」（ADR-0004），
     /// 数据源也住在它下面。
     workspace: PathBuf,
+    /// **平台清单**：开窗那一刻挑好的那一份（`Manifest::locate`，ADR-0024）。
+    ///
+    /// 扫描、库体检、重新成型三处读的是它——不是界面自己建一份内置的（挂单 `Q1031`）。
+    /// 挑选与「读不动怎么办」在 [`crate::app::App::new`] 那一处，这一屏只管用。
+    manifest: romcat_core::platform::Manifest,
     roots: Vec<RootRow>,
     sources: Vec<SourceStatus>,
     /// 第三段：**工序**——这个库还差哪几道步骤。
@@ -316,20 +321,16 @@ pub enum Job {
     Fetch(Source),
 }
 
-impl Default for Screen {
-    fn default() -> Self {
-        Self::new(PathBuf::new())
-    }
-}
-
 impl Screen {
-    /// 开一个。`workspace` 是**工作目录**。
+    /// 开一个。`workspace` 是**工作目录**，`manifest` 是开窗那一刻挑好的**平台清单**
+    /// （[`crate::app::App::new`] 挑的，这一屏不另挑一份）。
     #[must_use]
-    pub fn new(workspace: PathBuf) -> Self {
+    pub fn new(workspace: PathBuf, manifest: romcat_core::platform::Manifest) -> Self {
         Self {
             stages: crate::stages::Section::new(workspace.clone()),
             health: crate::health::Section::default(),
             workspace,
+            manifest,
             roots: Vec::new(),
             sources: Vec::new(),
             running: Vec::new(),
@@ -618,6 +619,7 @@ impl Screen {
             return;
         }
         let workspace = self.workspace.clone();
+        let manifest = self.manifest.clone();
         let library_fs = Arc::clone(&self.library_fs);
         let owned = name.to_string();
         // 名字底下那一行副标题是扫的那个根在盘上的路径（设计稿 `TASKS.scan` 的 `sub` 是 `S.rootPath`）。
@@ -647,6 +649,9 @@ impl Screen {
             let mut catalog = Catalog::open(&file).map_err(|error| error.to_string())?;
             let mut options = ScanOptions::named(&path, &owned);
             options.workspace = Some(workspace);
+            // **平台清单是开窗那一刻挑好的那一份**（ADR-0024，挂单 `Q1031`）：扫描、库体检、
+            // 重新成型三处照同一张表认平台，屏上那份报告与命令行出的那一份才对得上。
+            options.manifest = manifest;
             options.shaping_overrides = shaping_overrides;
             // 界面上不给并发档：开扫前探一探介质自己定，与命令行默认那条路一样
             // （挂账 D9）。
@@ -1009,7 +1014,7 @@ impl Screen {
     fn health_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         let 扫过 = self.scanned();
         // 开窗后头一次进库屏、有扫过的根却还没有报告：自动排一趟（`health::Section::auto_check`，岔路口 8）。
-        self.health.auto_check(site, tasks, 扫过);
+        self.health.auto_check(site, tasks, 扫过, &self.manifest);
         // 疑似同一作品那一格照识别那一道做没做完换话（拿主意的人 2026-09-15 答岔路口 9），判据是工序那一行自己的（`StageRow::settled`）。
         let 识别过 = self
             .stages
@@ -1036,7 +1041,7 @@ impl Screen {
         };
         // 画八格之前先把**平台纠正**那一份合出来：目录与内容平台不符那一格数的是「还没处理的那几组」
         // （票 `gui-looks-like-the-design/28`），那个数由核心库交（`PlatformCorrections::remaining`）。
-        self.health.ensure_corrections(site);
+        self.health.ensure_corrections(site, &self.manifest);
         // 「N 处待生效」那一条与成型存疑明细里那几枚「待生效」照沉淀库里的待生效记录画（票 `verdict-store-and-sync/12`）。
         self.health.ensure_pending(site);
         let health = &mut self.health;
@@ -1052,12 +1057,12 @@ impl Screen {
         // 点了一格就开的那一层明细弹层（`health::Section::dialog_ui`）：每一帧都画，面板收着也画。
         self.health.dialog_ui(ui.ctx(), site);
         // **平台纠正**那一层同理（票 `gui-looks-like-the-design/28`）：目录与内容平台不符那一格点进去开的是它。
-        self.health.platfix_ui(ui.ctx(), site);
+        self.health.platfix_ui(ui.ctx(), site, &self.manifest);
         // **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：成型存疑明细里一行一颗「处理…」开的是它；
         // 「N 处待生效」那一条上的「重新成型」也在这一下排上台（票 `verdict-store-and-sync/12`）。
-        self.health.fixer_ui(ui.ctx(), site, tasks);
+        self.health.fixer_ui(ui.ctx(), site, tasks, &self.manifest);
         if 要体检 {
-            self.health.check(site, tasks);
+            self.health.check(site, tasks, &self.manifest);
         }
     }
 
@@ -1069,13 +1074,13 @@ impl Screen {
 
     /// 排一趟体检上任务台：「重新体检」按的就是它（[`crate::health::Section::check`]）。一次只跑一趟。
     pub fn check_health(&mut self, site: &Site, tasks: &mut Tasks) {
-        self.health.check(site, tasks);
+        self.health.check(site, tasks, &self.manifest);
     }
 
     /// 排一趟**重新成型**上任务台（[`crate::health::Section::reshape`]）：作品详情那一面「N 处待生效」那一条上
     /// 按了「重新成型」，窗口转到这儿来排——**全窗口只有一处排它**，报告才不会两份各说各的。
     pub fn reshape(&mut self, site: &mut Site, tasks: &mut Tasks) {
-        self.health.reshape(site, tasks);
+        self.health.reshape(site, tasks, &self.manifest);
     }
 
     /// 别处（作品详情那一面）刚落过一笔成型纠正：库体检那份缓着的待生效扔掉，下一帧重读。

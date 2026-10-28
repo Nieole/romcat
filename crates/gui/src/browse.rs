@@ -541,6 +541,13 @@ pub struct Screen {
     /// 读**工作目录里那份**（`sources::rules`，刮削与命令行同一条查法）：屏上那一行写的
     /// 正题，就是刮削撞中文离线源时剥出来的那一个。
     rules: Rules,
+    /// **平台清单**：开窗那一刻挑好的那一份（`Manifest::locate`，ADR-0024）。
+    ///
+    /// 筛选器里「这个平台名认不认得」、作品详情头上那几格平台全名都问它。
+    /// **它不是内置那一份**：工作目录里自己放了一份时就是那一份——命令行与界面看见的
+    /// 是同一张表（挂单 `Q1031`）。挑选与「读不动怎么办」全在 [`crate::app::App::new`] 那一处，
+    /// 这一屏只管用。
+    manifest: romcat_core::platform::Manifest,
     /// **媒体池**：查「这张图在不在」用它。池子整个不在位时是 `None`——
     /// 那时面板如实说「没查池子」，而不是报一句「一张都没有」。
     pool: Option<MediaPool>,
@@ -695,9 +702,10 @@ impl Screen {
     /// 开一个空屏幕。
     ///
     /// `workspace` 是**工作目录**：刮削面板要它找媒体池、优先级表、中文离线索引与
-    /// 沉淀库（`scrape::Panel`）。
+    /// 沉淀库（`scrape::Panel`）。`manifest` 是开窗那一刻挑好的**平台清单**
+    /// （[`crate::app::App::new`] 挑的，这里不另挑一份）。
     #[must_use]
-    pub fn new(workspace: std::path::PathBuf) -> Self {
+    pub fn new(workspace: std::path::PathBuf, manifest: romcat_core::platform::Manifest) -> Self {
         // **规则文件写坏了也开得了屏**：那几行先照内置那份剥，并把原因摆在屏上——
         // 屏上的正题与刮削剥出来的不是同一个，这件事得让人知道。
         let (rules, error) = match romcat_core::sources::rules(&workspace) {
@@ -725,6 +733,7 @@ impl Screen {
             workspace: workspace.clone(),
             priority: crate::priority::Editor::new(workspace.clone()),
             scrape: scrape::Panel::new(workspace),
+            manifest,
             fixer: crate::shaping::Fixer::default(),
             fixed: false,
             reshape_asked: false,
@@ -1992,6 +2001,7 @@ impl Screen {
                     &query,
                     &self.rules,
                     &self.priorities,
+                    &self.manifest,
                     &anchors,
                 ));
             }
@@ -3589,6 +3599,7 @@ impl Screen {
             &self.query,
             &self.rules,
             &self.priorities,
+            &self.manifest,
             rows,
         ));
     }
@@ -4743,14 +4754,10 @@ impl Screen {
         let tokens = Tokens::builtin();
         let 留白 = tokens.space.rule_box_padding;
         // **判「这条子句筛不筛得出东西」要的那点上下文**（票 `gui-looks-like-the-design/12`）：
-        // 平台认不认得出由**平台清单**说了算（界面一律用内置那一份，挂单 `Q1031`）；
-        // 库里有哪几个合集由中立库那份投影说了算（分面那一趟已经问回来了，不另查一遍）。
+        // 平台认不认得由**平台清单**说了算——那是开窗那一刻挑好的那一份（挂单 `Q1031`：
+        // 从前这里是界面自己建一份内置的）；库里有哪几个合集由中立库那份投影说了算
+        // （分面那一趟已经问回来了，不另查一遍）。
         // **判在核心库**（`sublibrary::thin`），这一层只把这两样交出去。
-        // **内置清单只建一次**：`Manifest::builtin()` 要解一遍 TOML、编一遍那批模式，
-        // 而这儿是**画帧线**——每帧建一份的话，光摆着不动也在烧 CPU。
-        static 平台清单: std::sync::OnceLock<romcat_core::platform::Manifest> =
-            std::sync::OnceLock::new();
-        let platforms = 平台清单.get_or_init(romcat_core::platform::Manifest::builtin);
         let collections: Vec<String> = self
             .facets
             .collections
@@ -4758,7 +4765,7 @@ impl Screen {
             .map(|facet| facet.value.clone())
             .collect();
         let known = romcat_core::sublibrary::KnownValues {
-            platforms,
+            platforms: &self.manifest,
             collections: &collections,
         };
         egui::Frame::new()

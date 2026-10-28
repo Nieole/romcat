@@ -401,18 +401,16 @@ fn load_registry(workspace: &Path) -> Result<Registry, String> {
 /// **平台清单**：工作目录里那份优先，没有才用内置的。
 ///
 /// 它是公开的，因为**这条查法不能有第二份**：命令行按 `--manifest`、没给就查工作目录，
-/// 界面上没有那个开关、只查工作目录（`romcat_gui::scrape`）。两处各写一遍的话，
-/// 用户改过的那份平台清单会在一条路上生效、另一条路上不生效——而它决定平台名怎么折，
-/// 折出来的名字进的是变体那一行。
+/// 界面上没有那个开关、只查工作目录。两处各写一遍的话，用户改过的那份平台清单会在一条路上
+/// 生效、另一条路上不生效——而它决定平台名怎么折，折出来的名字进的是变体那一行。
+///
+/// 查法本体在 [`Manifest::locate`]（ADR-0024）：这一层只是**没处摆那句话**的那几个调用方
+/// 的入口——工作目录里那份读不动时停下，不静默退回内置（ADR-0021）。
 ///
 /// # Errors
 /// 那份文件读不出来或者写坏了时返回一句给人看的话。
 pub fn manifest(workspace: &Path) -> Result<Manifest, String> {
-    let candidate = workspace.join("platforms.toml");
-    if !candidate.exists() {
-        return Ok(Manifest::builtin());
-    }
-    Manifest::load(&candidate).map_err(|error| error.to_string())
+    Manifest::locate(None, workspace).strict()
 }
 
 /// **剥离规则**：同上，理由也同上。
