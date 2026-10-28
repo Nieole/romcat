@@ -307,8 +307,8 @@ pub struct Unsupported {
     pub bytes: u64,
     /// 目标要的是什么形态。
     pub want: String,
-    /// 为什么转不了。
-    pub why: String,
+    /// 为什么转不了——**是哪一种**（`Display` 只说事实，命令由命令行照种类补、屏上那一处由界面补）。
+    pub why: crate::capability::UnsupportedReason,
 }
 
 /// 一个子库的**期望状态**：目标上该有的全部文件。

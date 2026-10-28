@@ -1487,10 +1487,7 @@ fn collect(
                     }
                     None => {
                         visible.saw_inside = false;
-                        format!(
-                            "{} 穿不透，而这一趟没为它付全量解压的代价（`romcat scan --zst`）",
-                            kind.label()
-                        )
+                        format!("{} 穿不透，而这一趟{NOT_READ_NOTE}", kind.label())
                     }
                 };
                 units.push(blocked_unit(key, "", reason, true));
@@ -2009,6 +2006,15 @@ pub const VERDICT_DAT: &str = "本机裁决";
 /// 它落在 `reason` 而不是另立一个状态，是因为**结论本身没有变**——它照旧是未命中或
 /// 无判据，变的只是「为什么还停在这儿」，而那正是这一列装的东西。
 pub const VERDICT_UNKNOWN_REASON: &str = "裁决：都不对，而且认不出是什么";
+
+/// **「这一趟没为它付全量解压的代价」**——`zst` 默认不读（ADR-0014）那句理由里的那一截。
+///
+/// 它是理由里的一段，也是命令行认得出「该补哪一条命令」的那一处：两个壳问的是**同一个常量**，
+/// 谁也不去认一句话的字（ADR-0024）。从前这一截后面还缀着「（`romcat scan --zst`）」，而那句话
+/// 被界面原样画在侧边详情「为什么没定下来」那一行上（票 `core-answers-once/13`）。
+///
+/// 界面上**没有落点**：库屏的扫描没有「读 zst」这一项（挂单 `Q1797`）；命令由命令行补。
+pub const NOT_READ_NOTE: &str = "没为它付全量解压的代价";
 
 /// 一个变体拿得到的**内容判据**：第一命中层那一套（含头的 CRC-32 加大小）。
 ///

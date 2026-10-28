@@ -2351,7 +2351,16 @@ fn 有一张碟转不了_差量预览里那张碟照转不了报出来_播放列
         那一行.variant, "库/ps/某游戏/游戏 (Disc 1).zip",
         "挂在那个多碟变体名下"
     );
-    assert!(那一行.why.contains("2 个内容条目"), "{}", 那一行.why);
+    assert!(
+        那一行.why.to_string().contains("2 个内容条目"),
+        "{}",
+        那一行.why
+    );
+    assert!(
+        !那一行.why.to_string().contains("romcat "),
+        "转不了的理由只说事实，命令由命令行补：{}",
+        那一行.why
+    );
     let 预览 = prepared.plan.render_text();
     assert!(预览.contains("到了目标上打不开"), "{预览}");
     assert!(预览.contains("ps/某游戏/游戏 (Disc 2).zip"), "{预览}");

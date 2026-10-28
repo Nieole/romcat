@@ -2488,7 +2488,18 @@ fn 屏头添加根_取消或弹不出选择窗口时屏上说去哪儿办() {
     let 屏上 = 库屏上的字(&ctx, &mut 现场.app);
     assert!(
         屏上.contains(romcat_gui::roots::PICK_ROOT_NONE),
-        "没选到目录，屏上却没说去哪儿办：\n{屏上}"
+        "没选到目录，屏上却没说：\n{屏上}"
+    );
+    // **这句话里不带终端命令**（票 `core-answers-once/13`、ADR-0023 修订段）：从前它教人去终端敲
+    // `romcat scan`。界面上没有第二个加根的入口，所以只说事实——不编一个去处。
+    assert!(
+        !romcat_gui::roots::PICK_ROOT_NONE.contains("romcat"),
+        "屏上这句还写着终端命令：{}",
+        romcat_gui::roots::PICK_ROOT_NONE
+    );
+    assert!(
+        !屏上.contains("romcat scan"),
+        "库屏上画出了终端命令：\n{屏上}"
     );
     assert!(
         现场.app.roots().roots().is_empty(),

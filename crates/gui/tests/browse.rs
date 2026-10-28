@@ -3163,6 +3163,44 @@ fn 浏览屏把还没识别与没有候选印成两个词() {
     // egui 一个字都不画。那一句的两个分岔由核心库那条测试钉着
     // （`WorkVariant::no_candidate_hint`，`crates/core/tests/works.rs`）——
     // 判据收在核心库里的好处正是这个：它验得了，而这一层只是印。
+
+    // **那一句里不带终端命令**（票 `core-answers-once/13`、ADR-0023 修订段）：侧边详情那张卡
+    // 底下画的正是核心库 `no_candidate_hint` 那一句，从前它写着「先跑一趟 `romcat identify`」。
+    let 没跑过的那一句 = {
+        let (browse, site) = app.browse_and_site();
+        anchors
+            .iter()
+            .filter_map(|anchor| {
+                site.catalog
+                    .work_detail(browse.query(), anchor)
+                    .ok()
+                    .flatten()
+            })
+            .flat_map(|detail| detail.variants)
+            .find(|variant| {
+                variant.confidence_label() == romcat_core::catalog::identify::NOT_RUN_LABEL
+            })
+            .expect("三档里有一档是还没识别")
+            .no_candidate_hint()
+            .expect("还没识别有话说")
+            .to_string()
+    };
+    assert!(
+        各栏.iter().any(|栏| 栏.有这一段(&没跑过的那一句)),
+        "还没识别那张卡上没照核心库那句说（{没跑过的那一句}）：\n{}",
+        各栏
+            .iter()
+            .map(一栏::全文)
+            .collect::<Vec<_>>()
+            .join("\n——\n"),
+    );
+    for 栏 in &各栏 {
+        assert!(
+            !栏.全文().contains("romcat "),
+            "侧边详情里画出了终端命令：\n{}",
+            栏.全文()
+        );
+    }
 }
 
 #[test]

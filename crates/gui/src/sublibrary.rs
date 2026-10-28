@@ -2871,15 +2871,15 @@ impl Screen {
             // **处置它的那条路在浏览屏上**（票 `gui-redesign/14`，挂单 `Q86`）：筛选器摆的是一棵
             // 读得懂的树，一条读不回来的原文在那儿没有位置，所以它跟着「从浏览添加…」或「✎」那一趟整条带过去，
             // 摆在**筛选栏顶上**那条横幅里逐条扔。
+            //
+            // **悬停里那句终端命令删了**（票 `core-answers-once/13`）：它从前写着「命令行那条路也还在：
+            // `romcat sublibrary rule <子库> --remove <序号>`」。去处就在这一行自己指的那一处，
+            // 再兼一个命令行指路是把「这件事界面做不到」写上了屏（ADR-0023 修订段）。
             ui.weak(format!(
                 "读不懂的这 {} 条要扔掉：按上面「从浏览添加…」跳去浏览屏，\
                  筛选栏顶上那条横幅里逐条扔得掉。改对了再来一条，走那儿的筛选器。",
                 broken.len(),
-            ))
-            .on_hover_text(
-                "命令行那条路也还在：`romcat sublibrary rule <子库> --remove <序号>`，\
-                 序号就是上面印着的那个。",
-            );
+            ));
         }
         let Some(report) = report else {
             return 按了;
@@ -3792,13 +3792,17 @@ fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
             ),
         );
         for row in plan.unsupported.iter().take(TOP_NOTES) {
+            // 悬停里那句只说**事实**（`capability::UnsupportedReason` 的 `Display`）：从前它带着
+            // 「（`romcat scan --zst`）」与「`romcat report` 说得出它卡在哪一类」。那两件事
+            // 界面上今天都没有落点（库屏扫描没有「读 zst」——挂单 `Q1797`；库体检屏没有
+            // 「透明容器：内部构成」那一节——挂单 `Q1798`），所以**不编一个去处**。
             ui.label(format!(
                 "{}｜{}｜要的是 {}",
                 row.path,
                 human_bytes(row.bytes),
                 row.want
             ))
-            .on_hover_text(&row.why);
+            .on_hover_text(row.why.to_string());
         }
         if plan.unsupported.len() > TOP_NOTES {
             ui.weak(format!(

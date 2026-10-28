@@ -633,3 +633,31 @@ fn 模型说不出的那些一条候选都不产出() {
     // **说不出也是一条答复**：它落了库，下一趟不会为同一个问题再付一次钱。
     assert_eq!(现场.catalog.model_answers().expect("读得到").len(), 3);
 }
+
+// ─────────────────── 无判据那句理由只说事实（票 `core-answers-once/13`）
+//
+// 从前那一句是「zst 穿不透，而这一趟没为它付全量解压的代价（`romcat scan --zst`）」，
+/// 而它被界面原样画在侧边详情「为什么没定下来」那一行上——屏上就是一句终端命令。
+// 现在：事实留在核心里，命令由命令行照 `identify::NOT_READ_NOTE` 补。
+
+#[test]
+fn 没读_zst_那句理由只说事实_不带命令行命令() {
+    // 扩展名是 `.zst`：扫描默认不为它付全量解压的代价（ADR-0014），于是内部构成没读，
+    // 这一个变体拿不到判据——那正是这一句要说的。
+    let mut 现场 = 摆现场(&[(
+        "库/gba/某作.gba.zst",
+        b"not a real zstd frame, and this scan never reads one".to_vec(),
+    )]);
+    跑一趟(&mut 现场, None, 宽松上限());
+    let (state, reason) = 结论(&现场, "库/gba/某作.gba.zst");
+    assert_eq!(state, State::NoEvidence, "内部构成没读，拿不到判据");
+    let reason = reason.expect("无判据那一档有一句理由");
+    assert!(
+        reason.contains(romcat_core::identify::NOT_READ_NOTE),
+        "理由里该说清为什么没读：{reason}"
+    );
+    assert!(
+        !reason.contains("romcat "),
+        "核心这句理由里不该有终端命令（票 `core-answers-once/13`）：{reason}"
+    );
+}
