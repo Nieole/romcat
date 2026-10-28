@@ -152,6 +152,9 @@ pub struct Request<'a> {
     pub restore_missing: bool,
     /// 另指一份字段级优先级表。不给就用工作目录里那份，再没有就用内置的。
     pub priorities: Option<&'a Path>,
+    /// 这一趟的**「今天」**（`YYYY-MM-DD`）：能力档案那些声明照它判「超过半年没核实」
+    /// （[`Prepared::stale_claims`]）。不给就照系统时钟（[`today`]）——命令行那一侧没有人钉它，界面与截图测试钉得住。
+    pub today: Option<&'a str>,
 }
 
 /// 排好的一份计划，连折它时那几件要说出口的怪事。
@@ -714,6 +717,9 @@ pub fn prepare_selected(
             .adds
             .files;
     }
+    // **「今天」由这一趟的请求定**（票 `core-answers-once/14`，挂单 `Q1354`）：不给就照系统时钟。
+    // 屏幕与截图测试钉得住它，那句「超过半年没核实」才不会在某一天凭空冒出来、把基线撞红。
+    let today = request.today.map_or_else(today, ToString::to_string);
     Ok(Prepared {
         sublibrary,
         root,
@@ -733,7 +739,7 @@ pub fn prepare_selected(
         entries: laid.entries,
         left_off: on_card.left_off,
         missing_capability,
-        stale_claims: profile.stale_claims(&today()),
+        stale_claims: profile.stale_claims(&today),
     })
 }
 

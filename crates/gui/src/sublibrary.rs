@@ -605,8 +605,9 @@ pub struct Screen {
     rules: Option<Rules>,
     /// 剥离规则读不动时那句话。
     rules_error: Option<String>,
-    /// 「今天」：平台表判「陈旧」用（`Claim::is_stale`）。`None` 是照系统时钟（`capability::today`）；截图测试钉死它
-    /// （[`Self::set_today`]），截图里才没有当前日期。
+    /// 「今天」：平台表判「陈旧」（`Claim::is_stale`）与排计划判「这份能力档案超过半年没核实」
+    /// （`Request::today`，票 `core-answers-once/14`）都用它。`None` 是照系统时钟（`capability::today`）；
+    /// 截图测试钉死它（[`Self::set_today`]），截图里才没有当前日期、也不会到了某一天凭空多出一行。
     today: Option<String>,
     /// 这一台选择集在眼下挑的档案（叠上覆盖）下**放不下哪几份**：档案名、覆盖、结果（`Footprint::too_big`）。
     /// 纯算，但与选择集一样大——只在档案或覆盖变了时重算。
@@ -1374,21 +1375,29 @@ impl Screen {
         // **「补回」是排它那一刻定下的**：那份计划此后怎么被看都改不了它，屏上那个勾
         // 改一下就得重排一趟（[`Self::set_restore_missing`]）。
         let restore_missing = self.restore_missing;
+        // **「今天」也跟着这一趟走**（票 `core-answers-once/14`，挂单 `Q1354`）：计划里「这份能力档案超过半年没核实」
+        // 那一条判的就是它。与平台表那一格是同一个「今天」（[`Self::set_today`]）：钉住一处，两处都钉住。
+        let today = self.today.clone();
         self.previewing = Some(match site.catalog.read_only() {
-            Ok(reader) => tasks.queue(caption, move |task| {
-                sync::prepare(
-                    &reader,
-                    &workspace,
-                    &name,
-                    &sync::Request {
-                        restore_missing,
-                        ..sync::Request::default()
-                    },
-                    task,
-                )
-                .map(|prepared| Product::Preview(Box::new(prepared)))
-                .map_err(Cutoff::from)
-            }),
+            Ok(reader) => {
+                // 这一趟排到任务台上、整份带走，于是另备一份给那个 `move`。
+                let today = today.clone();
+                tasks.queue(caption, move |task| {
+                    sync::prepare(
+                        &reader,
+                        &workspace,
+                        &name,
+                        &sync::Request {
+                            restore_missing,
+                            today: today.as_deref(),
+                            ..sync::Request::default()
+                        },
+                        task,
+                    )
+                    .map(|prepared| Product::Preview(Box::new(prepared)))
+                    .map_err(Cutoff::from)
+                })
+            }
             // **只活在内存里的库分不出第二份连接**（合成数据走这条），那是意料之中的：
             // 这一趟就地跑完，几毫秒的事。
             Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(caption, |task| {
@@ -1398,6 +1407,7 @@ impl Screen {
                     &name,
                     &sync::Request {
                         restore_missing,
+                        today: today.as_deref(),
                         ..sync::Request::default()
                     },
                     task,
@@ -1990,7 +2000,8 @@ impl Screen {
         }
     }
 
-    /// 钉死平台表判「陈旧」用的「今天」（`YYYY-MM-DD`）：截图测试钉死它，截图里才没有当前日期。
+    /// 钉死「今天」（`YYYY-MM-DD`）：平台表判「陈旧」与排计划判「超过半年没核实」都照它（票 `core-answers-once/14`）。
+    /// 截图测试钉死它，截图里才没有当前日期，也不会到了某一天凭空多出一行。
     pub fn set_today(&mut self, today: &str) {
         self.today = Some(today.to_string());
     }
