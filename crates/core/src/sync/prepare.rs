@@ -392,16 +392,29 @@ impl std::fmt::Display for Concern {
 /// 也是那一处（ADR-0024）。
 ///
 /// # Errors
-/// 那份表读不动或者写坏了时返回一句给人看的话。
+/// 那份表读不动或者写坏了时返回一句给人看的话——**不静默退回内置**（ADR-0021）：
+/// 人把一份摆在那个工作目录里就是要用它，拿另一份顶上得有人知道。
+///
+/// 「在不在」问的是 [`Path::try_exists`] 而不是 [`Path::exists`]：后者把「读不动」
+/// 也报成「不在」，于是权限一收，这份表就静静换成了内置那份，屏上没有一个字
+/// （挂单 `Q976`）。
 pub fn priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, String> {
     let path = match given {
         Some(path) => path.to_path_buf(),
         None => {
             let candidate = workspace::priorities_path(workspace);
-            if !candidate.exists() {
-                return Ok(Priorities::builtin());
+            match candidate.try_exists() {
+                // 工作目录里本来就没放这一份：照内置的。
+                Ok(false) => return Ok(Priorities::builtin()),
+                Ok(true) => candidate,
+                // **读不动不等于没有**（ADR-0021）：说不出来在不在，就照读不动办。
+                Err(source) => {
+                    return Err(format!(
+                        "优先级表 {} 读不动：{source}",
+                        crate::path::display(&candidate)
+                    ));
+                }
             }
-            candidate
         }
     };
     Priorities::load(&path).map_err(|error| format!("{error}"))

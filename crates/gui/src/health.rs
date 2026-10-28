@@ -281,7 +281,10 @@ impl Section {
     /// 合一份**平台纠正**：报告里那几组 + 沉淀库里人定过的决定，合的是核心库
     /// （[`CorrectionGroups::build`]）。读沉淀库没成就当一条都没定过——那时屏上会把
     /// 处理过的组重新问一遍，而**不会**把人定过的东西说成没定过。
-    pub(crate) fn ensure_corrections(&mut self, site: &Site) {
+    ///
+    /// `manifest` 是开窗那一刻挑好的**平台清单**（挂单 `Q1031`）：那一层里每个平台的
+    /// 「跑不跑得了」问的是它，不是界面自己建一份内置的。
+    pub(crate) fn ensure_corrections(&mut self, site: &Site, manifest: &Manifest) {
         if self.corrections.is_some() {
             return;
         }
@@ -292,11 +295,7 @@ impl Section {
             .store
             .platform_corrections(&site.library_identity)
             .unwrap_or_default();
-        self.corrections = Some(CorrectionGroups::build(
-            &checked.report,
-            &Manifest::builtin(),
-            &decided,
-        ));
+        self.corrections = Some(CorrectionGroups::build(&checked.report, manifest, &decided));
     }
 
     /// 眼下那一份**平台纠正**（测试拿它核对）。
@@ -373,7 +372,10 @@ impl Section {
     /// **排一趟体检上任务台**：「重新体检」按的就是它。台上已经有一趟就什么都不做——一次只跑一趟。
     ///
     /// 后台那条线程读的是同一个库文件的第二份只读连接（[`Catalog::read_only`]）；只活在内存里的库分不出第二份，就地跑完。
-    pub fn check(&mut self, site: &Site, tasks: &mut Tasks) {
+    ///
+    /// `manifest` 是开窗那一刻挑好的**平台清单**（挂单 `Q1031`）：后台那一趟折统计时照它认平台，
+    /// 交回来的报告于是与命令行出的那一份口径一致。它跟活一起进后台线程（[`Manifest`] 是纯数据）。
+    pub fn check(&mut self, site: &Site, tasks: &mut Tasks, manifest: &Manifest) {
         if self.running() {
             return;
         }
@@ -389,14 +391,17 @@ impl Section {
             .not_same_works(&site.library_identity)
             .unwrap_or_default();
         let caption = romcat_core::task::Caption::new(CHECK_TASK).with_subtitle(CHECK_SUBTITLE);
+        let manifest = manifest.clone();
         let id = match site.catalog.read_only() {
             Ok(reader) => {
                 let dismissed = dismissed.clone();
-                tasks.queue(caption, move |task| check_run(&reader, &dismissed, task))
+                tasks.queue(caption, move |task| {
+                    check_run(&reader, &dismissed, &manifest, task)
+                })
             }
-            Err(CatalogError::NotOnDisk { .. }) => {
-                tasks.run_here(caption, |task| check_run(&site.catalog, &dismissed, task))
-            }
+            Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(caption, |task| {
+                check_run(&site.catalog, &dismissed, &manifest, task)
+            }),
             // 别的原因是**意外**：直说，不退到画帧这条线程上偷偷算一遍（同工序段算要铺多少媒体那一处）。
             Err(why) => {
                 self.error = Some(format!(
@@ -411,12 +416,18 @@ impl Section {
 
     /// **开窗后头一次进库屏**时问一次：有扫过的根、还没有报告、台上也没有体检，就自动排一趟（拿主意的人 2026-09-15
     /// 答岔路口 8）。只问一次——之后的报告由扫描交回、或者人按「重新体检」。
-    pub(crate) fn auto_check(&mut self, site: &Site, tasks: &mut Tasks, scanned: bool) {
+    pub(crate) fn auto_check(
+        &mut self,
+        site: &Site,
+        tasks: &mut Tasks,
+        scanned: bool,
+        manifest: &Manifest,
+    ) {
         if std::mem::replace(&mut self.asked, true) {
             return;
         }
         if scanned && self.checked.is_none() {
-            self.check(site, tasks);
+            self.check(site, tasks, manifest);
         }
     }
 
@@ -597,11 +608,11 @@ impl Section {
     /// **一个数都不在这儿算**：组、条数、判据、「改不改都行」那一句全由核心库交出来
     /// （[`CorrectionGroups`]，ADR-0005、ADR-0024）。**盘上一个字节都不动**（ADR-0004）：
     /// 按下去只往**沉淀库**写一条决定，文件不移动、不改名。
-    pub(crate) fn platfix_ui(&mut self, ctx: &egui::Context, site: &mut Site) {
+    pub(crate) fn platfix_ui(&mut self, ctx: &egui::Context, site: &mut Site, manifest: &Manifest) {
         if !self.platfix {
             return;
         }
-        self.ensure_corrections(site);
+        self.ensure_corrections(site, manifest);
         let Some(fixes) = &self.corrections else {
             return;
         };
@@ -855,14 +866,20 @@ impl Section {
     ///
     /// **落过一笔不当场重新成型**（票 `verdict-store-and-sync/12`）：纠正连同一条待生效记录落进沉淀库，
     /// 这里只把缓着的那份待生效扔掉重读，屏上累计「N 处待生效」；人按那一条上的「重新成型」才排一趟上台。
-    pub(crate) fn fixer_ui(&mut self, ctx: &egui::Context, site: &mut Site, tasks: &mut Tasks) {
+    pub(crate) fn fixer_ui(
+        &mut self,
+        ctx: &egui::Context,
+        site: &mut Site,
+        tasks: &mut Tasks,
+        manifest: &Manifest,
+    ) {
         self.fixer.ui(ctx, site);
         if self.fixer.take_applied() {
             self.forget_pending();
             self.fixed = true;
         }
         if std::mem::take(&mut self.reshape_asked) {
-            self.reshape(site, tasks);
+            self.reshape(site, tasks, manifest);
         }
     }
 
@@ -872,11 +889,14 @@ impl Section {
     /// 交回的产物与体检那一趟同形，所以照旧由 [`Section::settle`] 按任务号认领。**台上已经有一趟重新成型
     /// 就什么都不做**——一次只跑一趟，那一趟读的就是眼下这一份人工纠正之前的；跑着时才记下的那几处
     /// 照旧待生效，跑完再按一次。
-    pub fn reshape(&mut self, site: &mut Site, tasks: &mut Tasks) {
+    ///
+    /// `manifest` 是开窗那一刻挑好的**平台清单**（挂单 `Q1031`）：重新成型照它认平台、照它的
+    /// 成型规则把变体重算一遍，与扫描那一趟认的是同一张表。
+    pub fn reshape(&mut self, site: &mut Site, tasks: &mut Tasks, manifest: &Manifest) {
         if self.reshaping.is_some() {
             return;
         }
-        match shaping::reshape(site, tasks) {
+        match shaping::reshape(site, tasks, manifest) {
             Ok(排上) => {
                 self.error = None;
                 self.reshaping = Some(排上);
@@ -1466,6 +1486,7 @@ fn platform_badge(ui: &mut egui::Ui, platform: &str) {
 fn check_run(
     catalog: &Catalog,
     dismissed: &[NotSameWork],
+    manifest: &Manifest,
     task: &Handle,
 ) -> Result<Product, Cutoff> {
     task.check()?;
@@ -1477,9 +1498,7 @@ fn check_run(
         ..Limits::default()
     };
     let failed = |error: CatalogError| Cutoff::failed(format!("中立库读不出来：{error}"));
-    let aggregate = catalog
-        .aggregate(&limits, &Manifest::builtin())
-        .map_err(failed)?;
+    let aggregate = catalog.aggregate(&limits, manifest).map_err(failed)?;
     task.check()?;
     let report = HealthReport::build_full(&aggregate, &catalog.report_meta().map_err(failed)?);
     let duplicates = DuplicateDetails::build(&aggregate, &report);

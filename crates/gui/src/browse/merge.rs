@@ -303,6 +303,9 @@ pub struct Wizard {
     impact: Option<merge::Impact>,
     /// 排好的计划。
     planned: Option<merge::Regrouping>,
+    /// **平台清单**：第二步组头上那个平台全名问它（开窗那一刻挑好的那一份，挂单 `Q1031`）。
+    /// 与浏览屏那一份同一份，向导开的时候拿过来。
+    manifest: romcat_core::platform::Manifest,
     /// 这一层自己那句错。
     error: Option<String>,
 }
@@ -341,6 +344,7 @@ impl Wizard {
         query: &WorkQuery,
         rules: &Rules,
         priorities: &Priorities,
+        manifest: &romcat_core::platform::Manifest,
         anchors: &[WorkAnchor],
     ) -> Self {
         let mut rows = Vec::new();
@@ -376,6 +380,7 @@ impl Wizard {
             picks: BTreeMap::new(),
             impact: None,
             planned: None,
+            manifest: manifest.clone(),
             error,
         }
     }
@@ -957,8 +962,11 @@ impl Wizard {
                             ui.horizontal(|ui| {
                                 super::work::platform_chip(ui, &platform);
                                 ui.label(
-                                    font::strong(super::work::platform_full_name(&platform))
-                                        .color(look::palette(ui).ink),
+                                    font::strong(super::work::platform_full_name(
+                                        &self.manifest,
+                                        &platform,
+                                    ))
+                                    .color(look::palette(ui).ink),
                                 );
                                 look::help(ui, &format!("{} 个变体", thousands(还剩 as u64)));
                             });

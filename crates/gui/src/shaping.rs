@@ -657,7 +657,11 @@ fn name_of(key: &str) -> String {
 ///
 /// # Errors
 /// 沉淀库读不出来、或者中立库里还没有遍历记录时交回那句话。
-pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<(u64, PendingMark), String> {
+pub fn reshape(
+    site: &mut Site,
+    tasks: &mut Tasks,
+    manifest: &Manifest,
+) -> Result<(u64, PendingMark), String> {
     let ShapingInput { overrides, pending } = site
         .store
         .shaping_input(&site.library_identity)
@@ -678,15 +682,23 @@ pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<(u64, PendingMark),
         .store
         .not_same_works(&site.library_identity)
         .unwrap_or_default();
+    let manifest = manifest.clone();
     let id = match site.catalog.file().map(Path::to_path_buf) {
         Some(file) => tasks.queue(RESHAPE_TASK, move |task| {
             let mut catalog =
                 Catalog::open(&file).map_err(|why| Cutoff::failed(why.to_string()))?;
-            reshape_run(&mut catalog, &overrides, &dismissed, scan, task)
+            reshape_run(&mut catalog, &overrides, &dismissed, scan, &manifest, task)
         }),
         // 只活在内存里的那一份分不出第二份连接，就地跑完（同库体检那一处）。
         None => tasks.run_here(RESHAPE_TASK, |task| {
-            reshape_run(&mut site.catalog, &overrides, &dismissed, scan, task)
+            reshape_run(
+                &mut site.catalog,
+                &overrides,
+                &dismissed,
+                scan,
+                &manifest,
+                task,
+            )
         }),
     };
     Ok((id, pending))
@@ -698,12 +710,12 @@ fn reshape_run(
     overrides: &BTreeMap<String, String>,
     dismissed: &[NotSameWork],
     scan: i64,
+    manifest: &Manifest,
     task: &Handle,
 ) -> Result<Product, Cutoff> {
-    let manifest = Manifest::builtin();
     task.check()?;
     let failed = |error: CatalogError| Cutoff::failed(format!("重新成型没成：{error}"));
-    shape::reshape(catalog, &manifest, overrides, scan).map_err(failed)?;
+    shape::reshape(catalog, manifest, overrides, scan).map_err(failed)?;
     task.check()?;
     // **明细列全**：与「重新体检」那一趟同一套上限（`health::check_run`，挂单 `Q959`）。
     let limits = Limits {
@@ -711,7 +723,7 @@ fn reshape_run(
         max_duplicate_paths_per_group: Limits::FULL_DUPLICATE_PATHS_PER_GROUP,
         ..Limits::default()
     };
-    let aggregate = catalog.aggregate(&limits, &manifest).map_err(failed)?;
+    let aggregate = catalog.aggregate(&limits, manifest).map_err(failed)?;
     let report = HealthReport::build_full(&aggregate, &catalog.report_meta().map_err(failed)?);
     let duplicates = DuplicateDetails::build(&aggregate, &report);
     task.check()?;

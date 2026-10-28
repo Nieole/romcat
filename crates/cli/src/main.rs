@@ -485,21 +485,13 @@ struct ManifestArgs {
 }
 
 impl ManifestArgs {
-    /// 工作目录里那份可选的清单叫什么。
-    const IN_WORKSPACE: &'static str = "platforms.toml";
-
+    /// 把 `--manifest` 交给核心库那一处：先点名的那一份、再工作目录里那份、再内置的
+    /// （[`Manifest::locate`]，ADR-0024）。这一层只负责那个开关，**不自己排先后**。
+    ///
+    /// 读不动就停下（`platform::Choice::strict`）：命令行没处摆「眼下用的是内置那一份」那句话，
+    /// 拿内置的顶上比停下更糟（ADR-0021）。
     fn load(&self, workspace: &Path) -> Result<Manifest, String> {
-        let path = match &self.manifest {
-            Some(path) => path.clone(),
-            None => {
-                let candidate = workspace.join(Self::IN_WORKSPACE);
-                if !candidate.exists() {
-                    return Ok(Manifest::builtin());
-                }
-                candidate
-            }
-        };
-        Manifest::load(&path).map_err(|error| format!("{error}"))
+        Manifest::locate(self.manifest.as_deref(), workspace).strict()
     }
 }
 

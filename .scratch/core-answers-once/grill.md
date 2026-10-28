@@ -42,6 +42,7 @@
 核查（2026-09-23）：命令行 crates/cli/src/main.rs:486-494 ManifestArgs 先 --manifest、再工作目录 platforms.toml、再内置；界面一律 Manifest::builtin()，已扩散到 7 处：crates/gui/src/health.rs:285、:1342，stages.rs:1610，shaping.rs:609，tokens.rs:1323，browse/work.rs:619、:630，browse.rs:4485。核心先例：capability::Roster::in_workspace
 依赖／可并：Q976（同为「工作目录里那份配置读不动就静默退回内置」，一起改）、Q1030（库体检那格的数依赖清单）
 （大小 M，来自票 `gui-looks-like-the-design/28`）
+**收于票 `core-answers-once/04`（2026-10-06）：settled。** 那条链在核心库立成一处：`platform::Manifest::locate(given, workspace)`，交回 `platform::Choice`（眼下用的那一份、`Origin` 说它从哪儿来、想用的那份读不动时的 `Unreadable`），`Choice::unreadable_note()` 是屏上那句、`Choice::strict()` 是没处摆这句话的那几个调用方要的那一份。命令行 `ManifestArgs::load` 只把 `--manifest` 交进去（先后照旧，读不动照旧停下）；`sources::manifest` 收成它的壳。界面七处改读**开窗那一刻挑好的**那一份（`App::new` 挑一次，交给库屏与浏览屏）：库体检折统计、平台纠正那一层、重新成型、扫描（`ScanOptions.manifest`）、筛选器「认不认得这个平台」、成型存疑、平台全名（作品详情与合并向导第二步组头）。`crates/gui/src` 里不再直接取内置清单（`demo.rs` 那三处是合成数据校验用的，不是上屏那张表，注释里写明了）。工作目录那份**读不动**不再静默退回内置（ADR-0021）：开窗屏最上方一行说得出哪一份读不动、为什么、眼下用的是内置那一份、下一步（去修权限或关掉占着它的程序）。「在不在」从 `Path::exists()` 换成 `try_exists`——目录读不动从此报读不动，不报「不在」。测试：`crates/core/tests/platform_lookup.rs` 四条（工作目录那份说了算 / 点名那份压过它 / 没有时用内置 / 读不动交第三态）、`crates/gui/tests/manifest.rs` 三条（库体检照工作目录那份出报告——扫描与「重新体检」两条路都走一遍；平台清单读不动与优先级表读不动各一句开窗屏上的话，收权限造不出来就如实跳过）。
 
 ### `Q1033` — 导出与同步还不读平台纠正：照旧按目录放置
 
@@ -240,6 +241,7 @@
 核查（2026-09-23）：crates/gui/src/app.rs:230-232 `if let Ok(priorities) = …priorities(None,&workspace)` 读不动静默不设，浏览屏留着 Priorities::builtin()
 依赖／可并：Q1031（同形：工作目录配置读不动）、Q783（同一份表）
 （大小 S，来自票 `gui-looks-like-the-design/22`）
+**收于票 `core-answers-once/04`（2026-10-06）：settled。** `App::new` 那处 `if let Ok(priorities)` 不再吞掉：读不动时开窗屏最上方一行（与平台清单那句同一处、同一个画法）说「工作目录里那份优先级表读不动：…。眼下用的是内置那一份；去修那一份的权限，或者关掉占着它的程序。」，「眼下用的是哪一份」写在句子里。`sync::prepare::priorities` 的问法从 `Path::exists()` 换成 `try_exists`：说不出来在不在就按读不动办，不再把它说成「没有这一份」。测试：`crates/gui/tests/manifest.rs::开窗时优先级表读不动也说出来`（收权限造不出来就如实跳过，`testing::revoke_file` 印那一行）。
 
 ### `Q996` — 详情页「子库」「导出」两行读不动时退回「—」与「还没导出」，把不可读压成了「没有」
 

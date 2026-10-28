@@ -182,6 +182,12 @@ pub struct App {
     workspace_label: String,
     /// **观感基线与上次的版式装过了没有。** 只在开窗第一帧装一次。
     prepared: bool,
+    /// **开窗时说得出、之后一直摆着的那几句话**：工作目录里那份平台清单或优先级表读不动
+    /// （ADR-0021 第三态）。摆的是主区最上方那几行，与「版式存不下来」同一处、同一条读法。
+    ///
+    /// **不许默默退回内置**：这两份配置决定整个工具看得见什么（平台表、显示标题），
+    /// 拿内置那份顶上去而屏上一个字都没有的话，人只会以为自己的配置生效了。
+    notices: Vec<String>,
     /// 上一次写进窗口标题的那一句。**标题变了才发一条命令**（换屏、打开或换掉作品详情页），不是每帧发一条。
     titled: Option<String>,
     /// **按 `?` 摊开的那层快捷键表**开着没有（票 `gui-looks-like-the-design/14`）。
@@ -224,13 +230,29 @@ impl App {
     /// 能力档案名册（`romcat_core::sync::prepare`）。
     #[must_use]
     pub fn new(site: Site, workspace: PathBuf) -> Self {
+        let mut notices = Vec::new();
+        // **平台清单只在开窗这一下挑一份**（`Manifest::locate`，ADR-0024）：
+        // 工作目录里那份优先，没有就用内置的；读不动时屏上说出来（ADR-0021）。
+        // 这份东西下交给要它的两屏（库屏的体检与成型、浏览屏的筛选与平台全名），
+        // 它们不再各自去挑一遍。
+        let manifest = romcat_core::platform::Manifest::locate(None, &workspace);
+        if let Some(说的) = manifest.unreadable_note() {
+            notices.push(说的);
+        }
+        let manifest = manifest.manifest().clone();
         let mut queue = queue::Screen::new();
         queue.reload(&site);
-        let mut browse = browse::Screen::new(workspace.clone());
+        let mut browse = browse::Screen::new(workspace.clone(), manifest.clone());
         browse.reload(&site);
         // 优先级表与导出共用一份：面板上写着的显示标题就是同步到掌机上会看见的那个。
-        if let Ok(priorities) = romcat_core::sync::prepare::priorities(None, &workspace) {
-            browse.set_priorities(priorities);
+        // **读不动就说出来**（挂单 `Q976`）：从前这里是 `if let Ok(priorities)`，读不动就静静地
+        // 留着内置那份，于是屏上的显示标题与导出结果按的是另一份表。
+        match romcat_core::sync::prepare::priorities(None, &workspace) {
+            Ok(priorities) => browse.set_priorities(priorities),
+            Err(why) => notices.push(format!(
+                "工作目录里那份优先级表读不动：{why}。眼下用的是内置那一份；\
+                 去修那一份的权限，或者关掉占着它的程序。",
+            )),
         }
         // **媒体池不在就不指**：那时详情面板如实说「没查池子」，而不是报一句
         // 「一张都没有」——后者会把人赶去重跑刮削，而问题其实出在工作目录上。
@@ -240,7 +262,7 @@ impl App {
                 .is_dir()
                 .then(|| romcat_core::scrape::pool::MediaPool::at(&pool_dir)),
         );
-        let mut roots = roots::Screen::new(workspace.clone());
+        let mut roots = roots::Screen::new(workspace.clone(), manifest);
         roots.reload(&site);
         // **版式先读出来**：面板尺寸要赶在开窗第一帧画面板之前塞进 egui 那张表里
         // （[`layout::Layout::seed`]），晚一帧人就会看见面板从默认宽度跳一下。
@@ -272,6 +294,7 @@ impl App {
             layout,
             library_label,
             workspace_label,
+            notices,
             prepared: false,
             titled: None,
             keys_sheet: false,
@@ -818,18 +841,16 @@ impl App {
         // 而真正的病在工作目录上（写不动的工作目录还会连累中立库与沉淀库）。
         // 摆在主区最上方单独一行、只在出错时有（拿主意的人 2026-09-14 定）。
         if let Some(说的) = self.layout.error() {
-            let 说的 = format!("版式存不下来：{说的}");
-            let [_, 左右] = crate::tokens::Tokens::builtin().space.screen_header_padding;
-            egui::Panel::top("版式存不下来")
-                .resizable(false)
-                .frame(
-                    egui::Frame::new()
-                        .fill(ui.visuals().panel_fill)
-                        .inner_margin(egui::Margin::from(egui::vec2(左右, look::step(1)))),
-                )
-                .show(ui, |ui| {
-                    ui.colored_label(ui.visuals().warn_fg_color, 说的);
-                });
+            notice_line(
+                ui,
+                egui::Id::new("版式存不下来"),
+                &format!("版式存不下来：{说的}"),
+            );
+        }
+        // **工作目录里那两份配置读不动也说一句**（ADR-0021 第三态，挂单 `Q1031` / `Q976`）：
+        // 与「版式存不下来」同一处、同一条读法。开窗那一刻就摆在这儿，六屏上一直看得见。
+        for (第几句, 说的) in self.notices.iter().enumerate() {
+            notice_line(ui, egui::Id::new(("工作目录读不动", 第几句)), 说的);
         }
         // **屏头连屏体那一整块**：待确认屏的裁决记录抽屉贴着它的右沿、从屏头顶上一直到状态栏上沿
         // （设计稿 `.drawer` 摆在 `section.scr` 里）。左栏、状态栏已经占好了地方，剩下的就是它。
@@ -1278,6 +1299,24 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
+}
+
+/// 主区最上方那一行提示（只在有事可说时才有）：底色是面板色，字是警告色。
+///
+/// 「版式存不下来」与工作目录里那两份配置读不动都摆在这一处，同一个画法：
+/// 都是**开窗那一刻就知道、之后一直成立**的事，且都不是那一屏自己的事。
+fn notice_line(ui: &mut egui::Ui, id: egui::Id, 说的: &str) {
+    let [_, 左右] = crate::tokens::Tokens::builtin().space.screen_header_padding;
+    egui::Panel::top(id)
+        .resizable(false)
+        .frame(
+            egui::Frame::new()
+                .fill(ui.visuals().panel_fill)
+                .inner_margin(egui::Margin::from(egui::vec2(左右, look::step(1)))),
+        )
+        .show(ui, |ui| {
+            ui.colored_label(ui.visuals().warn_fg_color, 说的);
+        });
 }
 
 /// 一条路径排成给人看的样子：落在 `HOME` 底下的缩成 `~/…`，别处照原样。

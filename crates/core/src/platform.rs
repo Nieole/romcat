@@ -213,6 +213,112 @@ pub enum ManifestError {
     },
 }
 
+/// 一份平台清单**从哪儿来**。
+///
+/// 屏上说「眼下用的是哪一份」用的就是它：`Manifest::locate` 挑的三种来处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// `--manifest` 点名的那一份。
+    Given,
+    /// 工作目录里的 `platforms.toml`。
+    InWorkspace,
+    /// 内置的那一份（工作目录里没放这一份时）。
+    Builtin,
+}
+
+impl Origin {
+    /// 说给人听的那几个字：「工作目录里那份」「内置那一份」……
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Given => "点名的那一份",
+            Self::InWorkspace => "工作目录里那份",
+            Self::Builtin => "内置那一份",
+        }
+    }
+}
+
+/// 想用的那一份**在、但读不动**（ADR-0021 第三态）。
+///
+/// 不是「没有这一份」：没有时静静照内置的（`Origin::Builtin`）；这一种是用户把一份
+/// 摆在了那儿、而它读不出来——原因得交出去，屏上要说，命令行要停。
+#[derive(Debug, Clone)]
+pub struct Unreadable {
+    /// 想用的那一份从哪儿来（点名的那份、工作目录里那份）。
+    pub origin: Origin,
+    /// 那一份在哪儿。
+    pub path: String,
+    /// 读不动的理由：核心库那句话原样。
+    pub why: String,
+}
+
+/// **挑清单的结果**：眼下用哪一份、从哪儿来；想用的那份读不动时，原因也在这儿。
+#[derive(Debug, Clone)]
+pub struct Choice {
+    manifest: Manifest,
+    origin: Origin,
+    unreadable: Option<Unreadable>,
+}
+
+impl Choice {
+    /// 想用的那份读不动：顶上内置那一份，把原因收着。
+    fn fell_back(wanted: std::path::PathBuf, origin: Origin, error: ManifestError) -> Self {
+        Self {
+            manifest: Manifest::builtin(),
+            origin: Origin::Builtin,
+            unreadable: Some(Unreadable {
+                origin,
+                path: path::display(&wanted),
+                why: error.to_string(),
+            }),
+        }
+    }
+
+    /// 眼下用的那一份。
+    #[must_use]
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// 眼下用的是哪一份。
+    #[must_use]
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// 想用的那一份读不动时的原因；一切正常时是 `None`。
+    #[must_use]
+    pub fn unreadable(&self) -> Option<&Unreadable> {
+        self.unreadable.as_ref()
+    }
+
+    /// 读不动时**该摆到屏上的那一句**（ADR-0021：不静默退回内置，说明眼下用的是哪一份）。
+    ///
+    /// 读得动、或者工作目录里本来就没放这一份时是 `None`：那两种都没什么可说的。
+    #[must_use]
+    pub fn unreadable_note(&self) -> Option<String> {
+        let bad = self.unreadable.as_ref()?;
+        Some(format!(
+            "{}平台清单读不动：{}。眼下用的是{}；去修那一份的权限，或者关掉占着它的程序。",
+            bad.origin.label(),
+            bad.why,
+            self.origin.label(),
+        ))
+    }
+
+    /// **没处摆这句话**的调用方用它（命令行、同步那一趟）：读不动就当错误交回去，
+    /// 不静默退回内置。
+    ///
+    /// # Errors
+    /// 想用的那一份读不动时交回那句话。
+    pub fn strict(self) -> Result<Manifest, String> {
+        match self.unreadable {
+            Some(bad) => Err(bad.why),
+            None => Ok(self.manifest),
+        }
+    }
+}
+
 // ── TOML 里的形状 ───────────────────────────────────────────────────────────
 //
 // 与上面公开的形状分开：配置里的字段是中文名、可省略，而程序里用的是校验过、
@@ -620,6 +726,53 @@ impl Manifest {
     #[must_use]
     pub fn rule(&self, name: &str) -> Option<&Rule> {
         self.rules.iter().find(|rule| rule.name == name)
+    }
+
+    /// 工作目录里那份**可选**的清单叫什么。
+    pub const IN_WORKSPACE: &'static str = "platforms.toml";
+
+    /// **挑一份清单**：先 `--manifest` 点名的那一份、再工作目录里那份、再内置那份。
+    ///
+    /// **这条查法只有这一处**（ADR-0024）：命令行、界面、同步、刮削各走各的，用户改过的那份
+    /// 清单就会在一条路上生效、另一条路上不生效。
+    ///
+    /// 工作目录里那份**在、但读不动**时交回 [`Choice::unreadable`] 那条原因，不静默退回内置
+    /// （ADR-0021）：用户放了一份在那儿就是要用它，拿另一份顶上得让人知道。
+    #[must_use]
+    pub fn locate(given: Option<&Path>, workspace: &Path) -> Choice {
+        let (wanted, origin) = match given {
+            Some(path) => (path.to_path_buf(), Origin::Given),
+            None => {
+                let candidate = workspace.join(Self::IN_WORKSPACE);
+                match candidate.try_exists() {
+                    // 工作目录里本来就没放这一份：照内置的。
+                    Ok(false) => {
+                        return Choice {
+                            manifest: Self::builtin(),
+                            origin: Origin::Builtin,
+                            unreadable: None,
+                        };
+                    }
+                    Ok(true) => (candidate, Origin::InWorkspace),
+                    // **读不动不等于没有**（ADR-0021）：说不出来在不在，就照读不动办。
+                    Err(source) => {
+                        let error = ManifestError::Io {
+                            path: path::display(&candidate),
+                            source,
+                        };
+                        return Choice::fell_back(candidate, Origin::InWorkspace, error);
+                    }
+                }
+            }
+        };
+        match Self::load(&wanted) {
+            Ok(manifest) => Choice {
+                manifest,
+                origin,
+                unreadable: None,
+            },
+            Err(error) => Choice::fell_back(wanted, origin, error),
+        }
     }
 
     /// 一个平台按方式取它的成型规则。
