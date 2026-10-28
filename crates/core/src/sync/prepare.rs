@@ -649,8 +649,13 @@ pub fn prepare_selected(
     // 删减建议那几行**屏上叫它什么、什么平台**在这里补（[`Catalog::trim_names`]）：认不出作品的
     // 变体要剥**正题**，剥它要工作目录里那份**剥离规则**——而折期望状态那一半是纯的，手上没有规则。
     // 与刮削、与浏览屏交的是同一份规则。
+    // **读不动不挡路**：这份规则只影响删减建议那一行的显示名，而工作是「照内置那份剥」也能
+    // 干完的（与浏览屏对同一个文件的处置同形，`crates/gui/src/browse.rs` 的 `rules_error`：
+    // 写坏了照旧开得了屏，把原因摆出来）。从前这里把它当成排计划的硬前提：文件一坏，
+    // `romcat sync`、界面「生成差量预览」、连纯算容量的 `sublibrary::fit` 全都停下——
+    // 一件与卡上写什么无关的显示名配置挡住了整趟写操作（代码审查 2026-10-29 挑出来的）。
     let rules =
-        crate::sources::rules(workspace).map_err(|error| format!("剥离规则读不动：{error}"))?;
+        crate::sources::rules(workspace).unwrap_or_else(|_| crate::filename::Rules::builtin());
     let picked: Vec<&str> = selected.picked.iter().map(|one| one.key.as_str()).collect();
     desired.trim_names = catalog
         .trim_names(&picked, &rules)

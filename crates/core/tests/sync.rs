@@ -836,6 +836,35 @@ fn 排计划不给今天时照真钟判档案陈旧() {
 }
 
 #[test]
+fn 剥离规则写坏了不挡排计划_删减建议那几行照内置规则剥() {
+    // 代码审查 2026-10-29 挑出来的：`prepare_selected` 把工作目录里那份剥离规则当成排计划的
+    // 硬前提，而它只给删减建议那一行取显示名。文件写坏时 `romcat sync`、界面「生成差量预览」、
+    // 连纯算容量的 `sublibrary::fit` 全停下——一件与卡上写什么无关的配置挡住了整趟写操作。
+    // 与浏览屏对同一个文件的处置同形（`gui::browse` 的 `rules_error`）：读不动照内置那份剥。
+    let dir = 建库();
+    let 工作区 = temp_dir("sync-broken-rules-ws");
+    let 目标 = temp_dir("sync-broken-rules-card");
+    let mut catalog = 扫成库(dir.path());
+    记着一份带核实日期的档案(&mut catalog, 目标.path());
+    std::fs::write(
+        工作区.path().join("name-rules.toml"),
+        "这 不是 = toml {{ 写坏了",
+    )
+    .expect("写得进");
+
+    let 计划 = 排计划照今天(&catalog, 工作区.path(), None);
+    assert!(
+        计划.concerns().is_empty()
+            || 计划
+                .concerns()
+                .iter()
+                .all(|one| !format!("{one:?}").contains("规则")),
+        "剥离规则读不动混进了排计划的原因里：{:?}",
+        计划.concerns()
+    );
+}
+
+#[test]
 fn 超出目标容量时给出超出量与裁剪建议_一个都不砍() {
     let dir = 建库();
     let 目标 = temp_dir("sync-target-full");
