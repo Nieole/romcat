@@ -368,7 +368,7 @@ pub enum CatalogError {
         /// 底层错误。
         source: rusqlite::Error,
     },
-    /// 结构版本对不上。
+    /// **结构版本对不上**：短话与细节两半（[`VersionMismatch`]）。
     ///
     /// **那句话逐项说清删库留得住什么、会丢什么**（ADR-0001 的修订，挂账 D97）：人按下去之前
     /// 得知道代价。往中立库里再放一样半可再生的东西，就得在这里再添一项——更该先问的是它是不是
@@ -377,22 +377,10 @@ pub enum CatalogError {
     /// 首选变体、改在变体上的字段——键里是变体的键）熬不过改名挪目录，这一句也说出来。
     /// 「会丢的」还剩两样：子库的定义与清单里，规则重新点一遍就回来，**手动加的例外**回不来
     /// （ADR-0016：例外永久记住），得照实说「一条条重加」（挂单 `Q1561`）；底本重导一次就有。
-    #[error(
-        "中立库 {path} 的结构版本是 {found}，本程序认得的是 {expected}。删掉它重扫一遍即可——\
-         扫描、成型、识别、刮削都重跑得回来；沉淀库里的裁决、收藏、人工纠正、首选变体、\
-         亲手加的叫法与详情页上改过的字段一条不丢（人工纠正、首选变体与改在变体上的字段\
-         钉在本机的位置上，改名、挪目录之后对不上）。\
-         会跟着丢的有两样：一是子库的定义与清单（规则重新点一遍就回来，手动加的例外得一条条重加）；\
-         二是导入时存下的底本（重新导入一次就有）"
-    )]
-    Version {
-        /// 中立库文件。
-        path: String,
-        /// 文件里的版本。
-        found: u32,
-        /// 本程序的版本。
-        expected: u32,
-    },
+    ///
+    /// **两半分着交**（挂单 `Q841`）：开场上那一行只有一行高，印短话；细节挂在那一行的悬停里。
+    #[error(transparent)]
+    Version(#[from] VersionMismatch),
     /// 这份库只活在内存里，分不出第二份连接。
     #[error(
         "{path} 这份中立库只活在内存里，分不出第二份连接——\
@@ -413,11 +401,11 @@ pub enum CatalogError {
         source: serde_json::Error,
     },
     /// 建库或改名时给的**主库原名**是空白。**空白不是名字**（挂单 `Q469`）。
-    #[error("中立库 {path} 的主库原名不能是空白——开场屏与报告上认这份库靠的就是这个名字")]
-    BlankLibraryName {
-        /// 中立库文件。
-        path: String,
-    },
+    ///
+    /// **不带路径**（挂单 `Q615`）：空白折不出一个像样的文件名（折出来是 `catalog/-<哈希>.sqlite3`
+    /// 那种怪东西），把它印在一句拒绝话里，人只会以为自己填错的是路径。
+    #[error("主库原名不能是空白——开场屏与报告上认这份库靠的就是这个名字，给它起一个名字")]
+    BlankLibraryName,
     /// 要打开的那份中立库不在。**打开不建库**（挂单 `Q371`）：建库走 [`Catalog::create`]。
     #[error("中立库 {path} 不在——打开不会顺手建一份")]
     Missing {
@@ -426,7 +414,10 @@ pub enum CatalogError {
     },
     /// 要建的那份中立库已经在了。**建库不开现成的那一份**：给的名字既不会被悄悄丢掉，
     /// 也不会顶掉人家原来的名字。
-    #[error("中立库 {path} 已经在了——建库不会去开现成的那一份")]
+    ///
+    /// **补一个下一步**（挂单 `Q615`）：只说「已经在了」等于把人晾在原地——要么换个名字，要么
+    /// 就去开那一份。这两条路是屏上与命令行都做得到的事，于是这句话里不带任何命令（ADR-0023）。
+    #[error("中立库 {path} 已经在了——建库不会去开现成的那一份；换个名字，或者去开那一份")]
     AlreadyExists {
         /// 中立库文件。
         path: String,
@@ -454,6 +445,132 @@ pub enum CatalogError {
     DirUnwritable(#[from] workspace::DirUnwritable),
 }
 
+/// **结构版本对不上**那句话，**两半分着交**：短话与细节（挂单 `Q841`）。
+///
+/// 短话给**一行高**的地方——开场那一行（`gui::opening`）只有一行高，而这一句从前是五个分句的
+/// 长话，折成六行、比别的行高出一大截。细节不能丢（ADR-0001 的修订、挂账 D97）：人按下去之前
+/// 得知道删库留得住什么、会丢什么，它挂在那一行的悬停里，终端那一侧照旧整句印出来。
+///
+/// 两半分开不是为了省字，是为了让「一行」与「一个字不少」两件事同时成立。
+#[derive(Debug)]
+pub struct VersionMismatch {
+    /// 中立库文件。
+    path: String,
+    /// 文件里的版本。
+    found: u32,
+    /// 本程序的版本。
+    expected: u32,
+}
+
+impl VersionMismatch {
+    /// 一份中立库带着一个对不上的结构版本。
+    #[must_use]
+    pub fn new(path: String, found: u32, expected: u32) -> Self {
+        Self {
+            path,
+            found,
+            expected,
+        }
+    }
+
+    /// 中立库文件。
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// 文件里的结构版本。
+    #[must_use]
+    pub const fn found(&self) -> u32 {
+        self.found
+    }
+
+    /// 本程序认得的结构版本。
+    #[must_use]
+    pub const fn expected(&self) -> u32 {
+        self.expected
+    }
+
+    /// **短话**：一行说得完的——哪个版本对哪个版本、该怎么办。
+    ///
+    /// **不带路径**：说这话的地方（开场那一行）左边已经印着这份库叫什么，再印一遍一长串路径就把
+    /// 那一行撑成两行。这一句仍然说清了两件事：库里是哪个版本、本程序认哪个版本。
+    #[must_use]
+    pub fn brief(&self) -> String {
+        format!(
+            "结构版本是 {}，本程序认得的是 {}。删掉它重扫一遍即可",
+            self.found, self.expected
+        )
+    }
+
+    /// **细节**：删掉重扫**留得住**什么、**会跟着丢**什么（ADR-0001 的修订、挂账 D97）。
+    #[must_use]
+    pub const fn details(&self) -> &'static str {
+        VERSION_DETAILS
+    }
+}
+
+/// 「结构版本对不上」那一句的后半：删库留得住什么、会丢什么。
+///
+/// 往中立库里再放一样半可再生的东西，就得在这里再添一项——更该先问的是它是不是本该住在沉淀库。
+const VERSION_DETAILS: &str = "扫描、成型、识别、刮削都重跑得回来；沉淀库里的裁决、收藏、人工纠正、\
+     首选变体、亲手加的叫法与详情页上改过的字段一条不丢（人工纠正、首选变体与改在变体上的字段\
+     钉在本机的位置上，改名、挪目录之后对不上）。\
+     会跟着丢的有两样：一是子库的定义与清单（规则重新点一遍就回来，手动加的例外得一条条重加）；\
+     二是导入时存下的底本（重新导入一次就有）";
+
+/// **整句**（短话 + 细节）：终端与别的没有悬停的地方照这一句印，一个字不少。
+impl std::fmt::Display for VersionMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "中立库 {} 的{}——{}",
+            self.path,
+            self.brief(),
+            self.details()
+        )
+    }
+}
+
+impl std::error::Error for VersionMismatch {}
+
+impl CatalogError {
+    /// **这份库这会儿读不动**（不是文件坏了）：是的话交回那句话——系统的原话，加上下一步。
+    ///
+    /// 判据是**打开时 SQLite 报的错码**，逐条判（ADR-0021 那条再修订，挂单 `Q613`）：
+    ///
+    /// - **权限不够**（`SQLITE_PERM`）与**打不开**（`SQLITE_CANTOPEN`）：文件是刚列出来的，它
+    ///   明明在，而 unix 上收掉读权限正是这一条（实测 macOS 上 0o000 的一份中立库报
+    ///   `CannotOpen` / 14）。至于「它其实是个目录」「符号链接绕成了圈」那几种也说不出别的，
+    ///   而它们下一步同样是「去看那一处」，不是「删掉重扫」。
+    /// - **被别的程序占着**（`SQLITE_BUSY` / `SQLITE_LOCKED`）：那一份只是这会儿打不开，
+    ///   关掉占着它的程序就好。
+    ///
+    /// **判不准的归「文件坏了」**，交 `None`：不是一份 SQLite 库（`SQLITE_NOTADB`）、读到一半
+    /// 坏了（`SQLITE_CORRUPT`）、盘上报 I/O 错（`SQLITE_IOERR`）——那几种下一步才是删掉重扫，
+    /// 由调用方照印原话（[`workspace::CatalogState::Broken`](crate::workspace::CatalogState)）。
+    #[must_use]
+    pub fn unreadable(&self) -> Option<String> {
+        let Self::Sqlite { path, source } = self else {
+            return None;
+        };
+        let rusqlite::Error::SqliteFailure(error, _) = source else {
+            return None;
+        };
+        matches!(
+            error.code,
+            rusqlite::ErrorCode::PermissionDenied
+                | rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::DatabaseBusy
+                | rusqlite::ErrorCode::DatabaseLocked
+        )
+        .then(|| format!("中立库 {path} 这会儿读不动（{source}）——{UNREADABLE_NEXT}"))
+    }
+}
+
+/// 读不动那一行的**下一步**：与「文件坏了」那一格的「删掉重扫」正相反（ADR-0021 那条再修订）。
+const UNREADABLE_NEXT: &str = "去修这份文件与它那个目录的权限，或者关掉占用它的程序";
+
 /// **空白不是名字**：一个主库原名是不是空的、或者全是空白字符。
 ///
 /// 两处都问这一处：落一个名字之前拒收（`refuse_library_name`，建库与改名都走它）、
@@ -477,9 +594,7 @@ fn is_blank_name(name: &str) -> bool {
 /// 那份没有工作目录，只查空白。`shown` 是报错时说的那份库（[`Catalog::location`] 那一串）。
 fn refuse_library_name(name: &str, file: Option<&Path>, shown: &str) -> Result<(), CatalogError> {
     if is_blank_name(name) {
-        return Err(CatalogError::BlankLibraryName {
-            path: shown.to_string(),
-        });
+        return Err(CatalogError::BlankLibraryName);
     }
     if let Some(file) = file
         && let Some(other) = workspace::namesake_beside(file, name)?
@@ -775,11 +890,11 @@ impl Catalog {
         let found = twin.meta_get(MetaKey::SchemaVersion)?;
         match found.as_deref().map(str::parse::<u32>) {
             Some(Ok(version)) if version == SCHEMA_VERSION => Ok(twin),
-            found => Err(CatalogError::Version {
-                path: twin.path.clone(),
-                found: found.and_then(Result::ok).unwrap_or(0),
-                expected: SCHEMA_VERSION,
-            }),
+            found => Err(CatalogError::Version(VersionMismatch::new(
+                twin.path.clone(),
+                found.and_then(Result::ok).unwrap_or(0),
+                SCHEMA_VERSION,
+            ))),
         }
     }
 
@@ -860,11 +975,11 @@ impl Catalog {
             }
             (Some(Ok(version)), _) if version == SCHEMA_VERSION => {}
             (Some(found), _) => {
-                return Err(CatalogError::Version {
-                    path: catalog.path.clone(),
-                    found: found.unwrap_or(0),
-                    expected: SCHEMA_VERSION,
-                });
+                return Err(CatalogError::Version(VersionMismatch::new(
+                    catalog.path.clone(),
+                    found.unwrap_or(0),
+                    SCHEMA_VERSION,
+                )));
             }
         }
         Ok(catalog)
@@ -873,11 +988,7 @@ impl Catalog {
     /// 「这不是一份建好的中立库」那一句：连结构版本那一行都没有，按版本 0 报——与只读地开
     /// （[`Self::open_read_only`]）、开场那一屏的列举同一个说法。
     fn unbuilt(&self) -> CatalogError {
-        CatalogError::Version {
-            path: self.path.clone(),
-            found: 0,
-            expected: SCHEMA_VERSION,
-        }
+        CatalogError::Version(VersionMismatch::new(self.path.clone(), 0, SCHEMA_VERSION))
     }
 
     fn err(&self, source: rusqlite::Error) -> CatalogError {

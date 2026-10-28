@@ -414,7 +414,7 @@ impl Site {
             Ok(opened) => opened,
             // **结构版本对不上**：那句话会叫人删掉它重扫。删之前，它里面没搬走的人定的东西
             // 得先救进沉淀库——那句「一条不丢」才是真的。
-            Err(error @ CatalogError::Version { .. }) => {
+            Err(error @ CatalogError::Version(_)) => {
                 rescue(workspace, catalog, &error)?;
                 return Err(error.into());
             }

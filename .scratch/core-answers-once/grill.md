@@ -92,6 +92,7 @@
 核查（2026-09-23）：crates/core/src/catalog.rs:418 AlreadyExists 仍是「中立库 {path} 已经在了——建库不会去开现成的那一份」无下一步；:405 BlankLibraryName 仍带按空名字折出的文件路径；向导 crates/gui/src/claim.rs:436 照印。等的票 gui-looks-like-the-design/05 已合
 依赖／可并：Q841（同改 CatalogError 措辞）、Q622 的题
 （大小 S，来自票 `no-mute-spots-opening-a-catalog/04`）
+**收于票 `core-answers-once/07`（2026-10-28）：settled。** `CatalogError::AlreadyExists` 补下一步「换个名字，或者去开那一份」（不带命令：两条路屏上与命令行都做得到，ADR-0023）；`CatalogError::BlankLibraryName` 换成不带路径的一句（从前那句里印着按空名字折出来的 `catalog/library-<哈希>.sqlite3`）。测试 `crates/core/tests/library_name.rs::撞名与空名字那两句都说得出下一步`；界面上那两句在 `crates/gui/tests/pick.rs::向导起名那一问撞名时说得出下一步` 与 `::向导起名那一问空着时不带按空名字折出来的路径` 里看得到（看的是画出来的字）。
 
 ### `Q841` — 旧库版本对不上那句核心库原话，在开场上折成六行，比别的行高出一截
 
@@ -99,6 +100,7 @@
 核查（2026-09-23）：crates/core/src/catalog.rs:370-384 CatalogError::Version 仍是一整句五分句长话（带「会跟着丢的有三样」）；crates/gui/src/opening.rs:532 row_ui 照印
 依赖／可并：Q615（同为 CatalogError 措辞，一处改）、开场有库那两张基线重批
 （大小 S，来自票 `gui-looks-like-the-design/05`）
+**收于票 `core-answers-once/07`（2026-10-28）：settled。** `CatalogError::Version` 的载荷换成 `catalog::VersionMismatch`：`brief()` 是**一行短话**（「结构版本是 4，本程序认得的是 7。删掉它重扫一遍即可」，**不带路径**——那一行左边已经印着这份库叫什么）、`details()` 是那段「删库留得住什么、会跟着丢什么」（ADR-0001 的修订，一个字不少）、`Display` 是两半合起来的整句（终端里照旧印全）。`CatalogState::SchemaMismatch` 多一格 `details`，开场那一行只画短话、细节挂 `on_hover_text`。测试 `crates/gui/tests/snapshot.rs::开场_版本对不上那一行只有一行高_细节在悬停里`（红时那一句底下 136 点、别的行 17 点）与 `crates/core/tests/catalog_list.rs::结构版本对不上的库照列并说清是哪个版本对哪个版本`（短话不带路径、整句三样都在）；基线 `opening/catalogs-{light,dark}.png` 重批，对照材料 `logs/cao-07-compare/`。
 
 ### `Q797` — 子库记着的前端格式这一版没有适配器，照旧在排差量预览开跑之后才判出、记失败
 
@@ -207,6 +209,7 @@
 核查（2026-09-23）：crates/core/src/workspace.rs:321-329 CatalogFacts 只有 variants/scanned_at，没有根数；opening.rs row_ui 三样都没画；界面无「在文件管理器里打开」
 依赖／可并：Q841（同一 row_ui，基线一起重批）
 （大小 S，来自票 `gui-looks-like-the-design/05`）
+**收于票 `core-answers-once/07`（2026-10-28）：settled（只做「N 个根」；后两件按裁定不做）。** 核心库 `workspace::CatalogFacts` 多交一个 `roots`（那一份库有几个根，与上次扫描时刻同一次 `Catalog::roots()` 里出）；开场那一行照稿的次序画成「2 个根 · 46,444 个变体 · 上次扫描 …」（稿 `gui-looks-like-the-design/prototype.html:845`）。测试 `crates/core/tests/catalog_list.rs::开得了的那一份说得出它有几个根`，基线 `opening/catalogs-{light,dark}.png` 重批。「硬盘未连接，仍可打开」与「在文件系统中打开」照裁定不做。
 
 ### `Q751` — 界面上的识别只认默认那一副提问指纹：命令行拨过 `--model-id` / `--model-effort` 问出来的答案界面用不到
 
@@ -222,6 +225,7 @@
 核查（2026-09-23）：crates/core/src/workspace.rs:607-631 entry_of：Version→SchemaMismatch，其余 Err→CatalogState::Broken（含权限、被锁、被挪走）。ADR-0021 修订段写死三态「开得了／结构版本对不上／文件坏了」。
 依赖／可并：Q614、Q616（同一条「读不动≠没有」线）
 （大小 S，来自票 `no-mute-spots-opening-a-catalog/04`）
+**收于票 `core-answers-once/07`（2026-10-28）：settled。** `workspace::CatalogState` 多一支 `Unreadable`（四态：开得了 ／ 结构版本对不上 ／ 读不动 ／ 文件坏了）；分法在核心库一处 `CatalogError::unreadable()`，照打开时 SQLite 的错码逐条判——`SQLITE_PERM`、`SQLITE_CANTOPEN`（实测 macOS 上把一份库收成 0o000 正是这一条）、`SQLITE_BUSY` / `SQLITE_LOCKED`（另一条连接 `BEGIN EXCLUSIVE` 占着时正是这一条），**判不准的（`SQLITE_NOTADB`、`SQLITE_CORRUPT`、`SQLITE_IOERR`、别的）归「文件坏了」并照印原话**。那一句话带下一步「去修这份文件与它那个目录的权限，或者关掉占用它的程序」，不是「删掉重扫」。开场那一行画一枚「读不动」标签（`Broken` 那枚还是「打不开」）。测试 `crates/core/tests/catalog_list.rs::一份中立库的读权限被收掉时列举交出读不动`（造不出来就如实跳过）、`crates/gui/tests/snapshot.rs::开场_读不动的那一份写着读不动_下一步是修权限`；新基线 `opening/unreadable-library-{light,dark}.png` 待点头（对照材料 `logs/cao-07-compare/CHANGED.md`）。挂单 `Q1358`（那一行里那串路径要不要去掉）、`Q1357`（「读不动」这个词不在词表里）。
 
 ### `Q614` — `Site::open` 先问一句 `catalog.exists()`，目录读不动时说的是「还没有这份库，先跑一次 scan」
 
