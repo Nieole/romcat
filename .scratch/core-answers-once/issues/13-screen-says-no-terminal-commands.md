@@ -68,10 +68,14 @@
 - [x] 受影响的截图基线（若有）重批；每张新截图基线先由编排者对稿自审，过关的再交拿主意的人点头
   —— **一张都没变**：`CARGO_INCREMENTAL=0 cargo test -p romcat-gui --all-features --test snapshot`（不带 `UPDATE_SNAPSHOTS`）
   159 条全过、0 条红，于是没有重批、没有对照材料（`/Users/nicoer/dev/game-wt/logs/cao-13-compare/` 不必建）。
-  原因：变的四处都在悬停里（差量预览吃不下那几行、规则移除、不是同一个），截图拍不到；`PICK_ROOT_NONE` 只在选目录窗口什么都没交回来时出现，
-  截图里没有那一态；`no_candidate_hint` 那一句在截图夹具里一帧都没画出来。
+  原因：变的四处有三处只在悬停里（差量预览吃不下那几行、规则移除、不是同一个），截图拍不到；
+  `PICK_ROOT_NONE` 只在选目录窗口什么都没交回来时出现，截图里没有那一态；`no_candidate_hint` 那一句要「一条候选都没有」才画，
+  截图夹具里没有那一态（159 条基线一张没动就是这一条的实测）。
 - [x] 门禁全绿
-  —— 见文末「门禁」一节。
+  —— `CARGO_INCREMENTAL=0 cargo xtask gate --keep-going -j 2 --test-threads 2`，日志
+  `/Users/nicoer/dev/game-wt/logs/cao-13-gate1.log`（开头两行是 `/Users/nicoer/dev/game-wt/slot2`、`q8/cao-13`），末行 `EXIT=0`，
+  「── 门禁 ──」底下七条逐条绿（原文见文末「门禁」一节）；`test` 那一条 92 个测试目标全 `test result: ok`、红 0。
+  收尾时 `git merge q8/cao-int` 是 **no-op**（`Already up to date.`，集成分支还在 `186fbfd`），于是没有再跑第二趟。
 
 收挂单 `Q1349`：票 06 那一族之外的三句核心话去命令、原因交成种类，界面三句逐句答了落点——`../PARKING-LOT.md` 里 `Q1349` 底下补了
 「票 `core-answers-once/13` 做掉了什么」一段。本票新记挂单 `Q1797`–`Q1802`。
@@ -107,4 +111,30 @@
 
 ## 门禁
 
-（下一段填日志末行与七条汇总。）
+日志 `/Users/nicoer/dev/game-wt/logs/cao-13-gate1.log`，开头两行：
+
+```
+/Users/nicoer/dev/game-wt/slot2
+q8/cao-13
+```
+
+末行与「── 门禁 ──」底下那七条（原文照抄）：
+
+```
+── 门禁 ──
+绿  fmt        2s  cargo fmt --all --check
+绿  glossary    3s  cargo xtask glossary
+绿  check     21s  cargo check --workspace --all-targets -j 2
+绿  clippy    25s  cargo clippy --workspace --all-targets --all-features -j 2
+绿  test    1046s  cargo test --workspace --all-features --no-fail-fast -j 2 -- --test-threads=2
+绿  numbers    3s  cargo xtask numbers --check
+绿  doc        9s  RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lib --bins -j 2
+7 条全绿。
+EXIT=0
+```
+
+`numbers` 那一条印的是 `测试条数=3,005 测试目标数=92 票数=204/223 ADR份数=24`；README 里那两个数由
+`cargo xtask numbers --write` 写回（2,999 → 3,005、203 → 204）。
+
+收尾时把集成分支合进来：`git merge q8/cao-int` → `Already up to date.`（`q8/cao-int` 还在 `186fbfd`，与本分支的基点同一个），
+于是**没有再跑第二趟**——合并没有带进任何改动。
