@@ -68,6 +68,11 @@ const PATH_ONLY: &str = "变体没有内容判据，收藏只能按路径记录�
 /// 钉在内容上的收藏，状态块「收藏」那一行悬停时说的话。
 const CONTENT_ANCHORED: &str = "按文件内容记录：删掉中立库重扫、改名、挪目录都还认得出。";
 
+/// 状态块里**读不动**那一行写的字（ADR-0021 第三态，挂单 `Q996`）。
+///
+/// 与「—」「未收藏」「还没导出」分开：那三个是「库说没有」，这一个说的是「库没说出来」。
+const UNREADABLE: &str = "读不动";
+
 /// 有没存的改动时想离开这一页（返回、上一个、下一个）说的那一句（设计稿 `guardDirty`）。
 const UNSAVED: &str = "有未保存的修改，请先保存或放弃";
 
@@ -146,8 +151,9 @@ pub struct Page {
     platform_names: String,
     /// 这个作品**收没收藏**、收了的钉在哪种锚上（核心库 `collection::favorite_of`，它转调
     /// `standing_of_work`——与底下那一行「合集」同一处判）：状态块里「收藏」那一行、头上那枚「★ 已收藏」标签
-    /// 与那颗收藏按钮上的字都照它写（挂单 `Q961`）。没收藏是 `None`。
-    favorite: Option<&'static str>,
+    /// 与那颗收藏按钮上的字都照它写（挂单 `Q961`）。没收藏是 `Known(None)`；读不动是
+    /// [`Readable::Unreadable`]（挂单 `Q996`）。
+    favorite: Readable<Option<&'static str>>,
     /// 这个作品在**哪几个合集**里，各钉在哪种锚上（核心库 `collection::standing_of_work`，
     /// 与上面「收藏」那一行**同一处判**）：状态块里「合集」那一行照它写，每一个后头一个
     /// 「×」就地移出（票 `gui-looks-like-the-design/13`）。**收藏不在这一行里**——
@@ -158,11 +164,12 @@ pub struct Page {
     chinese: Option<ChineseMark>,
     /// 这个作品底下那几个变体**落在哪几个子库的选择集里**（核心库 `sublibrary::holding`，
     /// 与子库屏、容量条、差量预览、真正同步那一趟**同一个求值函数**）：状态块里「子库」那一行照它写。
-    /// 一个都没落进是空的。
-    sublibraries: Vec<String>,
+    /// 一个都没落进是空的；读不动是 [`Readable::Unreadable`]（挂单 `Q996`）。
+    sublibraries: Readable<Vec<String>>,
     /// 这个作品**上次写进前端格式是什么时候**（核心库 `Catalog::entry_exported`）：状态块里「导出」那一行照它写。
-    /// **一趟都没导过、或者上次导出那会儿它还不在库里**都是 `None`——那与「整库导过了」不是同一件事。
-    exported: Option<ExportMark>,
+    /// **一趟都没导过、或者上次导出那会儿它还不在库里**都是 `Known(None)`——那与「整库导过了」不是同一件事；
+    /// 读不动是 [`Readable::Unreadable`]（挂单 `Q996`）。
+    exported: Readable<Option<ExportMark>>,
     /// 这几个变体跟前有没有一处**成型存疑**（核心库 `Catalog::shaping_doubts_near`，判据与库体检那一格
     /// 同一处，ADR-0024）：「变体」那一面头上那块建议照它画（票 `gui-looks-like-the-design/29`）。
     doubts: Vec<romcat_core::shape::Doubt>,
@@ -170,6 +177,24 @@ pub struct Page {
     /// 「N 处待生效」那一条照它画；纠正过、还没重新成型的那一处与那张卡标「待生效」，不再给纠正与撤销的门
     /// （`PendingFixes::covers`）。
     pending: romcat_core::verdict::PendingFixes,
+}
+
+/// 状态块里那三行读得出来没有（ADR-0021 第三态）：**读不动不是「没有」**。
+///
+/// 「未收藏」「一个子库都没落进」「还没导出」都是**读得出来、答的就是没有**；读不动时那三行
+/// 画「读不动」，不画「—」「还没导出」（挂单 `Q996`）。
+#[derive(Debug, Clone)]
+enum Readable<T> {
+    /// 读得出来：里头就是库里说的那个答案。
+    Known(T),
+    /// 读不动：说不上来，不拿一个「没有」顶上。
+    Unreadable,
+}
+
+impl<T: Default> Default for Readable<T> {
+    fn default() -> Self {
+        Self::Known(T::default())
+    }
 }
 
 /// 编辑态下一格的草稿。
@@ -211,13 +236,13 @@ impl Page {
         self.row = None;
         self.head = None;
         self.files.clear();
-        self.sublibraries.clear();
-        self.exported = None;
+        self.sublibraries = Readable::default();
+        self.exported = Readable::default();
         self.doubts.clear();
         self.pending = romcat_core::verdict::PendingFixes::default();
         // **收藏与合集这两格也得清**（票 `gui-looks-like-the-design/13`）：忘了清，
         // 换到另一个作品时那两行会先画着上一个作品的合集，等重读那一趟落下来才改口。
-        self.favorite = None;
+        self.favorite = Readable::default();
         self.collections.clear();
     }
 }
@@ -629,21 +654,26 @@ impl Screen {
         }
         // **收藏与合集走同一趟**（核心库 `standing_of_work`，`favorite_of` 转调它）：
         // 两处各问一次的话，屏上「收藏」那一行与「合集」那一行会对同一批变体说两种锚。
-        let 在哪几个合集里 = match romcat_core::collection::standing_of_work(site, &keys) {
-            Ok(几个) => 几个,
-            Err(error) => {
-                self.error = Some(format!("收藏与合集读不动：{error}"));
-                Vec::new()
-            }
-        };
-        let favorite = 在哪几个合集里
-            .iter()
-            .find(|(name, _)| name == romcat_core::collection::FAVORITE)
-            .map(|(_, anchor)| *anchor);
-        let collections: Vec<(String, &'static str)> = 在哪几个合集里
-            .into_iter()
-            .filter(|(name, _)| name != romcat_core::collection::FAVORITE)
-            .collect();
+        // 读不动时「收藏」那一行画「读不动」，不拿「未收藏」顶上去（挂单 `Q996`）。
+        let (favorite, collections): (Readable<Option<&'static str>>, Vec<(String, &'static str)>) =
+            match romcat_core::collection::standing_of_work(site, &keys) {
+                Ok(几个) => (
+                    Readable::Known(
+                        几个
+                            .iter()
+                            .find(|(name, _)| name == romcat_core::collection::FAVORITE)
+                            .map(|(_, anchor)| *anchor),
+                    ),
+                    几个
+                        .into_iter()
+                        .filter(|(name, _)| name != romcat_core::collection::FAVORITE)
+                        .collect(),
+                ),
+                Err(error) => {
+                    self.error = Some(format!("收藏与合集读不动：{error}"));
+                    (Readable::Unreadable, Vec::new())
+                }
+            };
         let chinese = match self.work.as_ref() {
             Some(work) => match catalog.work_chinese_mark(work) {
                 Ok(mark) => mark,
@@ -657,19 +687,26 @@ impl Screen {
         // **子库**与**导出**那两行（票 `gui-looks-like-the-design/34`）。两样的判断都在核心库：
         // 「落在哪几个子库里」走求值那一处（`sublibrary::holding`，ADR-0024），
         // 「上次几点写出去的」读导出那一趟逐条记下的账（`Catalog::entry_exported`）。
-        let mut sublibraries = Vec::new();
-        let mut exported = None;
+        // 读不动时那两行画「读不动」，不画「—」「还没导出」（挂单 `Q996`）。
+        let mut sublibraries = Readable::Known(Vec::new());
+        let mut exported = Readable::Known(None);
         if let Some(work) = self.work.as_ref() {
             let 键: Vec<&str> = keys.iter().map(String::as_str).collect();
-            match romcat_core::sublibrary::holding(catalog, &键) {
-                Ok(names) => sublibraries = names,
-                Err(error) => self.error = Some(format!("中立库读不动：{error}")),
-            }
+            sublibraries = match romcat_core::sublibrary::holding(catalog, &键) {
+                Ok(names) => Readable::Known(names),
+                Err(error) => {
+                    self.error = Some(format!("中立库读不动：{error}"));
+                    Readable::Unreadable
+                }
+            };
             let (anchor, subject) = work.anchor.scrape_anchor(&work.name);
-            match catalog.entry_exported(anchor, subject) {
-                Ok(mark) => exported = mark,
-                Err(error) => self.error = Some(format!("中立库读不动：{error}")),
-            }
+            exported = match catalog.entry_exported(anchor, subject) {
+                Ok(mark) => Readable::Known(mark),
+                Err(error) => {
+                    self.error = Some(format!("中立库读不动：{error}"));
+                    Readable::Unreadable
+                }
+            };
         }
         page.files = files;
         page.chinese = chinese;
@@ -1446,11 +1483,11 @@ impl Screen {
                                 // **收藏了就多一枚标签**（设计稿头上那一排的 `★ 已收藏`，挂单 `Q961`）：只钉得住路径的那一档
                                 // 照稿换留神那一对颜色、接「只按路径记录」——与状态块「收藏」那一行同一处判（`standing_of_work`）。
                                 match page.favorite {
-                                    None => {}
-                                    Some(romcat_core::verdict::ANCHOR_CONTENT) => {
+                                    Readable::Known(None) | Readable::Unreadable => {}
+                                    Readable::Known(Some(romcat_core::verdict::ANCHOR_CONTENT)) => {
                                         table::tag(ui, FAVORED);
                                     }
-                                    Some(_) => {
+                                    Readable::Known(Some(_)) => {
                                         look::plain_chip(
                                             ui,
                                             look::Tone::Caution,
@@ -1481,9 +1518,13 @@ impl Screen {
                                     .clicked();
                                 // **收藏与加入合集照稿夹在「刮削此作品」与「合并…」之间**（挂单 `Q961` `Q1108`）：
                                 // 收没收藏由核心库答（`standing_of_work`），按下去走的是右键菜单与 `F` 那一条路。
+                                let 收着了 = matches!(
+                                    page.favorite,
+                                    Readable::Known(Some(_))
+                                );
                                 let 收藏 = ui
-                                    .button(if page.favorite.is_some() { FAVORED } else { FAVOR })
-                                    .on_hover_text(if page.favorite.is_some() {
+                                    .button(if 收着了 { FAVORED } else { FAVOR })
+                                    .on_hover_text(if 收着了 {
                                         "再按一下取消收藏。作品本身一个字不动。"
                                     } else {
                                         "放进收藏，落沉淀库，删掉中立库重扫也还在。认得出内容的变体按内容记录，改名、挪目录都还认得出；\
@@ -3868,17 +3909,23 @@ fn hero_facts(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) {
                         .size(look::font_size(ui.ctx(), tokens.font.size_caption_plus))
                         .color(弱),
                 );
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(值.as_str())
-                            .font(egui::FontId::new(
-                                tokens.font.size_body,
-                                font::strong_family(),
-                            ))
-                            .color(强),
-                    )
-                    .truncate(),
-                );
+                let 字体 = egui::FontId::new(tokens.font.size_body, font::strong_family());
+                if *名 == "平台" {
+                    // **「平台」那一格允许折成两行**（拿主意的人 2026-10-02 裁，挂单 `Q1450`）：
+                    // 全名一律带厂名之后「Nintendo Super Famicom」一行放不下，从前截成
+                    // 「Nintendo Super F…」。别的几格照旧一行、截尾巴。
+                    let mut job = egui::text::LayoutJob::single_section(
+                        值.clone(),
+                        egui::TextFormat::simple(字体, 强),
+                    );
+                    job.wrap.max_rows = 2;
+                    ui.add(egui::Label::new(job).wrap());
+                } else {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(值.as_str()).font(字体).color(强))
+                            .truncate(),
+                    );
+                }
             });
         }
     });
@@ -4007,16 +4054,21 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<Page
                     egui::TextFormat::simple(egui::FontId::proportional(字号), color),
                 );
             };
+            // 读不动不画「未收藏」：那两件事下一步完全不同（ADR-0021，挂单 `Q996`）。
             let 为什么 = match page.favorite {
-                None => {
+                Readable::Unreadable => {
+                    段(UNREADABLE, 留神);
+                    None
+                }
+                Readable::Known(None) => {
                     段("未收藏", 强);
                     None
                 }
-                Some(romcat_core::verdict::ANCHOR_CONTENT) => {
+                Readable::Known(Some(romcat_core::verdict::ANCHOR_CONTENT)) => {
                     段("已收藏 · 按文件内容记录", 强);
                     Some(CONTENT_ANCHORED)
                 }
-                Some(_) => {
+                Readable::Known(Some(_)) => {
                     段("已收藏 · ", 强);
                     段("只按路径记录", 留神);
                     Some(PATH_ONLY)
@@ -4055,13 +4107,14 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<Page
             });
         });
         // 子库：落在哪几个子库的选择集里，名字之间「、」（设计稿 `ovTab` 的 `subs`）。
-        // **一个都没落进写「—」**——与别处「那一格说不出来」同一个记号。
+        // **一个都没落进写「—」**——与别处「那一格说不出来」同一个记号；**读不动写「读不动」**，
+        // 不拿「—」顶上（挂单 `Q996`）。
         ui.add_space(tokens.space.info_list_gap[0]);
         info_row(ui, "子库", |ui| {
-            let 话 = if page.sublibraries.is_empty() {
-                "—".to_owned()
-            } else {
-                page.sublibraries.join("、")
+            let 话 = match &page.sublibraries {
+                Readable::Unreadable => UNREADABLE.to_owned(),
+                Readable::Known(names) if names.is_empty() => "—".to_owned(),
+                Readable::Known(names) => names.join("、"),
             };
             ui.add(egui::Label::new(egui::RichText::new(话).size(字号).color(强)).wrap());
         });
@@ -4072,10 +4125,13 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<Page
         // 那正是这一行最该答对的一种情形（`catalog::export` 的模块文档）。
         ui.add_space(tokens.space.info_list_gap[0]);
         info_row(ui, "导出", |ui| {
-            let 话 = page.exported.as_ref().map_or_else(
-                || "还没导出".to_owned(),
-                |mark| format!("已导出到 {} · {}", mark.format, human_time(mark.at)),
-            );
+            let 话 = match &page.exported {
+                Readable::Unreadable => UNREADABLE.to_owned(),
+                Readable::Known(None) => "还没导出".to_owned(),
+                Readable::Known(Some(mark)) => {
+                    format!("已导出到 {} · {}", mark.format, human_time(mark.at))
+                }
+            };
             ui.add(egui::Label::new(egui::RichText::new(话).size(字号).color(强)).wrap());
         });
     });

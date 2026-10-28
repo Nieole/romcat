@@ -229,6 +229,7 @@
 核查（2026-09-23）：crates/core/src/site.rs:123 Site::open 与 :142 open_file 都是 `if !catalog.exists()`→NoCatalog/not_found（:78），目录读不动时说成「还没有这份库，先跑一次 scan」。CLI 那六处预问（Q523）已裁「维持现状」。
 依赖／可并：Q613、Q616
 （大小 S，来自票 `no-mute-spots-opening-a-catalog/04`）
+**收于票 `core-answers-once/11`（2026-10-28）：settled。** `Site::open`／`Site::open_file` 的「在不在」从 `Path::exists()` 换成 `try_exists`：说不出来在不在（目录读不动）时交 `SiteError::Unreadable`，那句是「中立库住的那个目录读不动：…（系统怎么说的）。说不准里头那份中立库在不在——先去修那个目录的权限，或者关掉占着它的程序」，不再说成「还没有这份库，先跑一次 `scan`」。测试：`crates/core/tests/catalog_list.rs::工作目录读不动时打开现场说的也是读不动不是还没有这份库`（收权限造不出来就如实跳过，`testing::revoke` 印那一行）。命令行那六处开库前的预问照 `Q523` 不动（挂单 `Q1398` 记着这一截）。
 
 ### `Q616` — 「不许写进任何一份主库」那道守卫在中立库目录读不动时照旧放行
 
@@ -236,6 +237,7 @@
 核查（2026-09-23）：crates/cli/src/main.rs:6199-6203 refuse_writing_into_any_library：catalogs(..).entries() 为 Err 就 return Ok(())；它**只守一处**——:4250 `romcat triage export --out`（把沉淀库导成 JSON）；写法是 :6221 write_file→fs::write，会**覆盖已存在的文件**。中立库在 工作目录/catalog/（workspace.rs:243），沉淀库在 工作目录/verdict/（:748），所以 catalog 目录读不动时沉淀库照样开得了、导出照样走到这一步。
 依赖／可并：Q613、Q614
 （大小 S，来自票 `no-mute-spots-opening-a-catalog/04`）
+**收于票 `core-answers-once/11`（2026-10-28）：settled。** 照 ADR-0004 修订段：`refuse_writing_into_any_library` 查不出主库的根时交 `Writing::OnlyNew`——落点**已存在就拒**、话里说清「这一趟查不出主库的根（…），没法确认它不落在某一份主库里——已有的文件一个字节都不覆盖，换一个新的文件名再导出」；落点不在就照旧写得出去，只是改用 `create_new`（不肯覆盖由系统那一下兜住，不靠「先问一遍再写」）。「开不动的那几份跳过」那套口径没翻：能比的根照旧比。测试：`crates/cli/tests/triage.rs::中立库目录读不动时导出只放行新建_已存在的拒掉且一个字节不动`（收权限造不出来就如实跳过）。
 
 ### `Q976` — 开窗时优先级表读不动**静默退回内置那份**，屏上一个字都不说
 
@@ -250,3 +252,4 @@
 **上游已答，只差动手：** ADR-0021（不可读是第三态，不压成「没有」）。
 核查（2026-09-23）：crates/gui/src/browse/work.rs:604 sublibrary::holding、:609 entry_exported 出错只设 self.error，行上照画「—」/「还没导出」(:3939)；同文件收藏那行同样写法
 （大小 M，来自票 `gui-looks-like-the-design/34`）
+**收于票 `core-answers-once/11`（2026-10-28）：settled。** 那三行改交三态（`crates/gui/src/browse/work.rs` 的 `Readable`：`Known(..)` ／ `Unreadable`）：读不动时「收藏」「子库」「导出」三行都画「读不动」（留神那一对色），不画「—」「未收藏」「还没导出」。测试：`crates/gui/tests/work.rs::详情页三行读不动时画读不动_不画破折号与还没导出`（从另一条连接把变体表与导出账弄坏造出读不动）。同一趟读不动的「合集」那一行与头上那颗收藏按钮照旧，另立挂单 `Q1397`。

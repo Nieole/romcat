@@ -8,6 +8,7 @@ use romcat_core::catalog::roots::{self, RootScan};
 use romcat_core::catalog::{Catalog, SCHEMA_VERSION};
 use romcat_core::platform::Manifest;
 use romcat_core::shape::{Role, SINGLE_FILE_RULE, Variant};
+use romcat_core::site::Site;
 use romcat_core::testing::{self, Revoke, temp_dir};
 use romcat_core::workspace::{self, CatalogEntry, CatalogState, Listing, Slug};
 
@@ -445,6 +446,36 @@ fn 工作目录读不动时交出来的是读不动而不是空的() {
             "那句话没说清是哪个目录：{说的}"
         );
     }
+}
+
+#[test]
+fn 工作目录读不动时打开现场说的也是读不动不是还没有这份库() {
+    // ADR-0021 那条修订的另一半（挂单 `Q614`）：**读不动不是没有**。「打开现场」从前先问一句
+    // `catalog.exists()`，而它把「读不动」也报成「不在」——命令行于是说「还没有这份库，先跑一次
+    // `romcat scan`」，人照做就是白扫一趟，而该做的完全不同：去修那个目录的权限。
+    //
+    // 造的是**真的**读不动的目录（权限位一收就列不开），不是注入。造不出来（不是 Unix、或者跑
+    // 测试的是 root）就如实跳过，`testing::revoke` 印出为什么。
+    let 工作目录 = temp_dir("开现场-收了读权限");
+    let slug = Slug::Named("锁着的库");
+    let 库文件 = 建一份(工作目录.path(), "锁着的库");
+    let 目录 = 库文件.parent().expect("有那个目录").to_path_buf();
+    let Some(_还回去) = testing::revoke(&目录, Revoke::Read) else {
+        return;
+    };
+
+    let 错 = Site::open(工作目录.path(), slug, None, "--library 锁着的库")
+        .expect_err("列不开的目录里说不出来这份库在不在，该交出读不动");
+    let 说的 = 错.to_string();
+    assert!(
+        !说的.contains("还没有"),
+        "读不动被说成了「还没有这份库」：{说的}"
+    );
+    assert!(说的.contains("读不动"), "那句话没说是读不动：{说的}");
+    assert!(
+        说的.contains(&romcat_core::path::display(&目录)),
+        "那句话没说清是哪个目录读不动：{说的}"
+    );
 }
 
 #[test]

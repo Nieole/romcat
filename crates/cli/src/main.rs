@@ -4266,10 +4266,11 @@ fn run_triage_export(args: &TriageExportArgs) -> ExitCode {
         Ok(text) => text,
         Err(error) => return fail(format!("序列化失败：{error}")),
     };
-    if let Err(message) = refuse_writing_into_any_library(&workspace, &args.out) {
-        return fail(message);
-    }
-    if let Err(error) = write_file(&args.out, format!("{text}\n").as_bytes()) {
+    let writing = match refuse_writing_into_any_library(&workspace, &args.out) {
+        Ok(writing) => writing,
+        Err(message) => return fail(message),
+    };
+    if let Err(error) = write_out(&args.out, format!("{text}\n").as_bytes(), writing) {
         return fail(format!("写不出 {}：{error}", path::display(&args.out)));
     }
     println!(
@@ -6340,6 +6341,19 @@ impl OutputArgs {
     }
 }
 
+/// 这一条输出该按哪种方式写：ADR-0004 那条红线定。
+///
+/// 这道守卫后面是一次写文件。**查得出主库的根**时拦的是「落进主库」那一条，落点没落进去就
+/// 照旧写（可以是覆盖）；**查不出根**时退到字节级底线：只放行新建（ADR-0004 修订段，
+/// 挂单 `Q616`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Writing {
+    /// 每一份主库的根都查出来了，而这一条路径也没落进任何一份：照旧写。
+    Freely,
+    /// 有主库的根查不出来：**只放行新建**，已有的文件一个字节都不覆盖。
+    OnlyNew,
+}
+
 /// 同上，用在**不知道主库根在哪**的那几条命令上。
 ///
 /// [`refuse_writing_into_library`] 要调用方手上先有一个根。`triage export --out` 是
@@ -6350,29 +6364,69 @@ impl OutputArgs {
 /// 加一个 `--root` 是站不住的另一条路——一道要人记得带旗子才生效的守卫不是守卫，
 /// 而这条红线护着的是 10 TB 不可再生的东西。
 ///
-/// **开不动的那几份跳过**：它们的根读不出来，而这道守卫宁可少挡一次，也不能挡错一次
-/// （把人往别处写的合法输出拦下来）。用户机器上是三份库（ADR-0023），这一趟三次只读打开。
-/// **中立库住的那个目录读不动时同一个口径**：一份库的根都读不出来，一个都不比。
-fn refuse_writing_into_any_library(workspace: &Path, target: &Path) -> Result<(), String> {
+/// **查不出根时只放行新建**（ADR-0004 修订段，挂单 `Q616`）：中立库住的那个目录读不动（或者
+/// 某一份库开不了、根读不出来）的极端情况下，从前这一支**放行**——而它后面是一次**覆盖写**，
+/// 那就是把一份 ROM 盖掉。现在：落点已存在就拒并说清是因为查不出主库的根，落点不在就交
+/// [`Writing::OnlyNew`]（写的时候用 `create_new`，中间抢进来的那一份也盖不掉）。
+///
+/// 「开不动的那几份跳过」那套口径没翻：说不出来的根照样不比，能比的那几份照旧比——
+/// 新文件碰不到任何已有的字节，拒掉覆盖就把两条判据都守住了。
+fn refuse_writing_into_any_library(workspace: &Path, target: &Path) -> Result<Writing, String> {
     let listing = romcat_core::workspace::catalogs(workspace);
-    let Ok(entries) = listing.entries() else {
-        return Ok(());
+    // 第一处「查不出根」的原因：拿它说清是哪个目录、哪份库怎么了。**开不了的那份照印
+    // 核心库的原话**（它自己说了为什么开不了），命令行不另写一句。
+    let mut 查不出根: Option<String> = None;
+    let entries: &[romcat_core::workspace::CatalogEntry] = match listing.entries() {
+        Ok(entries) => entries,
+        Err(why) => {
+            查不出根 = Some(why.to_string());
+            &[]
+        }
     };
     for entry in entries {
+        let 为什么开不了 = || match &entry.state {
+            romcat_core::workspace::CatalogState::SchemaMismatch { said, .. }
+            | romcat_core::workspace::CatalogState::Broken { said } => {
+                format!("{} 打不开：{said}", path::display(&entry.path))
+            }
+            romcat_core::workspace::CatalogState::Openable(_) => {
+                format!("{} 打不开", path::display(&entry.path))
+            }
+        };
         if !entry.state.openable() {
+            查不出根.get_or_insert_with(为什么开不了);
             continue;
         }
         let Ok(catalog) = Catalog::open(&entry.path) else {
+            查不出根.get_or_insert_with(为什么开不了);
             continue;
         };
         let Ok(roots) = Roots::load(&catalog) else {
+            查不出根
+                .get_or_insert_with(|| format!("{} 里的根读不出来", path::display(&entry.path)));
             continue;
         };
         for (_, root) in roots.iter() {
             refuse_writing_into_library(root, target)?;
         }
     }
-    Ok(())
+    let Some(why) = 查不出根 else {
+        return Ok(Writing::Freely);
+    };
+    // **查不出根时只放行新建**：目标已经在了就拒——它可能就是一份 ROM。
+    match target.try_exists() {
+        Ok(false) => Ok(Writing::OnlyNew),
+        Ok(true) => Err(format!(
+            "{} 已经在那儿了。这一趟查不出主库的根（{why}），没法确认它不落在某一份主库里——\
+             已有的文件一个字节都不覆盖，换一个新的文件名再导出",
+            path::display(target)
+        )),
+        Err(source) => Err(format!(
+            "{} 说不出来在不在（{source}）。这一趟查不出主库的根（{why}），没法确认它不落在\
+             某一份主库里——已有的文件一个字节都不覆盖，换一个新的文件名再导出",
+            path::display(target)
+        )),
+    }
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -6382,6 +6436,26 @@ fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, bytes)
+}
+
+/// 照 [`Writing`] 那一档把输出落下去。
+///
+/// `OnlyNew` 用的是 [`fs::OpenOptions::create_new`]：**不肯覆盖**这件事由系统那一下本身兜住，
+/// 不靠「先问一遍在不在、再写」——查出来不在与写到之间还有一瞬。
+fn write_out(path: &Path, bytes: &[u8], writing: Writing) -> io::Result<()> {
+    if writing == Writing::Freely {
+        return write_file(path, bytes);
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(bytes)
 }
 
 #[cfg(test)]

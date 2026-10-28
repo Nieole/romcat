@@ -2665,3 +2665,164 @@ fn 详情页改过的字段_关掉窗口再打开值照旧_撤掉的也不回来
         "关掉再打开，清空撤掉的手动修改又回来了"
     );
 }
+
+// ——— 头上「平台」那一格与状态块那三行（票 `core-answers-once/11`） ———
+
+/// 一份**落在磁盘上**的小库：一个认出来了的 SFC 作品、两个变体，年份也有一格。
+///
+/// 非落盘不可的有两条：**头上「平台」那一格**要一份平台全名真写得出来的作品；**状态块那三行**
+/// 要造得出「读不动」——从另一条连接把表弄坏，而只活在内存里的那两份库弄不坏
+/// （`tests/browse.rs` 的「这本账算不出来」同一个做法）。
+fn 盘上的作品() -> (romcat_core::testing::TempDir, std::path::PathBuf, i64) {
+    use romcat_core::catalog::identify::Identification;
+    use romcat_core::catalog::{Catalog, Confidence, Provenance, State};
+    use romcat_core::platform::Manifest;
+    use romcat_core::scrape::{AnchorKind, Field};
+    use romcat_core::workspace::{self, Slug};
+
+    let 工作区 = romcat_core::testing::temp_dir("gui-work-详情页三行");
+    let 库文件 = workspace::catalog_path(工作区.path(), Slug::Named("小库"));
+    let mut catalog = Catalog::create(&库文件, "小库").expect("建得出中立库");
+    romcat_core::catalog::roots::add_root(
+        &catalog,
+        None,
+        shared::根,
+        std::path::Path::new("/主库"),
+    )
+    .expect("建得出根");
+    let 变体们 = [shared::变体("SFC", "甲.zip"), shared::变体("SFC", "乙.zip")];
+    catalog
+        .replace_variants(&变体们, 1, &Manifest::default())
+        .expect("写得进变体");
+    let 作品 = catalog
+        .add_work("超时空之钥", Provenance::Identified)
+        .expect("建得出作品");
+    catalog
+        .put_verdict_value(AnchorKind::Work, "超时空之钥", Field::Year, "1995", "夹具")
+        .expect("写得进年份");
+    let 结论: Vec<Identification> = 变体们
+        .iter()
+        .enumerate()
+        .map(|(at, 变体)| Identification {
+            variant_key: 变体.key.clone(),
+            state: State::Matched,
+            reason: None,
+            platform: Some("SFC".to_string()),
+            standalone: None,
+            edition: None,
+            units: 1,
+            nkit: 0,
+            read_bytes: 0,
+            work_id: Some(作品),
+            release_id: None,
+            candidates: vec![shared::候选(变体, at == 0, Confidence::High)],
+        })
+        .collect();
+    catalog.write_identifications(&结论).expect("写得进结论");
+    (工作区, 库文件, 作品)
+}
+
+/// 照开现场那一条正门开一扇窗，打开这个作品的详情页、停在概览那一面，跑几帧。
+fn 开作品(
+    ctx: &egui::Context,
+    工作区: &std::path::Path,
+    库文件: &std::path::Path,
+    作品: i64,
+) -> App {
+    let site = romcat_core::site::Site::open_file(工作区, 库文件, None).expect("开得出现场");
+    let mut app = App::new(site, 工作区.to_path_buf());
+    app.show_view(View::Browse);
+    跑(ctx, &mut app, 2);
+    {
+        let (browse, site) = app.browse_and_site();
+        browse.open_work(&site.catalog, &WorkAnchor::Work(作品));
+        browse.open_page(Tab::Overview);
+    }
+    跑(ctx, &mut app, 2);
+    app
+}
+
+/// 屏上**正好**写着这一段字的那一段，egui 把它折成了几行（`Galley` 带着分行）。
+///
+/// 「折成两行」与「截成一行」在**画出来的字**上分不开（两种情形下 `Galley::text()` 都是全文），
+/// 分得开的是它画出来有几行。
+fn 折成几行(output: &egui::FullOutput, 那一段: &str) -> Option<usize> {
+    fn 收(shape: &egui::epaint::Shape, 那一段: &str, out: &mut Option<usize>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == 那一段 && out.is_none() => {
+                *out = Some(text.galley.rows.len());
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|one| 收(one, 那一段, out)),
+            _ => {}
+        }
+    }
+    let mut out = None;
+    for clipped in &output.shapes {
+        收(&clipped.shape, 那一段, &mut out);
+    }
+    out
+}
+
+#[test]
+fn 头上平台那一格折成两行看得全_别的几格照旧一行() {
+    // 挂单 `Q1450`（拿主意的人 2026-10-02 裁）：「全名一律带厂名」之后「Nintendo Super Famicom」
+    // 在那一格里放不下，从前截成「Nintendo Super F…」；现在那一格允许折成两行，别的几格照旧一行。
+    let (工作区, 库文件, 作品) = 盘上的作品();
+    let ctx = headless::context();
+    let mut app = 开作品(&ctx, 工作区.path(), &库文件, 作品);
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    assert_eq!(
+        折成几行(&out, "Nintendo Super Famicom"),
+        Some(2),
+        "「平台」那一格该折成两行、全名看得全：\n{}",
+        画出来的字(&out)
+    );
+    assert_eq!(
+        折成几行(&out, "1995"),
+        Some(1),
+        "别的几格照旧一行：\n{}",
+        画出来的字(&out)
+    );
+}
+
+#[test]
+fn 详情页三行读不动时画读不动_不画破折号与还没导出() {
+    // ADR-0021 的第三态（挂单 `Q996`）：「子库」「导出」「收藏」三行读不动时画「读不动」，
+    // 不画「—」「还没导出」「未收藏」——把不可读压成「没有」，人就会照「没有」去动手。
+    let (工作区, 库文件, 作品) = 盘上的作品();
+    let ctx = headless::context();
+    let mut app = 开作品(&ctx, 工作区.path(), &库文件, 作品);
+    let 好的 = 画出来的字(&headless::frame(&ctx, headless::input(), |ui| app.ui(ui)));
+    assert!(
+        有这一段(&好的, "还没导出"),
+        "前提：这一趟读得动，导出一行写着「还没导出」：\n{好的}"
+    );
+
+    // 从另一条连接把这三行要读的表弄坏：变体表（子库与收藏都要它）与导出账。
+    let conn = rusqlite::Connection::open(&库文件).expect("再开得出那份库");
+    conn.execute_batch(
+        "ALTER TABLE variant RENAME TO 挪走了的变体表;\
+         ALTER TABLE export_entry RENAME TO 挪走了的导出账",
+    )
+    .expect("弄得出读不动");
+    drop(conn);
+
+    // 逼这一页重读一趟：`sync_page_details` 只在「底下那几个变体换了」时才重读。
+    {
+        let (browse, _) = app.browse_and_site();
+        browse.forget_page();
+    }
+    let out = headless::frame(&ctx, headless::input(), |ui| app.ui(ui));
+    let 屏上 = 画出来的字(&out);
+    assert_eq!(
+        画着的每一处(&out, &|text: &str| text == "读不动").len(),
+        3,
+        "「收藏」「子库」「导出」三行该都画「读不动」：\n{屏上}"
+    );
+    for 不该有的 in ["还没导出", "未收藏"] {
+        assert!(
+            !有这一段(&屏上, 不该有的),
+            "读不动被画成了「{不该有的}」：\n{屏上}"
+        );
+    }
+}
