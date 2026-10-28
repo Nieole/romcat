@@ -180,8 +180,7 @@ pub enum StoreError {
     /// 工作目录上跑（发布版加本地版、bisect、两份 checkout）时，那是真会发生的事。
     #[error(
         "中文索引 {path} 的结构版本是 {found}，比本程序认得的 {expected} 还新——\
-         它是更新的那一版程序建的。升级程序即可；\
-         真要用这一版程序，删掉它重跑一次 `romcat zh sync`"
+         它是更新的那一版程序建的。升级程序即可"
     )]
     TooNew {
         /// 索引文件。
@@ -1000,6 +999,12 @@ mod tests {
         let path = 一份旧索引(&dir, SCHEMA_VERSION + 1);
         let error = Store::open(&path).expect_err("该拒绝");
         assert!(matches!(error, StoreError::TooNew { found, .. } if found == SCHEMA_VERSION + 1));
+        // **那句话只说事实**（ADR-0023 那一族、票 `core-answers-once/13`）：它会经界面刮削面板
+        // 原样画出来（`crates/gui/src/scrape.rs` 的「中文索引打不开：…」），所以不缀命令。
+        assert!(
+            !error.to_string().contains("romcat "),
+            "核心库里那句带着命令行命令：{error}"
+        );
         // 库一个字都没动。
         let conn = rusqlite::Connection::open(&path).expect("开得起来");
         let count: i64 = conn

@@ -3494,6 +3494,14 @@ fn assemble(
     })
 }
 
+/// 一个变体的一对平台说法：上面那一问的两条结论（`fn platform_of` 是判断本身）。
+struct Platforms {
+    /// 识别判定的平台（刮削交叉校验、两份报告按它分组）。
+    identified: Option<String>,
+    /// 落点平台（导出与同步把它放到哪个平台）。
+    placement: Option<String>,
+}
+
 /// 一个变体的一对平台说法（词表**平台**条）：**识别判定的平台**与**落点平台**。
 ///
 /// **两个都由同一个决定打头**：**平台纠正**里定过的那一组（票 `gui-looks-like-the-design/28`）
@@ -3511,13 +3519,6 @@ fn assemble(
 /// `identification.placement`，ADR-0024 推论 3）：刮削、两份报告、导出与同步读那两列，
 /// 不自己拿目录声明再判一次。「这个变体撞上了平台纠正的哪一组」同样不在这儿另判，问的是
 /// [`conflicting_platform`] 那一处（[`DecidedPlatforms::decide`]）。
-struct Platforms {
-    /// 识别判定的平台（刮削交叉校验、两份报告按它分组）。
-    identified: Option<String>,
-    /// 落点平台（导出与同步把它放到哪个平台）。
-    placement: Option<String>,
-}
-
 fn platform_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Platforms {
     let decided = state
         .decided_platforms

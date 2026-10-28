@@ -1316,6 +1316,30 @@ fn guarded_catalog_path(
     Ok(path)
 }
 
+/// 把一次 [`Site::open`] 的失败印成命令行那一句：**「先跑一次 `romcat scan`」由这一层补**。
+fn open_failure(error: &SiteError) -> String {
+    match error {
+        SiteError::NoCatalog(说的) => {
+            format!("还没有 {说的} 这份中立库。先跑一次 `romcat scan`。")
+        }
+        error => format!("{error}"),
+    }
+}
+
+/// 命令行印「开不了这一份」时用的那一句：**「先跑一次 `romcat scan`」由这一层补**。
+///
+/// 核心库那句只说事实（「还没有 X 这份中立库。」）——它会原样出现在开场屏上，往后缀一条命令
+/// 就是把终端的话画到屏上（ADR-0023、票 `core-answers-once/13`）。命令行这一层补去处；
+/// `Renamed` 那一支自带下一步（按建库时的名字找），不另缀。
+fn not_found_line(workspace: &Path, slug: Slug<'_>, located_by: &str) -> String {
+    match SiteError::not_found(workspace, slug, located_by) {
+        SiteError::NoCatalog(说的) => {
+            format!("还没有 {说的} 这份中立库。先跑一次 `romcat scan`。")
+        }
+        error => format!("{error}"),
+    }
+}
+
 /// 开这一份**已经在那儿**的中立库。
 ///
 /// **打开不建库**（[`Catalog::open`]）：不在就说清是靠什么没找到、该先跑哪一条
@@ -1330,9 +1354,7 @@ fn open_catalog(
 ) -> Result<Catalog, String> {
     let path = guarded_catalog_path(workspace, slug, root)?;
     Catalog::open(&path).map_err(|error| match error {
-        CatalogError::Missing { .. } => {
-            SiteError::not_found(workspace, slug, located_by).to_string()
-        }
+        CatalogError::Missing { .. } => not_found_line(workspace, slug, located_by),
         error => unopened(workspace, &path, &error),
     })
 }
@@ -1647,7 +1669,7 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let path = workspace::catalog_path(&workspace, slug);
     if !path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let manifest = match args.manifest.load(&workspace) {
         Ok(manifest) => manifest,
@@ -1774,7 +1796,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let dat_path = workspace::dat_repo_path(&workspace);
     if !dat_path.exists() {
@@ -2360,7 +2382,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let priorities = match args.load_priorities(&workspace) {
         Ok(priorities) => priorities,
@@ -2667,7 +2689,7 @@ fn run_titles(args: &TitlesArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let priorities = match load_priorities(args.priorities.as_deref(), &workspace) {
         Ok(priorities) => priorities,
@@ -2787,7 +2809,7 @@ fn run_import(args: &ImportArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     if let Some(root) = args.root.as_deref()
         && let Some(target) = args.json.as_deref()
@@ -2868,7 +2890,7 @@ fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let priorities = match load_priorities(args.priorities.as_deref(), &workspace) {
         Ok(priorities) => priorities,
@@ -2885,7 +2907,7 @@ fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
     // 导出读的正是那份投影。
     let mut site = match Site::open(&workspace, slug, None, &located_by) {
         Ok(site) => site,
-        Err(error) => return fail(format!("{error}")),
+        Err(error) => return fail(open_failure(&error)),
     };
 
     // **裁决先落库**：它是沉淀，不随这一趟导出消失。
@@ -3116,7 +3138,7 @@ impl TriageCommonArgs {
         let (slug, located_by) = locate(self.library.as_deref(), self.root.as_deref())?;
         let workspace = workspace_dir(self.workspace.as_deref());
         Site::open(&workspace, slug, self.root.as_deref(), &located_by)
-            .map_err(|error| format!("{error}"))
+            .map_err(|error| open_failure(&error))
     }
 }
 

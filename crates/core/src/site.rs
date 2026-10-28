@@ -26,7 +26,11 @@ use crate::workspace::{self, Slug};
 #[derive(Debug, thiserror::Error)]
 pub enum SiteError {
     /// 中立库还不在。
-    #[error("还没有 {0} 这份中立库。先跑一次 `romcat scan`。")]
+    ///
+    /// **只说事实，不带命令**（ADR-0023 那一族、票 `core-answers-once/13`）：这一句会原样出现在
+    /// 开场屏上（`crates/gui/src/program.rs` 的「上次开的那份现在开不了：…」）。「先跑一次
+    /// `romcat scan`」那半句由命令行在它那一层补（`crates/cli/src/main.rs` 的 `not_found_line`）。
+    #[error("还没有 {0} 这份中立库。")]
     NoCatalog(String),
     /// 按这个名字折出来的中立库不在，而这个工作目录里另一份库的**主库原名**正是它——那份
     /// 多半改过名：改名只换主库原名，找库认的仍是建库时那个名字折出来的主库标识（挂单 `Q472`）。
@@ -51,7 +55,7 @@ pub enum SiteError {
     /// 中立库住的那个目录**读不动**（ADR-0021 第三态，挂单 `Q614`）：说不出来这份库在不在。
     ///
     /// 从前那一问问的是 `Path::exists()`，它把「读不动」也报成「不在」——于是屏上说的是
-    /// 「还没有这份库，先跑一次 `romcat scan`」，人照做就是白扫一趟，而该做的完全不同：
+    /// 「还没有这份库」，人照做就是白扫一趟，而该做的完全不同：
     /// 去修那个目录的权限。
     #[error(
         "中立库住的那个目录读不动：{}（{source}）。说不准里头那份中立库在不在——\
@@ -113,7 +117,7 @@ impl SiteError {
     ///
     /// 给的是名字、而这个工作目录里另一份库的主库原名正是它时，说清是哪一份
     /// （[`SiteError::Renamed`]，判「是不是它」只在 [`workspace::namesake`]）；否则就是
-    /// 「还没有，先跑一次 `romcat scan`」（[`SiteError::NoCatalog`]）。
+    /// 「还没有这份库」（[`SiteError::NoCatalog`]，只这一句；「先跑哪一条」由命令行补）。
     ///
     /// 中立库住的那个目录列不开时查不了这个名字是哪一份库的原名，就只说「还没有」：那一句
     /// 只是替人多指一步路，指不出来不改变「按这个名字折出来的那份不在」。
@@ -656,6 +660,19 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn 还没有那份库那一句只说事实_命令行命令由壳来补() {
+        // ADR-0023 那一族（票 `core-answers-once/13`）：这一句会原样出现在开场屏上
+        // （`crates/gui/src/program.rs` 的「上次开的那份现在开不了：…」），所以核心里不缀命令；
+        // 命令行在它那一层补「先跑一次 `romcat scan`」（`crates/cli/src/main.rs` 的 `open_failure`）。
+        let 说的 = SiteError::NoCatalog("小库".to_string()).to_string();
+        assert!(说的.contains("还没有"), "那一句没说清是还没有：{说的}");
+        assert!(
+            !说的.contains("romcat "),
+            "核心库里那句带着命令行命令，界面会把它原样画出来：{说的}"
+        );
+    }
 
     #[test]
     fn 中立库的主文件名就是这份主库的主库标识() {

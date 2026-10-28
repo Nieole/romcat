@@ -158,7 +158,9 @@ pub struct Page {
     /// 与上面「收藏」那一行**同一处判**）：状态块里「合集」那一行照它写，每一个后头一个
     /// 「×」就地移出（票 `gui-looks-like-the-design/13`）。**收藏不在这一行里**——
     /// 它上面单占一行，两处印同一件事会让人以为收藏是个另外的东西。
-    collections: Vec<(String, &'static str)>,
+    /// 读不动时是 [`Readable::Unreadable`]，那一行画「读不动」而不是「—」——与「收藏」
+    /// 那一行同一个判据（挂单 `Q996` 的同一句话，票 `core-answers-once/11` 那一族）。
+    collections: Readable<Vec<(String, &'static str)>>,
     /// 这个作品的**中文版本**（核心库 `Catalog::work_chinese_mark`，与首选变体那条规则同一处判）：头上那枚标签与
     /// 基本信息里「中文版本」那一格照它印；一个中文的都没有是 `None`。
     chinese: Option<ChineseMark>,
@@ -243,7 +245,7 @@ impl Page {
         // **收藏与合集这两格也得清**（票 `gui-looks-like-the-design/13`）：忘了清，
         // 换到另一个作品时那两行会先画着上一个作品的合集，等重读那一趟落下来才改口。
         self.favorite = Readable::default();
-        self.collections.clear();
+        self.collections = Readable::default();
     }
 }
 
@@ -655,25 +657,31 @@ impl Screen {
         // **收藏与合集走同一趟**（核心库 `standing_of_work`，`favorite_of` 转调它）：
         // 两处各问一次的话，屏上「收藏」那一行与「合集」那一行会对同一批变体说两种锚。
         // 读不动时「收藏」那一行画「读不动」，不拿「未收藏」顶上去（挂单 `Q996`）。
-        let (favorite, collections): (Readable<Option<&'static str>>, Vec<(String, &'static str)>) =
-            match romcat_core::collection::standing_of_work(site, &keys) {
-                Ok(几个) => (
-                    Readable::Known(
-                        几个
-                            .iter()
-                            .find(|(name, _)| name == romcat_core::collection::FAVORITE)
-                            .map(|(_, anchor)| *anchor),
-                    ),
+        let (favorite, collections): (
+            Readable<Option<&'static str>>,
+            Readable<Vec<(String, &'static str)>>,
+        ) = match romcat_core::collection::standing_of_work(site, &keys) {
+            Ok(几个) => (
+                Readable::Known(
+                    几个
+                        .iter()
+                        .find(|(name, _)| name == romcat_core::collection::FAVORITE)
+                        .map(|(_, anchor)| *anchor),
+                ),
+                Readable::Known(
                     几个
                         .into_iter()
                         .filter(|(name, _)| name != romcat_core::collection::FAVORITE)
                         .collect(),
                 ),
-                Err(error) => {
-                    self.error = Some(format!("收藏与合集读不动：{error}"));
-                    (Readable::Unreadable, Vec::new())
-                }
-            };
+            ),
+            Err(error) => {
+                self.error = Some(format!("收藏与合集读不动：{error}"));
+                // **两行读的是同一趟**：收藏读了不动，合集也不说你没进过任何一个——
+                // 卡的两种说法（「读不动」与「—」）比一处少说更糟（ADR-0021）。
+                (Readable::Unreadable, Readable::Unreadable)
+            }
+        };
         let chinese = match self.work.as_ref() {
             Some(work) => match catalog.work_chinese_mark(work) {
                 Ok(mark) => mark,
@@ -4091,13 +4099,22 @@ fn status_card(ui: &mut egui::Ui, work: &WorkDetail, page: &Page) -> Option<Page
             ui.horizontal_wrapped(|ui| {
                 // 这一行最矮按小号按钮那么高（行尾那颗「加入合集…」），不按默认那一档撑高。
                 ui.spacing_mut().interact_size.y = tokens.layout.button_small_height;
-                if page.collections.is_empty() {
-                    ui.label(egui::RichText::new("—").size(字号).color(强));
-                }
-                for (name, anchor) in &page.collections {
-                    let 只按路径 = *anchor == romcat_core::verdict::ANCHOR_PATH;
-                    if collection_tag(ui, name, 只按路径) {
-                        按了 = Some(PageAction::LeaveCollection(name.clone()));
+                // **读不动写「读不动」**，不拿「—」（= 一个都没进）顶上——与「收藏」「子库」
+                // 那两行同一个判据（挂单 `Q996`）。
+                match &page.collections {
+                    Readable::Unreadable => {
+                        ui.label(egui::RichText::new(UNREADABLE).size(字号).color(强));
+                    }
+                    Readable::Known(那几个) => {
+                        if 那几个.is_empty() {
+                            ui.label(egui::RichText::new("—").size(字号).color(强));
+                        }
+                        for (name, anchor) in 那几个 {
+                            let 只按路径 = *anchor == romcat_core::verdict::ANCHOR_PATH;
+                            if collection_tag(ui, name, 只按路径) {
+                                按了 = Some(PageAction::LeaveCollection(name.clone()));
+                            }
+                        }
                     }
                 }
                 // 行尾那颗「加入合集…」（设计稿 `ovTab` 那一行的 `.btn.ghost.sm`，挂单 `Q1108`）：与头上那一颗同一件事。

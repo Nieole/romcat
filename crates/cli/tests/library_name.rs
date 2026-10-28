@@ -350,6 +350,24 @@ fn 改过名之后拿新名字扫描或出报告都说清是哪一份而不另�
 }
 
 #[test]
+fn 库里还没有那一份时说得出先跑哪一条_这半句由命令行补() {
+    // 核心库那句只说事实（「还没有 X 这份中立库。」）——它要原样上开场屏（ADR-0023、
+    // 票 `core-answers-once/13`）。**命令行在它这一层补上那半句**，两边各说各该说的。
+    let workspace = temp_dir("library-nowhere-workspace");
+    let 报告 = 出报告(workspace.path(), &["--library", "还没有的库"]);
+    assert!(!报告.status.success(), "还没有的库却出了报告");
+    let 说明 = String::from_utf8_lossy(&报告.stderr);
+    assert!(
+        说明.contains("还没有") && 说明.contains("还没有的库"),
+        "没说清是哪一份库还不存在：{说明}"
+    );
+    assert!(
+        说明.contains("先跑一次 `romcat scan`"),
+        "命令行没补上那半句去处：{说明}"
+    );
+}
+
+#[test]
 fn 扫描时给空白名字当场报错一份库都不建() {
     // **空白不是名字**（挂单 `Q469` 的裁决）：从前 `--library ""` 建得出一份库、名字退回从
     // 文件名截。现在命令行建库走的是核心库那唯一一个入口，空白在那儿当场报错。
