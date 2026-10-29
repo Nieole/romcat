@@ -32,3 +32,5 @@
       日志 `/Users/nicoer/dev/game-wt/logs/cao-11-gate1.log`：`fmt`／`glossary`／`check`／`clippy`／`test`／`numbers`／`doc` 七条全绿（`test` 1505s），末行 `EXIT=0`。本机不分大小写的盘上 `sync_run` 那五条照旧如实跳过（`Q479`），不是这一票的回归。收尾前 `git merge q8/cao-int` 是 no-op（集成分支尖端仍是 `186fbfd`，与这一票的基点同一个），所以没有第二趟门禁。
 
 另外收了票正文追加的 `Q1450`：`crates/gui/src/browse/work.rs` 的 `hero_facts` 里「平台」那一格按词折行、两行封顶（`LayoutJob` 的 `wrap.max_rows = 2`），别的五格照旧一行截尾巴。测试 `crates/gui/tests/work.rs::头上平台那一格折成两行看得全_别的几格照旧一行`（红时 `left: Some(1) right: Some(2)`）；受影响的 12 张 `work/*` 基线重批（`work/sticky-*` 两张没动，那时头上那一块已经滚出去了），对照材料在仓库外 `/Users/nicoer/dev/game-wt/logs/cao-11-compare/`（`CHANGED.md` 与十二张 `旧｜新`），拿主意的人点头那一环挂在编排者那边。
+
+**拿主意的人 2026-10-29 裁（样式四问）**：① 详情页头上那块**随内容长**（不固定两行高）；② 「读不动」用**留神色**；③ **不给**下一步（开场那一行已经有）；④ 平台全名**按词折**。四处都照已做的来，那 12 张 `work/*` 基线点头。

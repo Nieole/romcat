@@ -56,3 +56,5 @@ ADR-0010 定的 MAME 权威落到认出作品的街机上。没有平台语境�
   - 中途 `cao-05-gate2.log` 红过两条，都不是这一票的语义：本票 `priority.rs` 的 `clippy::type_complexity`
     （收成 `converge::Titles` 修掉），以及 `q8/cao-int` 尖端就有的 `crates/gui/tests/snapshot.rs:936`
     `map(&号)` 一处 clippy 红（挂单 `Q1341`，当场按建议改成 `map(号)`，截图一张没变）。
+
+**拿主意的人 2026-10-29 裁（样式两问）**：① 按平台那一栏的说明照**甲**——全句写在屏上（「整条替换通用顺序」+「导出与详情按平台重挑、浏览屏不分平台」）；② **要**补一张「认出作品的街机」详情页基线，已由补票 `cao-05b` 落地（`work/arcade-mame-{light,dark}`，挂单 `Q1340` settled）。
