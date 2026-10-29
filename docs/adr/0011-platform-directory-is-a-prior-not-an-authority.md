@@ -1,3 +1,11 @@
+---
+id: adr-0011
+type: architecture-design
+title: 平台目录是强先验而非权威，Platform 与 Collection 保持正交
+status: active
+parent: architecture
+---
+
 # 平台目录是强先验而非权威，Platform 与 Collection 保持正交
 
 用户的资源已按平台分好目录，因此平台是扫描的**输入**而非输出：成型规则按目录直接分派，不需要先从扩展名和魔数猜平台。目录名到平台的映射由工具推测、用户确认一次即可。

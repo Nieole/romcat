@@ -1,3 +1,11 @@
+---
+id: adr-0019
+type: architecture-design
+title: 发行版这一层有一道世代裂缝：官中在数字世代不另成发行版
+status: active
+parent: architecture
+---
+
 # 发行版这一层有一道世代裂缝：官中在数字世代不另成发行版
 
 ADR-0012 定过「官方中文版是发行版，民间汉化版是变体」，依据是官中有自己的官方序列号、会被 Redump / No-Intro 正常收录。这在卡带与光盘世代成立——PS1 的 `SLPS`、PS3 的 `BCAS` 都是独立序列号、独立哈希、DAT 里独立一条记录。

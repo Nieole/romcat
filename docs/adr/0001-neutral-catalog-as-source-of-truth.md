@@ -1,3 +1,11 @@
+---
+id: adr-0001
+type: architecture-design
+title: 以中立库为事实来源，Pegasus 文件降级为导入源/导出目标
+status: active
+parent: architecture
+---
+
 # 以中立库为事实来源，Pegasus 文件降级为导入源/导出目标
 
 工具要同时做三件事：ROM 刮削（需要持久化置信度、来源、待人工确认状态）、多前端元数据互转（需要一个能同时表达 Pegasus / ES-DE / LaunchBox 等格式的中立模型）、10T 级库的 GUI 浏览（需要索引查询）。这三件事 `metadata.pegasus.txt` 都表达不了，因此事实来源放在中立库（SQLite），Pegasus 文件退化为众多导入源/导出目标之一。

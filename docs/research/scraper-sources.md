@@ -1,3 +1,11 @@
+---
+id: ref-scraper-sources
+type: reference
+title: 游戏元数据与媒体资源在线刮削数据源调研
+status: active
+parent: architecture
+---
+
 # 游戏元数据与媒体资源在线刮削数据源调研
 
 > **调研日期**：2026-08-30

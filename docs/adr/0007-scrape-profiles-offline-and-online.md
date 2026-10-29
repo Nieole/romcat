@@ -1,3 +1,11 @@
+---
+id: adr-0007
+type: architecture-design
+title: 离线与在线两条刮削路径都要，用策略档案切换
+status: active
+parent: architecture
+---
+
 # 离线与在线两条刮削路径都要，用策略档案切换
 
 识别与中文名在技术上可以完全离线完成（No-Intro DAT 的 GitHub 每日镜像、Redump DAT、MAME `/hash`、TOSEC、Bangumi 的每周离线 dump），而媒体资源必须上网（Bangumi dump 不含图片，Wikidata 的图片覆盖仅 3.4% 且维基系明确拒绝合理使用内容）。用户要求两条路径都可用且手动可控，因此做成刮削策略档案：预置「离线优先」与「在线优先」两套，在任务级别切换，字段级优先级可单独覆盖。

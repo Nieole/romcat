@@ -1,3 +1,11 @@
+---
+id: ref-library-facts
+type: reference
+title: 主库实测数据
+status: active
+parent: goal
+---
+
 # 主库实测数据
 
 2026-08-31 首次库体检，`/Volumes/新加卷/Game`。此前所有关于这个库的判断都基于资源站的全站分布，**这份数据取代它们**。

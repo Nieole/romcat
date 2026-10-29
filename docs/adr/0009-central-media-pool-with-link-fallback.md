@@ -1,3 +1,11 @@
+---
+id: adr-0009
+type: architecture-design
+title: 媒体存中央池，导出优先硬链接并在不支持时降级复制
+status: active
+parent: architecture
+---
+
 # 媒体存中央池，导出优先硬链接并在不支持时降级复制
 
 各前端的媒体目录互不兼容（Pegasus 用 `media/`，ES-DE 与 Cocoon 用 `downloaded_media/<平台>/<类型>/`，Batocera 用 `images|videos/` 加文件名后缀而非 `media/`，RetroArch 用 `Named_Boxarts/` 加净化后的 label），而且媒体的匹配键在各格式间横跳（ROM 文件名 / 标题 / label），净化函数多对一不可逆。因此媒体一律按内容哈希存进中央池，由中立库记录映射，导出时再按目标格式铺设。

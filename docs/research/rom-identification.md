@@ -1,3 +1,11 @@
+---
+id: ref-rom-identification
+type: reference
+title: 模拟器 ROM 自动识别（Identification）技术调研
+status: active
+parent: architecture
+---
+
 # 模拟器 ROM 自动识别（Identification）技术调研
 
 > **调研日期**：2026-08-30

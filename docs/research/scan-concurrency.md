@@ -1,3 +1,11 @@
+---
+id: ref-scan-concurrency
+type: reference
+title: 扫描并发该定多少：这块盘上的实测
+status: active
+parent: architecture
+---
+
 # 扫描并发该定多少：这块盘上的实测
 
 2026-09-01 实测，`/Volumes/新加卷`（NTFS，macOS fskit 只读驱动，8.60 TiB）。

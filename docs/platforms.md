@@ -1,3 +1,11 @@
+---
+id: ref-platforms
+type: reference
+title: 平台清单（用户库实际覆盖范围）
+status: active
+parent: goal
+---
+
 # 平台清单（用户库实际覆盖范围）
 
 共 26 项，由用户提供。**注意：这份清单超出了「到 PS3 世代」——PSV、3DS、WiiU、XBOX360 属于更后一代。**

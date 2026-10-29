@@ -1,3 +1,11 @@
+---
+id: glossary
+type: reference
+title: ROM 元数据自动化
+status: active
+parent: goal
+---
+
 # ROM 元数据自动化
 
 把一批以 Pegasus 方式维护的模拟器 ROM 资源，从手工维护变成自动识别、自动刮削、可在主流前端格式间互转的库。

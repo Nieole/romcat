@@ -1,3 +1,11 @@
+---
+id: adr-0010
+type: architecture-design
+title: 街机沿用统一模型，MAME XML 作为权威元数据源
+status: active
+parent: architecture
+---
+
 # 街机沿用统一模型，MAME XML 作为权威元数据源
 
 MAME 撞破了「变体 = 磁盘上一份实际可玩的东西」这条定义：clone set 单独存在不可运行（`sf2ce.zip` 必须有 `sf2.zip`），而 BIOS set 与 device set（`neogeo.zip`、`qsound`）根本不是游戏，却必须躺在磁盘上。但 MAME 自己把关系表达得很清楚——`mame.xml` 里 `cloneof`、`isbios`、`isdevice`、`runnable` 都是显式属性。

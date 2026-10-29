@@ -8,7 +8,7 @@
 //! ## 一份档案 = 一张平台矩阵 × 一个文件系统
 //!
 //! 分开写是因为它们真的各变各的：同一个 RetroArch，卡是 exFAT 还是 FAT32 完全是另一件
-//! 事。内置那份 [`profiles.toml`](../../src/capability/profiles.toml) 把两个坐标各列一遍，
+//! 事。内置那份 [`profiles.toml`](capability/profiles.toml) 把两个坐标各列一遍，
 //! 再拼成几份具名档案（`retroarch-fat32`、`独立模拟器-exfat`……）。
 //!
 //! ## 三条纪律

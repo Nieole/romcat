@@ -1,3 +1,11 @@
+---
+id: ref-egui-viability
+type: reference
+title: egui/eframe 选型三风险核实
+status: active
+parent: architecture
+---
+
 # egui/eframe 选型三风险核实
 
 **查证日期**：2026-08-31

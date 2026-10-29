@@ -1,3 +1,11 @@
+---
+id: adr-0020
+type: architecture-design
+title: 路径以 NFC 规范化后才能作为键
+status: active
+parent: architecture
+---
+
 # 路径以 NFC 规范化后才能作为键
 
 增量扫描以 `(路径, 大小, 修改时间)` 为键。实测发现**路径这一侧存在跨平台断点**——而这正是当初派人去查修改时间精度时意外撞见的，修改时间本身反而完全没问题。

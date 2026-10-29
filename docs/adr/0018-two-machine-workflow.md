@@ -1,3 +1,11 @@
+---
+id: adr-0018
+type: architecture-design
+title: 开发在 macOS、验证在 Windows，跨平台是第一天的约束而非后期适配
+status: active
+parent: architecture
+---
+
 # 开发在 macOS、验证在 Windows，跨平台是第一天的约束而非后期适配
 
 用户在 Windows 上管理资源库（外接硬盘为 NTFS），开发会话运行在 macOS。选定的工作方式是两边都跑：先在 macOS 上把扫描器调通（快迭代），再在 Windows 上跑一遍验证平台差异。

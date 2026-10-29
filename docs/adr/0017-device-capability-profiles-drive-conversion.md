@@ -1,3 +1,11 @@
+---
+id: adr-0017
+type: architecture-design
+title: 子库的格式转换由设备能力档案驱动
+status: active
+parent: architecture
+---
+
 # 子库的格式转换由设备能力档案驱动
 
 调研确认「原样拷贝」不安全，而且不存在一个「最兼容」的统一格式：RetroArch 不支持 rar；PPSSPP 不支持 ZSO 与 CSO v2（对应 issue 已 closed as not planned）而 PCSX2 反而支持 zso；Dolphin 支持 rvz/wbfs；DuckStation 支持 chd。zip 对卡带类可行，光盘类则没有统一答案。

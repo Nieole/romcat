@@ -1,3 +1,11 @@
+---
+id: ref-scale-reference
+type: reference
+title: 规模参照（老男人游戏网全站统计）
+status: active
+parent: goal
+---
+
 # 规模参照（老男人游戏网全站统计）
 
 来源：https://www.oldmanemu.org 各平台页面，2026-08-31 抓取。**这是量级参照，不是用户库的描述**——用户的库是多年积累，不止来自这一家。用户库的实际构成由 2026-08-31 起的库体检量出，只记在 `docs/library-facts.md`。
