@@ -124,7 +124,7 @@ fn card(
                 ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.y = tokens.layout.suspicion_reason_gap;
                     for reason in one.reasons() {
-                        look::impact(ui, &[(reason.as_str(), false)]);
+                        look::impact(ui, None, &[look::ImpactPart::plain(reason.as_str())]);
                     }
                 });
                 ui.horizontal(|ui| {
@@ -141,10 +141,13 @@ fn card(
                             )
                             .clicked();
                         let 不是 = look::small_ghost_button(ui, NOT_SAME)
+                            // **悬停里那句终端命令删了**（票 `core-answers-once/13`）：从前它写着
+                            // 「要撤回请用命令行 `romcat triage same-work --not-same … --undo`」。
+                            // 而界面上**没有撤回这一条的地方**（记过的那些只在体检那一趟被读回来、
+                            // 谁也不列出来），所以**不编一个去处**：只说事实。缺的那件事挂在挂单 `Q1801` 上。
                             .on_hover_text(
                                 "记下这两个作品不是同一个，以后不再提这一对。\n\n\
-                                 它不是一条裁决，撤销不走裁决记录；\
-                                 要撤回请用命令行 `romcat triage same-work --not-same … --undo`。",
+                                 它不是一条裁决，撤销也不在裁决记录里。",
                             )
                             .clicked();
                         (合并, 不是)

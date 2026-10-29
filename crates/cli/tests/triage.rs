@@ -971,6 +971,71 @@ fn 导出不许把那份_json_写进主库() {
     assert!(写别处.exists(), "写到工作目录里该成功");
 }
 
+/// **查不出主库的根时只放行新建**（ADR-0004 修订段、挂单 `Q616`）。
+///
+/// 中立库住的那个目录读不动时，这道守卫从前**整支放行**——而它后面是一次覆盖写，
+/// 放行的极端情况就是把一份 ROM 盖掉。现在：输出落点已经在了就拒，并说清是因为查不出主库
+/// 的根；落点不在就照旧写得出去（只新建，不覆盖）。
+#[test]
+fn 中立库目录读不动时导出只放行新建_已存在的拒掉且一个字节不动() {
+    let (library, workspace) = 现场();
+    扫并识别(library.path(), workspace.path());
+
+    let 目录 = workspace.path().join("catalog");
+    let 原先的 = workspace.path().join("分享.json");
+    let 原来的字节 = "此前导出的那一份裁决\n".as_bytes().to_vec();
+    fs::write(&原先的, &原来的字节).expect("摆得下一份已存在的");
+
+    // 收权限造不出来（不是 Unix、或者跑测试的是 root）就如实跳过；`testing::revoke` 印那一行。
+    let Some(_还回去) = romcat_core::testing::revoke(&目录, romcat_core::testing::Revoke::Read)
+    else {
+        return;
+    };
+    let ws = workspace.path().to_string_lossy().to_string();
+
+    let out = 跑(&[
+        "triage",
+        "export",
+        "--workspace",
+        &ws,
+        "--out",
+        &原先的.to_string_lossy(),
+    ]);
+    assert!(
+        !out.status.success(),
+        "目标已经在了，查不出主库的根时该拒：{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let 说明 = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        说明.contains("查不出主库的根"),
+        "拒绝的话要说清是因为查不出主库的根：{说明}"
+    );
+    assert!(说明.contains("读不动"), "没说是那个目录读不动：{说明}");
+    assert_eq!(
+        fs::read(&原先的).expect("读得回来"),
+        原来的字节,
+        "拒绝之后原文件被动过了"
+    );
+
+    // 落点不在就照样写得出去——这道守卫不许把人合法的导出也拦下来。
+    let 新的 = workspace.path().join("新的分享.json");
+    let 好的 = 跑(&[
+        "triage",
+        "export",
+        "--workspace",
+        &ws,
+        "--out",
+        &新的.to_string_lossy(),
+    ]);
+    assert!(
+        好的.status.success(),
+        "导出到一个新文件该成功：{}",
+        String::from_utf8_lossy(&好的.stderr)
+    );
+    assert!(新的.exists(), "导出到一个新文件该落盘");
+}
+
 /// **疑似同一作品**：命令行列出来的那几句，与核心库当场算出来的逐字相等。
 ///
 /// 票 `gui-looks-like-the-design/17` 验收第 1 条要的是「命令行与界面读同一处」。

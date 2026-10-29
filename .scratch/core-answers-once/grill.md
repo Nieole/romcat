@@ -42,6 +42,7 @@
 核查（2026-09-23）：命令行 crates/cli/src/main.rs:486-494 ManifestArgs 先 --manifest、再工作目录 platforms.toml、再内置；界面一律 Manifest::builtin()，已扩散到 7 处：crates/gui/src/health.rs:285、:1342，stages.rs:1610，shaping.rs:609，tokens.rs:1323，browse/work.rs:619、:630，browse.rs:4485。核心先例：capability::Roster::in_workspace
 依赖／可并：Q976（同为「工作目录里那份配置读不动就静默退回内置」，一起改）、Q1030（库体检那格的数依赖清单）
 （大小 M，来自票 `gui-looks-like-the-design/28`）
+**收于票 `core-answers-once/04`（2026-10-06）：settled。** 那条链在核心库立成一处：`platform::Manifest::locate(given, workspace)`，交回 `platform::Choice`（眼下用的那一份、`Origin` 说它从哪儿来、想用的那份读不动时的 `Unreadable`），`Choice::unreadable_note()` 是屏上那句、`Choice::strict()` 是没处摆这句话的那几个调用方要的那一份。命令行 `ManifestArgs::load` 只把 `--manifest` 交进去（先后照旧，读不动照旧停下）；`sources::manifest` 收成它的壳。界面七处改读**开窗那一刻挑好的**那一份（`App::new` 挑一次，交给库屏与浏览屏）：库体检折统计、平台纠正那一层、重新成型、扫描（`ScanOptions.manifest`）、筛选器「认不认得这个平台」、成型存疑、平台全名（作品详情与合并向导第二步组头）。`crates/gui/src` 里不再直接取内置清单（`demo.rs` 那三处是合成数据校验用的，不是上屏那张表，注释里写明了）。工作目录那份**读不动**不再静默退回内置（ADR-0021）：开窗屏最上方一行说得出哪一份读不动、为什么、眼下用的是内置那一份、下一步（去修权限或关掉占着它的程序）。「在不在」从 `Path::exists()` 换成 `try_exists`——目录读不动从此报读不动，不报「不在」。测试：`crates/core/tests/platform_lookup.rs` 四条（工作目录那份说了算 / 点名那份压过它 / 没有时用内置 / 读不动交第三态）、`crates/gui/tests/manifest.rs` 三条（库体检照工作目录那份出报告——扫描与「重新体检」两条路都走一遍；平台清单读不动与优先级表读不动各一句开窗屏上的话，收权限造不出来就如实跳过）。
 
 ### `Q1033` — 导出与同步还不读平台纠正：照旧按目录放置
 
@@ -49,12 +50,14 @@
 核查（2026-09-23）：导出：crates/core/src/adapter.rs:432 与 crates/core/src/sync.rs:1642 用 path::platform_of_key（crates/core/src/path.rs:355，键里那级目录）；同步：crates/core/src/sublibrary.rs:1006、:1191 platform: variant.platform（目录声明）。判定平台已有物化结论 Catalog::identified_platforms（crates/core/src/catalog/identify.rs:2933）。屏上已改口 crates/gui/src/health.rs:78「导出与同步眼下仍按目录放置」。
 依赖／可并：Q1046（同一处 adapter/sync 落点）、Q945（同为落点）、Q1022（清单旧落点清理）
 （大小 L，来自票 `gui-looks-like-the-design/28`）
+**收于票 `core-answers-once/03`（2026-10-05）：settled。** 核心库立了**落点平台**一问（词表「平台」条下有了这个名字）：`identify::platform_of` 一次答两个——**识别判定的平台**与**落点的**（有平台纠正听纠正，否则照目录声明，同一个决定打头），落进中立库 `identification.placement`；读法是 `Catalog::placement_platforms` / `Catalog::placement_directories`。导出按它分合集（`converge::Entries`），同步按它问能力档案、按它决定卡上那一级目录（`sync::Footprint`，落点路径与跳媒体/前端元数据都跟着走，没纠正过的原样不动），旧落点由下一趟同步照清单删、新落点新增，清单之外的一律不碰（ADR-0015）。库体检那一句改成「导出与同步按纠正后的平台放置」。
 
 ### `Q783` — 街机那条标题覆盖管不到已经认出作品的显示标题，屏上照实说了
 
 **已裁定（2026-09-23 grill）：** 要：有平台语境的地方（导出、详情按变体平台）按平台重挑显示标题，ADR-0010 的 MAME 权威落到认出作品的街机上。
 核查（2026-09-23）：crates/core/src/title.rs:486-487 仍「平台传 None……按平台的覆盖是导出到某个平台的子库时才用得上」；crates/core/src/adapter/converge.rs:735-740 标题那支有 chosen 就不看平台
-依赖／可并：Q976（同一份优先级表）
+**收于票 `core-answers-once/05`（2026-10-05）：settled。** 挑显示标题的入口在核心库收成两个：`title::choose`（无平台语境，`rank` 的源名次那一层传 `None`）与 `title::choose_on`（有平台语境，传那个平台），共一处排序键；`also_known_as_on` / `best_chinese_on` 同形，详情页三样都用平台那一支。有平台语境的两处接上去：导出/同步的 `converge::chosen_titles` 按 `(作品, 平台)` 各挑一次（`Layout.platforms` 里每个平台问一次），`Catalog::variant_detail` 按 `row.platform` 问。没有平台语境的那几处（浏览屏主列表、标题报告、合并向导）照旧问 `choose`。`scrape::priority::shifts` 跟着改问 `(作品, 平台)`——否则「换一份表哪几处显示值会变」会以为街机那部认出作品的标题会变，而导出其实不变（`crates/core/tests/priority.rs` 那条 `works: 1` 钉着）。屏上那句实话在 `crates/gui/src/priority.rs::override_note`。测试：`crates/core/tests/priority.rs` 三条（导出、详情、浏览屏列表）。截图基线一张没变（界面夹具里没有认出作品的街机）。
+依赖／可并：Q976（同一份优先级表）；新挂单 `Q1337`–`Q1340`（子库例外列表、标题报告、词表显示标题条、截图夹具没有街机）。
 （大小 M，来自票 `gui-looks-like-the-design/30`）
 
 ## 第二组：核心库只说事实，两个壳各补去处
@@ -89,6 +92,7 @@
 核查（2026-09-23）：crates/core/src/catalog.rs:418 AlreadyExists 仍是「中立库 {path} 已经在了——建库不会去开现成的那一份」无下一步；:405 BlankLibraryName 仍带按空名字折出的文件路径；向导 crates/gui/src/claim.rs:436 照印。等的票 gui-looks-like-the-design/05 已合
 依赖／可并：Q841（同改 CatalogError 措辞）、Q622 的题
 （大小 S，来自票 `no-mute-spots-opening-a-catalog/04`）
+**收于票 `core-answers-once/07`（2026-10-28）：settled。** `CatalogError::AlreadyExists` 补下一步「换个名字，或者去开那一份」（不带命令：两条路屏上与命令行都做得到，ADR-0023）；`CatalogError::BlankLibraryName` 换成不带路径的一句（从前那句里印着按空名字折出来的 `catalog/library-<哈希>.sqlite3`）。测试 `crates/core/tests/library_name.rs::撞名与空名字那两句都说得出下一步`；界面上那两句在 `crates/gui/tests/pick.rs::向导起名那一问撞名时说得出下一步` 与 `::向导起名那一问空着时不带按空名字折出来的路径` 里看得到（看的是画出来的字）。
 
 ### `Q841` — 旧库版本对不上那句核心库原话，在开场上折成六行，比别的行高出一截
 
@@ -96,6 +100,7 @@
 核查（2026-09-23）：crates/core/src/catalog.rs:370-384 CatalogError::Version 仍是一整句五分句长话（带「会跟着丢的有三样」）；crates/gui/src/opening.rs:532 row_ui 照印
 依赖／可并：Q615（同为 CatalogError 措辞，一处改）、开场有库那两张基线重批
 （大小 S，来自票 `gui-looks-like-the-design/05`）
+**收于票 `core-answers-once/07`（2026-10-28）：settled。** `CatalogError::Version` 的载荷换成 `catalog::VersionMismatch`：`brief()` 是**一行短话**（「结构版本是 4，本程序认得的是 7。删掉它重扫一遍即可」，**不带路径**——那一行左边已经印着这份库叫什么）、`details()` 是那段「删库留得住什么、会跟着丢什么」（ADR-0001 的修订，一个字不少）、`Display` 是两半合起来的整句（终端里照旧印全）。`CatalogState::SchemaMismatch` 多一格 `details`，开场那一行只画短话、细节挂 `on_hover_text`。测试 `crates/gui/tests/snapshot.rs::开场_版本对不上那一行只有一行高_细节在悬停里`（红时那一句底下 136 点、别的行 17 点）与 `crates/core/tests/catalog_list.rs::结构版本对不上的库照列并说清是哪个版本对哪个版本`（短话不带路径、整句三样都在）；基线 `opening/catalogs-{light,dark}.png` 重批，对照材料 `logs/cao-07-compare/`。
 
 ### `Q797` — 子库记着的前端格式这一版没有适配器，照旧在排差量预览开跑之后才判出、记失败
 
@@ -166,12 +171,14 @@
 **纯活：** 删掉 Accepts::takes，只留 takes_key。
 核查（2026-09-23）：crates/core/src/capability.rs:166 `pub fn takes` 仍在，全仓零调用方（grep `.takes(` 无结果）
 （大小 S，来自票 `gui-looks-like-the-design/21`）
+**收于票 `core-answers-once/12`（2026-10-05）：settled。** `Accepts::takes` 删掉；唯一那一处调用（`sync/playlist.rs` 判吃不吃 `.m3u`）改问 `takes_key`。「全仓零调用方」在票落地前已被 `verdict-store-and-sync/11` 添了一个调用方，删的时候一并改过来。
 
 ### `Q984` — 两轴审查挑出的三处形状，本票按住没动（都与别的树在改的文件重叠）
 
 **纯活：** impact 并成 impact(ui,tone,parts)、(字,强调)具名类型、Entries::of 答 EntryKey。
 核查（2026-09-23）：crates/gui/src/look.rs:1232 impact 与 :1241 impact_warn 仍两支、parts 仍是 `&[(&str,bool)]`；crates/core/src/adapter/converge.rs:602 Entries::of 仍答 `(String, Anchor)`，crates/core/src/catalog/roots.rs:447 当 BTreeMap<(String,Anchor),bool> 键，converge.rs:512 另摆成 BTreeMap<String,BTreeMap<Anchor,_>>。等的票 22 已合
 （大小 S，来自票 `gui-looks-like-the-design/26`）
+**收于票 `core-answers-once/12`（2026-10-05）：settled。** `impact` 并成 `impact(ui, tone, parts)` 一支（`tone` 给 `None` 是寻常强调色、给 `Some(Tone)` 是那一档令牌色），`(字, 强调)` 换成具名的 `ImpactPart`；`Entries::of` 答具名的 `EntryKey`，`roots.rs` 与 `triage/merge.rs` 那几处当键用的地方跟着换。截图基线一张没动：截图套件原样全绿。
 
 ### `Q852` — 删减建议只带变体的键，没有作品名与平台
 
@@ -179,6 +186,7 @@
 核查（2026-09-23）：crates/core/src/sublibrary.rs:578-588 Trim 仍只有 variant/bytes/cumulative；界面 trim_ui 照印键
 依赖／可并：Q819（同一处 plan 折 trim_suggestions，可一票）、浏览屏「认不出作品显示正题」那一处取法
 （大小 M，来自票 `gui-looks-like-the-design/20`）
+**收于票 `core-answers-once/09`（2026-10-28）：settled。** `sublibrary::Trim` 带上 `title` 与 `platform`：认出作品的取作品名，认不出的取那个变体主文件剥出来的**正题**（`browse::loose_title`，与浏览屏主列表、手动例外那张表同一处剥），取法是 `Catalog::trim_names`（按选择集整份问一次，剥正题要的那份剥离规则由 `sync::prepare` 交进来）。缺的那一格退回**变体的键**，不留空。界面 `trim_ui` 照新字段画（作品名粗体 + `平台 · 键` 弱体），两处文本报告也改印「作品名（平台） · 键」——`--exclude` 要的仍是那一串键。
 
 ### `Q819` — 删减建议的「累计腾出」按计划器记账，作品共用的媒体记在头一个变体名下，「排除到这一项就能放下」可能偏乐观
 
@@ -186,12 +194,14 @@
 核查（2026-09-23）：crates/core/src/sublibrary.rs:657-665 fits_after 文档自认「计划器口径下的估计」；作品级媒体记在头一个变体名下（crates/core/src/sync/media.rs:105 lay_for）
 依赖／可并：Q852（同改 Trim / plan 折建议那段）
 （大小 M，来自票 `gui-looks-like-the-design/20`）
+**收于票 `core-answers-once/09`（2026-10-28）：settled。** 计划器的媒体记账按作品：铺媒体那一刻认出这一份挂在**作品**锚点上，就给 `DesiredFile::work` 记上那部作品；折删减建议时文件按变体记、作品级媒体按作品记（`sublibrary::TrimPool`），这个作品的变体**全被排除**才跟着算进那一条的 `bytes`。于是「累计腾出」是准数，「排除到这一项就能放下」也是——不再有「计划器口径下的估计」那句话。`Trim::bytes` 于是不保证从上往下不增（某一条顺手腾出了共用媒体），排序照变体自己的文件，见挂单 `Q1378`。
 
 ### `Q1101` — `!=` 上认不出的值等于「这一条没起作用」，屏上眼下不说
 
 **已裁定（2026-09-23 grill）：** 要：`!=` 白写时屏上说「这一条没排除掉任何东西」。
 核查（2026-09-23）：crates/core/src/sublibrary.rs:918 thin_clause 仍 `if clause.op != Op::Is` 直接不报；:872-879 ThinClause 只有 UnknownPlatform/NoCollection/NoSource 三支，没有「这一条没排除任何东西」
 （大小 S，来自票 `gui-looks-like-the-design/12`）
+**收于票 `core-answers-once/12`（2026-10-05）：settled。** 核心库立 `ThinClause::NothingExcluded`：`!=` 后面的值一个都认不出时交这一句「这一条没排除掉任何东西」；几个值里有一个认得出就不报（那一条真排掉了点什么）。`=` 那几支原有提醒照旧。界面照印，不另立判据。
 
 ### `Q764` — 稿上主库那一行的「N 个根」「硬盘未连接，仍可打开」「在文件系统中打开」没做
 
@@ -199,6 +209,7 @@
 核查（2026-09-23）：crates/core/src/workspace.rs:321-329 CatalogFacts 只有 variants/scanned_at，没有根数；opening.rs row_ui 三样都没画；界面无「在文件管理器里打开」
 依赖／可并：Q841（同一 row_ui，基线一起重批）
 （大小 S，来自票 `gui-looks-like-the-design/05`）
+**收于票 `core-answers-once/07`（2026-10-28）：settled（只做「N 个根」；后两件按裁定不做）。** 核心库 `workspace::CatalogFacts` 多交一个 `roots`（那一份库有几个根，与上次扫描时刻同一次 `Catalog::roots()` 里出）；开场那一行照稿的次序画成「2 个根 · 46,444 个变体 · 上次扫描 …」（稿 `gui-looks-like-the-design/prototype.html:845`）。测试 `crates/core/tests/catalog_list.rs::开得了的那一份说得出它有几个根`，基线 `opening/catalogs-{light,dark}.png` 重批。「硬盘未连接，仍可打开」与「在文件系统中打开」照裁定不做。
 
 ### `Q751` — 界面上的识别只认默认那一副提问指纹：命令行拨过 `--model-id` / `--model-effort` 问出来的答案界面用不到
 
@@ -214,6 +225,7 @@
 核查（2026-09-23）：crates/core/src/workspace.rs:607-631 entry_of：Version→SchemaMismatch，其余 Err→CatalogState::Broken（含权限、被锁、被挪走）。ADR-0021 修订段写死三态「开得了／结构版本对不上／文件坏了」。
 依赖／可并：Q614、Q616（同一条「读不动≠没有」线）
 （大小 S，来自票 `no-mute-spots-opening-a-catalog/04`）
+**收于票 `core-answers-once/07`（2026-10-28）：settled。** `workspace::CatalogState` 多一支 `Unreadable`（四态：开得了 ／ 结构版本对不上 ／ 读不动 ／ 文件坏了）；分法在核心库一处 `CatalogError::unreadable()`，照打开时 SQLite 的错码逐条判——`SQLITE_PERM`、`SQLITE_CANTOPEN`（实测 macOS 上把一份库收成 0o000 正是这一条）、`SQLITE_BUSY` / `SQLITE_LOCKED`（另一条连接 `BEGIN EXCLUSIVE` 占着时正是这一条），**判不准的（`SQLITE_NOTADB`、`SQLITE_CORRUPT`、`SQLITE_IOERR`、别的）归「文件坏了」并照印原话**。那一句话带下一步「去修这份文件与它那个目录的权限，或者关掉占用它的程序」，不是「删掉重扫」。开场那一行画一枚「读不动」标签（`Broken` 那枚还是「打不开」）。测试 `crates/core/tests/catalog_list.rs::一份中立库的读权限被收掉时列举交出读不动`（造不出来就如实跳过）、`crates/gui/tests/snapshot.rs::开场_读不动的那一份写着读不动_下一步是修权限`；新基线 `opening/unreadable-library-{light,dark}.png` 待点头（对照材料 `logs/cao-07-compare/CHANGED.md`）。挂单 `Q1358`（那一行里那串路径要不要去掉）、`Q1357`（「读不动」这个词不在词表里）。
 
 ### `Q614` — `Site::open` 先问一句 `catalog.exists()`，目录读不动时说的是「还没有这份库，先跑一次 scan」
 
@@ -221,6 +233,7 @@
 核查（2026-09-23）：crates/core/src/site.rs:123 Site::open 与 :142 open_file 都是 `if !catalog.exists()`→NoCatalog/not_found（:78），目录读不动时说成「还没有这份库，先跑一次 scan」。CLI 那六处预问（Q523）已裁「维持现状」。
 依赖／可并：Q613、Q616
 （大小 S，来自票 `no-mute-spots-opening-a-catalog/04`）
+**收于票 `core-answers-once/11`（2026-10-28）：settled。** `Site::open`／`Site::open_file` 的「在不在」从 `Path::exists()` 换成 `try_exists`：说不出来在不在（目录读不动）时交 `SiteError::Unreadable`，那句是「中立库住的那个目录读不动：…（系统怎么说的）。说不准里头那份中立库在不在——先去修那个目录的权限，或者关掉占着它的程序」，不再说成「还没有这份库，先跑一次 `scan`」。测试：`crates/core/tests/catalog_list.rs::工作目录读不动时打开现场说的也是读不动不是还没有这份库`（收权限造不出来就如实跳过，`testing::revoke` 印那一行）。命令行那六处开库前的预问照 `Q523` 不动（挂单 `Q1398` 记着这一截）。
 
 ### `Q616` — 「不许写进任何一份主库」那道守卫在中立库目录读不动时照旧放行
 
@@ -228,6 +241,7 @@
 核查（2026-09-23）：crates/cli/src/main.rs:6199-6203 refuse_writing_into_any_library：catalogs(..).entries() 为 Err 就 return Ok(())；它**只守一处**——:4250 `romcat triage export --out`（把沉淀库导成 JSON）；写法是 :6221 write_file→fs::write，会**覆盖已存在的文件**。中立库在 工作目录/catalog/（workspace.rs:243），沉淀库在 工作目录/verdict/（:748），所以 catalog 目录读不动时沉淀库照样开得了、导出照样走到这一步。
 依赖／可并：Q613、Q614
 （大小 S，来自票 `no-mute-spots-opening-a-catalog/04`）
+**收于票 `core-answers-once/11`（2026-10-28）：settled。** 照 ADR-0004 修订段：`refuse_writing_into_any_library` 查不出主库的根时交 `Writing::OnlyNew`——落点**已存在就拒**、话里说清「这一趟查不出主库的根（…），没法确认它不落在某一份主库里——已有的文件一个字节都不覆盖，换一个新的文件名再导出」；落点不在就照旧写得出去，只是改用 `create_new`（不肯覆盖由系统那一下兜住，不靠「先问一遍再写」）。「开不动的那几份跳过」那套口径没翻：能比的根照旧比。测试：`crates/cli/tests/triage.rs::中立库目录读不动时导出只放行新建_已存在的拒掉且一个字节不动`（收权限造不出来就如实跳过）。
 
 ### `Q976` — 开窗时优先级表读不动**静默退回内置那份**，屏上一个字都不说
 
@@ -235,9 +249,11 @@
 核查（2026-09-23）：crates/gui/src/app.rs:230-232 `if let Ok(priorities) = …priorities(None,&workspace)` 读不动静默不设，浏览屏留着 Priorities::builtin()
 依赖／可并：Q1031（同形：工作目录配置读不动）、Q783（同一份表）
 （大小 S，来自票 `gui-looks-like-the-design/22`）
+**收于票 `core-answers-once/04`（2026-10-06）：settled。** `App::new` 那处 `if let Ok(priorities)` 不再吞掉：读不动时开窗屏最上方一行（与平台清单那句同一处、同一个画法）说「工作目录里那份优先级表读不动：…。眼下用的是内置那一份；去修那一份的权限，或者关掉占着它的程序。」，「眼下用的是哪一份」写在句子里。`sync::prepare::priorities` 的问法从 `Path::exists()` 换成 `try_exists`：说不出来在不在就按读不动办，不再把它说成「没有这一份」。测试：`crates/gui/tests/manifest.rs::开窗时优先级表读不动也说出来`（收权限造不出来就如实跳过，`testing::revoke_file` 印那一行）。
 
 ### `Q996` — 详情页「子库」「导出」两行读不动时退回「—」与「还没导出」，把不可读压成了「没有」
 
 **上游已答，只差动手：** ADR-0021（不可读是第三态，不压成「没有」）。
 核查（2026-09-23）：crates/gui/src/browse/work.rs:604 sublibrary::holding、:609 entry_exported 出错只设 self.error，行上照画「—」/「还没导出」(:3939)；同文件收藏那行同样写法
 （大小 M，来自票 `gui-looks-like-the-design/34`）
+**收于票 `core-answers-once/11`（2026-10-28）：settled。** 那三行改交三态（`crates/gui/src/browse/work.rs` 的 `Readable`：`Known(..)` ／ `Unreadable`）：读不动时「收藏」「子库」「导出」三行都画「读不动」（留神那一对色），不画「—」「未收藏」「还没导出」。测试：`crates/gui/tests/work.rs::详情页三行读不动时画读不动_不画破折号与还没导出`（从另一条连接把变体表与导出账弄坏造出读不动）。同一趟读不动的「合集」那一行与头上那颗收藏按钮照旧，另立挂单 `Q1397`。

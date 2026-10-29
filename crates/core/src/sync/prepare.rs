@@ -152,6 +152,9 @@ pub struct Request<'a> {
     pub restore_missing: bool,
     /// 另指一份字段级优先级表。不给就用工作目录里那份，再没有就用内置的。
     pub priorities: Option<&'a Path>,
+    /// 这一趟的**「今天」**（`YYYY-MM-DD`）：能力档案那些声明照它判「超过半年没核实」
+    /// （[`Prepared::stale_claims`]）。不给就照系统时钟（[`today`]）——命令行那一侧没有人钉它，界面与截图测试钉得住。
+    pub today: Option<&'a str>,
 }
 
 /// 排好的一份计划，连折它时那几件要说出口的怪事。
@@ -392,16 +395,29 @@ impl std::fmt::Display for Concern {
 /// 也是那一处（ADR-0024）。
 ///
 /// # Errors
-/// 那份表读不动或者写坏了时返回一句给人看的话。
+/// 那份表读不动或者写坏了时返回一句给人看的话——**不静默退回内置**（ADR-0021）：
+/// 人把一份摆在那个工作目录里就是要用它，拿另一份顶上得有人知道。
+///
+/// 「在不在」问的是 [`Path::try_exists`] 而不是 [`Path::exists`]：后者把「读不动」
+/// 也报成「不在」，于是权限一收，这份表就静静换成了内置那份，屏上没有一个字
+/// （挂单 `Q976`）。
 pub fn priorities(given: Option<&Path>, workspace: &Path) -> Result<Priorities, String> {
     let path = match given {
         Some(path) => path.to_path_buf(),
         None => {
             let candidate = workspace::priorities_path(workspace);
-            if !candidate.exists() {
-                return Ok(Priorities::builtin());
+            match candidate.try_exists() {
+                // 工作目录里本来就没放这一份：照内置的。
+                Ok(false) => return Ok(Priorities::builtin()),
+                Ok(true) => candidate,
+                // **读不动不等于没有**（ADR-0021）：说不出来在不在，就照读不动办。
+                Err(source) => {
+                    return Err(format!(
+                        "优先级表 {} 读不动：{source}",
+                        crate::path::display(&candidate)
+                    ));
+                }
             }
-            candidate
         }
     };
     Priorities::load(&path).map_err(|error| format!("{error}"))
@@ -630,6 +646,20 @@ pub fn prepare_selected(
     // 脚印留着（与 `super::desired` 是同一条线，ADR-0024）：给多碟变体折播放列表还要它认好的各张碟与平台。
     let (footprint, platform_manifest) = gather(catalog, workspace, selected)?;
     let mut desired = footprint.desired(&profile);
+    // 删减建议那几行**屏上叫它什么、什么平台**在这里补（[`Catalog::trim_names`]）：认不出作品的
+    // 变体要剥**正题**，剥它要工作目录里那份**剥离规则**——而折期望状态那一半是纯的，手上没有规则。
+    // 与刮削、与浏览屏交的是同一份规则。
+    // **读不动不挡路**：这份规则只影响删减建议那一行的显示名，而工作是「照内置那份剥」也能
+    // 干完的（与浏览屏对同一个文件的处置同形，`crates/gui/src/browse.rs` 的 `rules_error`：
+    // 写坏了照旧开得了屏，把原因摆出来）。从前这里把它当成排计划的硬前提：文件一坏，
+    // `romcat sync`、界面「生成差量预览」、连纯算容量的 `sublibrary::fit` 全都停下——
+    // 一件与卡上写什么无关的显示名配置挡住了整趟写操作（代码审查 2026-10-29 挑出来的）。
+    let rules =
+        crate::sources::rules(workspace).unwrap_or_else(|_| crate::filename::Rules::builtin());
+    let picked: Vec<&str> = selected.picked.iter().map(|one| one.key.as_str()).collect();
+    desired.trim_names = catalog
+        .trim_names(&picked, &rules)
+        .map_err(|error| format!("中立库读不动：{error}"))?;
     // **放不进目标存储的在这里就被拦下来**（ADR-0017 补充段）：FAT32 那 4 GiB 的
     // 单文件上限、文件名不收的字符、路径太长。拦在排计划**之前**，于是它们连成为一条
     // 步骤的路径都没有——「传到一半失败」这件事在构造上不会发生。
@@ -714,6 +744,9 @@ pub fn prepare_selected(
             .adds
             .files;
     }
+    // **「今天」由这一趟的请求定**（票 `core-answers-once/14`，挂单 `Q1354`）：不给就照系统时钟。
+    // 屏幕与截图测试钉得住它，那句「超过半年没核实」才不会在某一天凭空冒出来、把基线撞红。
+    let today = request.today.map_or_else(today, ToString::to_string);
     Ok(Prepared {
         sublibrary,
         root,
@@ -733,7 +766,7 @@ pub fn prepare_selected(
         entries: laid.entries,
         left_off: on_card.left_off,
         missing_capability,
-        stale_claims: profile.stale_claims(&today()),
+        stale_claims: profile.stale_claims(&today),
     })
 }
 

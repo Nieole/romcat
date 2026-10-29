@@ -88,10 +88,10 @@ pub const REMOVE_ROOT: &str = "移除根";
 
 /// 「移除根」那一层里**文件动不动**那一条（设计稿原话）。**一个字节都不动是 ADR-0004**，
 /// 屏上说的与工具真干的是同一件事。
-const KEEPS_FILES: [(&str, bool); 3] = [
-    ("这个根上的文件", false),
-    ("一个字节都不动", true),
-    ("，工作目录里的库文件会变小。", false),
+const KEEPS_FILES: [look::ImpactPart<'static>; 3] = [
+    look::ImpactPart::plain("这个根上的文件"),
+    look::ImpactPart::strong("一个字节都不动"),
+    look::ImpactPart::plain("，工作目录里的库文件会变小。"),
 ];
 
 /// 「移除根」那一层里**只动这一支**那一条。
@@ -99,24 +99,18 @@ const KEEPS_FILES: [(&str, bool); 3] = [
 /// **稿上没有这一条，票面点名要它**（票 `gui-looks-like-the-design/26` 的 ⚠️：
 /// 「变体的键是「根名 + 相对路径」……所以移除一个根只影响它自己那一支……**这两句要说给用户听**」）。
 /// 另一句在 [`KEEPS_VERDICTS`] 里。两句合起来才是这一下敢按的全部理由。
-const ONLY_THIS_ROOT: [(&str, bool); 3] = [
-    ("别的根", false),
-    ("一条都不少", true),
-    (
-        "：变体的键是「根名 + 相对路径」，同名的东西在别的盘上各算各的。",
-        false,
-    ),
+const ONLY_THIS_ROOT: [look::ImpactPart<'static>; 3] = [
+    look::ImpactPart::plain("别的根"),
+    look::ImpactPart::strong("一条都不少"),
+    look::ImpactPart::plain("：变体的键是「根名 + 相对路径」，同名的东西在别的盘上各算各的。"),
 ];
 
 /// 「移除根」那一层里**留得住的那几样**（设计稿原话）：裁决、收藏与合集住**沉淀库**、锚在
 /// **内容锚**上，所以这个根加回来它们照旧生效（`CONTEXT.md`）。
-const KEEPS_VERDICTS: [(&str, bool); 3] = [
-    ("裁决、收藏、合集按文件内容记录，", false),
-    ("会保留", true),
-    (
-        "：以后重新添加这个根，或者同样的文件出现在别的根里，它们仍然有效。",
-        false,
-    ),
+const KEEPS_VERDICTS: [look::ImpactPart<'static>; 3] = [
+    look::ImpactPart::plain("裁决、收藏、合集按文件内容记录，"),
+    look::ImpactPart::strong("会保留"),
+    look::ImpactPart::plain("：以后重新添加这个根，或者同样的文件出现在别的根里，它们仍然有效。"),
 ];
 
 /// 盘不在位的根，上次扫描那一格挂的那枚小标签（设计稿原话，挂单 `Q829` 已裁：照稿；词表里原来那个「连接」改名「组合方式」）。
@@ -131,9 +125,13 @@ const LAST_SCAN_SHOWN: &str = "显示上次扫描结果";
 pub const ROOTS_EMPTY: &str = "还没有根——几块盘都能加进同一个库。";
 
 /// 屏头「添加根…」那个选目录窗口什么都没交回来时屏上那一句（[`Screen::picked_root`]）。取消了与弹不出来分不开
-/// （`crate::pick` 的模块文档），所以说到弹不出来时去哪儿办——加根是 `romcat scan` 的活。
-pub const PICK_ROOT_NONE: &str = "没有选目录。选择窗口弹不出来时（例如远程会话），可以在命令行用 `romcat scan` \
-     扫这个目录，把它加成这个库的一个根。";
+/// （`crate::pick` 的模块文档），所以说到弹不出来时怎么办。
+///
+/// **这一句里不带命令行命令**（ADR-0023 修订段、票 `core-answers-once/13`）：从前它教人去终端敲
+/// `romcat scan`。而界面上**没有第二个加根的入口**——加根只有「添加根…」这一颗，它正是弹不出来的那一下，
+/// 所以**不编一个不存在的去处**：只说事实。界面上缺的那件事（不经选择窗口加一个根）挂在挂单 `Q1800` 上。
+pub const PICK_ROOT_NONE: &str =
+    "没有选目录。选择窗口弹不出来时（例如远程会话），这一下就加不了这个根。";
 
 /// 数据源那一块在**还没扫描**、又有源没取回时画的那一句：扫描与取回互不挡道，下一步可以两件一起办。
 pub const SOURCES_BEFORE_SCAN: &str =
@@ -170,9 +168,9 @@ fn removal_impact_ui(ui: &mut egui::Ui, impact: &RootRemoval) {
     if impact.variants == 0 {
         look::impact(
             ui,
-            &[(
+            None,
+            &[look::ImpactPart::plain(
                 "这个根还没扫过，中立库里一条记录都没有——移除它不去掉任何变体。",
-                false,
             )],
         );
     } else {
@@ -185,18 +183,19 @@ fn removal_impact_ui(ui: &mut egui::Ui, impact: &RootRemoval) {
         } else {
             "。这些变体所属的作品在别的根里还有变体，浏览里一行都不会消失。".to_owned()
         };
-        look::impact_warn(
+        look::impact(
             ui,
+            Some(Tone::Caution),
             &[
-                ("从库中去掉 ", false),
-                (变体.as_str(), true),
-                (后半.as_str(), false),
+                look::ImpactPart::plain("从库中去掉 "),
+                look::ImpactPart::strong(变体.as_str()),
+                look::ImpactPart::plain(后半.as_str()),
             ],
         );
     }
-    look::impact(ui, &KEEPS_FILES);
-    look::impact(ui, &ONLY_THIS_ROOT);
-    look::impact(ui, &KEEPS_VERDICTS);
+    look::impact(ui, None, &KEEPS_FILES);
+    look::impact(ui, None, &ONLY_THIS_ROOT);
+    look::impact(ui, None, &KEEPS_VERDICTS);
     for one in &impact.sublibraries {
         let 那一句 = format!(
             "子库「{}」的选择集会少 {} 个变体，下次同步时会从设备上删除它们\
@@ -204,14 +203,18 @@ fn removal_impact_ui(ui: &mut egui::Ui, impact: &RootRemoval) {
             one.name,
             thousands(one.variants)
         );
-        look::impact_warn(ui, &[(那一句.as_str(), false)]);
+        look::impact(
+            ui,
+            Some(Tone::Caution),
+            &[look::ImpactPart::plain(那一句.as_str())],
+        );
     }
     if impact.entries > 0 {
         let 那一句 = format!(
             "下次导出时，前端里对应的 {} 个条目会被移除。",
             thousands(impact.entries)
         );
-        look::impact(ui, &[(那一句.as_str(), false)]);
+        look::impact(ui, None, &[look::ImpactPart::plain(那一句.as_str())]);
     }
 }
 
@@ -281,6 +284,11 @@ pub struct Screen {
     /// 工作目录：加根时拿它守住「中立库不许被圈进主库」（ADR-0004），
     /// 数据源也住在它下面。
     workspace: PathBuf,
+    /// **平台清单**：开窗那一刻挑好的那一份（`Manifest::locate`，ADR-0024）。
+    ///
+    /// 扫描、库体检、重新成型三处读的是它——不是界面自己建一份内置的（挂单 `Q1031`）。
+    /// 挑选与「读不动怎么办」在 [`crate::app::App::new`] 那一处，这一屏只管用。
+    manifest: romcat_core::platform::Manifest,
     roots: Vec<RootRow>,
     sources: Vec<SourceStatus>,
     /// 第三段：**工序**——这个库还差哪几道步骤。
@@ -317,20 +325,16 @@ pub enum Job {
     Fetch(Source),
 }
 
-impl Default for Screen {
-    fn default() -> Self {
-        Self::new(PathBuf::new())
-    }
-}
-
 impl Screen {
-    /// 开一个。`workspace` 是**工作目录**。
+    /// 开一个。`workspace` 是**工作目录**，`manifest` 是开窗那一刻挑好的**平台清单**
+    /// （[`crate::app::App::new`] 挑的，这一屏不另挑一份）。
     #[must_use]
-    pub fn new(workspace: PathBuf) -> Self {
+    pub fn new(workspace: PathBuf, manifest: romcat_core::platform::Manifest) -> Self {
         Self {
             stages: crate::stages::Section::new(workspace.clone()),
             health: crate::health::Section::default(),
             workspace,
+            manifest,
             roots: Vec::new(),
             sources: Vec::new(),
             running: Vec::new(),
@@ -619,6 +623,7 @@ impl Screen {
             return;
         }
         let workspace = self.workspace.clone();
+        let manifest = self.manifest.clone();
         let library_fs = Arc::clone(&self.library_fs);
         let owned = name.to_string();
         // 名字底下那一行副标题是扫的那个根在盘上的路径（设计稿 `TASKS.scan` 的 `sub` 是 `S.rootPath`）。
@@ -648,6 +653,9 @@ impl Screen {
             let mut catalog = Catalog::open(&file).map_err(|error| error.to_string())?;
             let mut options = ScanOptions::named(&path, &owned);
             options.workspace = Some(workspace);
+            // **平台清单是开窗那一刻挑好的那一份**（ADR-0024，挂单 `Q1031`）：扫描、库体检、
+            // 重新成型三处照同一张表认平台，屏上那份报告与命令行出的那一份才对得上。
+            options.manifest = manifest;
             options.shaping_overrides = shaping_overrides;
             // 界面上不给并发档：开扫前探一探介质自己定，与命令行默认那条路一样
             // （挂账 D9）。
@@ -1010,7 +1018,7 @@ impl Screen {
     fn health_ui(&mut self, ui: &mut egui::Ui, site: &mut Site, tasks: &mut Tasks) {
         let 扫过 = self.scanned();
         // 开窗后头一次进库屏、有扫过的根却还没有报告：自动排一趟（`health::Section::auto_check`，岔路口 8）。
-        self.health.auto_check(site, tasks, 扫过);
+        self.health.auto_check(site, tasks, 扫过, &self.manifest);
         // 疑似同一作品那一格照识别那一道做没做完换话（拿主意的人 2026-09-15 答岔路口 9），判据是工序那一行自己的（`StageRow::settled`）。
         let 识别过 = self
             .stages
@@ -1037,7 +1045,7 @@ impl Screen {
         };
         // 画八格之前先把**平台纠正**那一份合出来：目录与内容平台不符那一格数的是「还没处理的那几组」
         // （票 `gui-looks-like-the-design/28`），那个数由核心库交（`PlatformCorrections::remaining`）。
-        self.health.ensure_corrections(site);
+        self.health.ensure_corrections(site, &self.manifest);
         // 「N 处待生效」那一条与成型存疑明细里那几枚「待生效」照沉淀库里的待生效记录画（票 `verdict-store-and-sync/12`）。
         self.health.ensure_pending(site);
         let health = &mut self.health;
@@ -1053,12 +1061,12 @@ impl Screen {
         // 点了一格就开的那一层明细弹层（`health::Section::dialog_ui`）：每一帧都画，面板收着也画。
         self.health.dialog_ui(ui.ctx(), site);
         // **平台纠正**那一层同理（票 `gui-looks-like-the-design/28`）：目录与内容平台不符那一格点进去开的是它。
-        self.health.platfix_ui(ui.ctx(), site);
+        self.health.platfix_ui(ui.ctx(), site, &self.manifest);
         // **成型纠正**那一层（票 `gui-looks-like-the-design/29`）：成型存疑明细里一行一颗「处理…」开的是它；
         // 「N 处待生效」那一条上的「重新成型」也在这一下排上台（票 `verdict-store-and-sync/12`）。
-        self.health.fixer_ui(ui.ctx(), site, tasks);
+        self.health.fixer_ui(ui.ctx(), site, tasks, &self.manifest);
         if 要体检 {
-            self.health.check(site, tasks);
+            self.health.check(site, tasks, &self.manifest);
         }
     }
 
@@ -1070,13 +1078,13 @@ impl Screen {
 
     /// 排一趟体检上任务台：「重新体检」按的就是它（[`crate::health::Section::check`]）。一次只跑一趟。
     pub fn check_health(&mut self, site: &Site, tasks: &mut Tasks) {
-        self.health.check(site, tasks);
+        self.health.check(site, tasks, &self.manifest);
     }
 
     /// 排一趟**重新成型**上任务台（[`crate::health::Section::reshape`]）：作品详情那一面「N 处待生效」那一条上
     /// 按了「重新成型」，窗口转到这儿来排——**全窗口只有一处排它**，报告才不会两份各说各的。
     pub fn reshape(&mut self, site: &mut Site, tasks: &mut Tasks) {
-        self.health.reshape(site, tasks);
+        self.health.reshape(site, tasks, &self.manifest);
     }
 
     /// 别处（作品详情那一面）刚落过一笔成型纠正：库体检那份缓着的待生效扔掉，下一帧重读。

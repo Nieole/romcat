@@ -264,17 +264,18 @@ pub struct CatalogEntry {
     /// **读不开的那一份也有名字**——从文件名截，把哈希后缀剥掉（[`readable_half`]）。
     /// 一份说不出名字的库不该在列表上留一行空白，更不该只剩一串十六进制。
     pub name: String,
-    /// **这份库眼下是什么状态**：开得了、结构版本对不上、还是文件坏了。
+    /// **这份库眼下是什么状态**：开得了、结构版本对不上、读不动、还是文件坏了（[`CatalogState`]）。
     ///
     /// **读不开也照列不误**：开不进去的那一份带着说得出原因的状态单独站着。
     pub state: CatalogState,
 }
 
-/// 列出来的一份中立库**说得出原因的状态**：开得了 ／ 结构版本对不上 ／ 文件坏了。
+/// 列出来的一份中立库**说得出原因的状态**：开得了 ／ 结构版本对不上 ／ **读不动** ／ 文件坏了。
 ///
-/// **分成几支，不是一句话**（ADR-0021 那条修订，挂单 `Q393`）：两种打不开交出来都是一句
-/// 字符串的话，调用方要分只能去解析那句话——而人对这两种的下一步各不相同：结构版本对不上
-/// 删掉重扫就好（中立库整份可再生），文件坏了是另一回事。
+/// **分成四支，不是一句话**（ADR-0021 那两条修订，挂单 `Q393`、`Q613`）：两种打不开交出来都是
+/// 一句字符串的话，调用方要分只能去解析那句话——而人对这几种的下一步各不相同：结构版本对不上
+/// 删掉重扫就好（中立库整份可再生），**读不动**是去修权限或关掉占着它的程序（删掉就是白丢一次
+/// 扫描），文件坏了是另一回事。
 ///
 /// 每一支里给人看的那句话（`said`）都是核心库的原话，
 /// [`CatalogError`] 自己的那一句。措辞由核心库一处出，
@@ -288,17 +289,32 @@ pub enum CatalogState {
     /// 单独标出来，其余照列」，不是「读不出数就当它坏了」。
     Openable(Result<CatalogFacts, String>),
     /// **结构版本对不上**：开不进去，删掉它重扫一遍就好——会丢什么，那句话逐项说。
+    ///
+    /// **短话与细节分开**（挂单 `Q841`）：开场那一行只有一行高，印 `said`；`details` 挂在那一行
+    /// 的悬停里，一个字不少（ADR-0001 的修订：人按下去之前得知道代价）。
     SchemaMismatch {
         /// 文件里的结构版本；连结构版本那一行都没有时是 0。
         found: u32,
         /// 本程序认得的结构版本。
         expected: u32,
-        /// 核心库那句原话：「结构版本是 X，本程序认得的是 Y，删掉它重扫一遍即可」，连同删库
-        /// 会跟着丢的那几样（逐项列在 [`CatalogError::Version`] 那一句里，这里不抄）。
+        /// **短话**，一行说得完：哪个版本对哪个版本、该怎么办（[`CatalogError::Version`] 那一句的
+        /// 前半）。**不带路径**：这一行左边已经印着这份库叫什么，再印一遍一长串路径就把这一行
+        /// 撑成两行。
+        said: String,
+        /// **细节**：删掉重扫留得住什么、会跟着丢什么。悬停看得到它（[`CatalogError::Version`]
+        /// 那一句的后半，一个字不抄）。
+        details: &'static str,
+    },
+    /// **读不动**：文件在、刚列出来，只是这会儿打不开——权限不够、被别的程序占着那一类。
+    ///
+    /// **不是文件坏了**（ADR-0021 那条再修订，挂单 `Q613`）：坏了的那一份删掉重扫就好，这一份
+    /// 删掉是白白丢一次扫描。`said` 里带着下一步：去修权限，或者关掉占用它的程序。
+    Unreadable {
+        /// 核心库那句原话：系统怎么说的，加上下一步。
         said: String,
     },
-    /// **文件坏了**：开不进去，而且不是结构版本的事——不是一份 SQLite 库、读到一半坏了、
-    /// 列出来之后又被挪走了。
+    /// **文件坏了**：开不进去，而且不是结构版本的事，也不是这会儿读不动——不是一份 SQLite 库、
+    /// 读到一半坏了、列出来之后又被挪走了。**判不准的错也归这里**（ADR-0021 那条再修订）。
     Broken {
         /// 核心库那句原话，带着底层怎么说的。
         said: String,
@@ -319,6 +335,11 @@ impl CatalogState {
 /// 开场那一屏一样画得出来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CatalogFacts {
+    /// 这份库有几个**根**（一个主库可以包含多个根，例如多块硬盘）。
+    ///
+    /// 开场那一行上写着「N 个根」（挂单 `Q764`）：人得先看得出这份库横跨几块盘，才知道
+    /// 为什么会有那么多变体、以及为什么某一块盘拔了就少了一截。
+    pub roots: u64,
     /// 这份库里有多少个**变体**。
     pub variants: u64,
     /// **上次扫描**的时刻（UNIX 纪元起的秒）：这份库里那几个根里最晚的那一趟。
@@ -528,6 +549,7 @@ impl LastScan {
             })) => Self::At(std::cmp::Reverse(*at)),
             CatalogState::Openable(Err(_))
             | CatalogState::SchemaMismatch { .. }
+            | CatalogState::Unreadable { .. }
             | CatalogState::Broken { .. } => Self::Unknown,
         }
     }
@@ -611,20 +633,26 @@ fn entry_of(workspace: &Path, path: PathBuf) -> CatalogEntry {
         // **开进去了就是开得进去**，哪怕底下那几个数一个都没读回来。
         Ok(catalog) => CatalogState::Openable(facts_of(catalog)),
         // 分支按的是**错误的类型**，不是那句话里写了什么（挂单 `Q393`）。
-        Err(
-            error @ CatalogError::Version {
-                found, expected, ..
-            },
-        ) => CatalogState::SchemaMismatch {
-            found: *found,
-            expected: *expected,
+        Err(error @ CatalogError::Version(版本)) => CatalogState::SchemaMismatch {
+            found: 版本.found(),
+            expected: 版本.expected(),
+            // **短话与细节分开放**（挂单 `Q841`）：那一行只画 `said`，`details` 跟着悬停走。
+            // 结构版本对不上的那一份先把里面没搬走的人定的东西救进沉淀库——短话叫它删掉重扫，
+            // 而删掉之前得把那些救出来（救不成时说的是没救成的那一句，也说不得删）。
             said: match crate::site::rescue(workspace, &path, error) {
-                Ok(_) => format!("{error}"),
+                Ok(_) => 版本.brief(),
                 Err(stranded) => format!("{stranded}"),
             },
+            details: 版本.details(),
         },
-        Err(error) => CatalogState::Broken {
-            said: format!("{error}"),
+        // **四态的第四支在这里分开**（ADR-0021 那条再修订，挂单 `Q613`）：判据是打开时 SQLite
+        // 报的错码，逐条判（[`CatalogError::unreadable`]）；**判不准的归「文件坏了」并照印原话**。
+        // 并成一格的话，一份只是被锁着的库会被屏上叫去「删掉重扫」——删掉它是白丢一次扫描。
+        Err(error) => match error.unreadable() {
+            Some(said) => CatalogState::Unreadable { said },
+            None => CatalogState::Broken {
+                said: format!("{error}"),
+            },
         },
     };
     CatalogEntry { path, name, state }
@@ -644,11 +672,13 @@ fn listed_name(opened: &Result<Catalog, crate::catalog::CatalogError>, path: &Pa
 /// 问这份库要那几个数。哪一步读不出来，整行就退成那句话——半份数字比没有数字更难认。
 fn facts_of(catalog: &Catalog) -> Result<CatalogFacts, String> {
     let 数 = || -> Result<CatalogFacts, crate::catalog::CatalogError> {
+        // **上次扫描**按根记（`library_root` 表）——根只读这一遍：「有几个根」与「最后扫的时刻」
+        // 都从这一份里出。
+        let 根 = catalog.roots()?;
         Ok(CatalogFacts {
+            roots: u64::try_from(根.len()).unwrap_or(u64::MAX),
             variants: catalog.variant_total(&VariantQuery::default())?,
-            // **上次扫描**按根记（`library_root` 表），一份库里的那一刻取最晚的那个根。
-            scanned_at: catalog
-                .roots()?
+            scanned_at: 根
                 .into_iter()
                 .filter_map(|root| root.scan.map(|scan| scan.at))
                 .max(),

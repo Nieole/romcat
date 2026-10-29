@@ -458,7 +458,7 @@ impl Catalog {
     fn entries_only_under(&self, prefix: &str) -> Result<u64, CatalogError> {
         let entries = converge::Entries::load(self)?;
         // 条目 → 它底下的变体是不是全在这个根底下。做不成条目的那几个一开始就不算数。
-        let mut whole: BTreeMap<(String, converge::Anchor), bool> = BTreeMap::new();
+        let mut whole: BTreeMap<converge::EntryKey, bool> = BTreeMap::new();
         for variant in self.variants()? {
             let mine = variant.key.starts_with(prefix);
             let Ok(at) = entries.of(&variant) else {

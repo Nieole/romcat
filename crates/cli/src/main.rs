@@ -485,21 +485,13 @@ struct ManifestArgs {
 }
 
 impl ManifestArgs {
-    /// 工作目录里那份可选的清单叫什么。
-    const IN_WORKSPACE: &'static str = "platforms.toml";
-
+    /// 把 `--manifest` 交给核心库那一处：先点名的那一份、再工作目录里那份、再内置的
+    /// （[`Manifest::locate`]，ADR-0024）。这一层只负责那个开关，**不自己排先后**。
+    ///
+    /// 读不动就停下（`platform::Choice::strict`）：命令行没处摆「眼下用的是内置那一份」那句话，
+    /// 拿内置的顶上比停下更糟（ADR-0021）。
     fn load(&self, workspace: &Path) -> Result<Manifest, String> {
-        let path = match &self.manifest {
-            Some(path) => path.clone(),
-            None => {
-                let candidate = workspace.join(Self::IN_WORKSPACE);
-                if !candidate.exists() {
-                    return Ok(Manifest::builtin());
-                }
-                candidate
-            }
-        };
-        Manifest::load(&path).map_err(|error| format!("{error}"))
+        Manifest::locate(self.manifest.as_deref(), workspace).strict()
     }
 }
 
@@ -1324,6 +1316,30 @@ fn guarded_catalog_path(
     Ok(path)
 }
 
+/// 把一次 [`Site::open`] 的失败印成命令行那一句：**「先跑一次 `romcat scan`」由这一层补**。
+fn open_failure(error: &SiteError) -> String {
+    match error {
+        SiteError::NoCatalog(说的) => {
+            format!("还没有 {说的} 这份中立库。先跑一次 `romcat scan`。")
+        }
+        error => format!("{error}"),
+    }
+}
+
+/// 命令行印「开不了这一份」时用的那一句：**「先跑一次 `romcat scan`」由这一层补**。
+///
+/// 核心库那句只说事实（「还没有 X 这份中立库。」）——它会原样出现在开场屏上，往后缀一条命令
+/// 就是把终端的话画到屏上（ADR-0023、票 `core-answers-once/13`）。命令行这一层补去处；
+/// `Renamed` 那一支自带下一步（按建库时的名字找），不另缀。
+fn not_found_line(workspace: &Path, slug: Slug<'_>, located_by: &str) -> String {
+    match SiteError::not_found(workspace, slug, located_by) {
+        SiteError::NoCatalog(说的) => {
+            format!("还没有 {说的} 这份中立库。先跑一次 `romcat scan`。")
+        }
+        error => format!("{error}"),
+    }
+}
+
 /// 开这一份**已经在那儿**的中立库。
 ///
 /// **打开不建库**（[`Catalog::open`]）：不在就说清是靠什么没找到、该先跑哪一条
@@ -1338,9 +1354,7 @@ fn open_catalog(
 ) -> Result<Catalog, String> {
     let path = guarded_catalog_path(workspace, slug, root)?;
     Catalog::open(&path).map_err(|error| match error {
-        CatalogError::Missing { .. } => {
-            SiteError::not_found(workspace, slug, located_by).to_string()
-        }
+        CatalogError::Missing { .. } => not_found_line(workspace, slug, located_by),
         error => unopened(workspace, &path, &error),
     })
 }
@@ -1351,7 +1365,7 @@ fn open_catalog(
 /// （`site::rescue`，连首选变体、亲手加的叫法与详情页上改过的字段一起）：那句话叫人删掉它重扫，删之前得先救出来——与开现场、
 /// 开场列举是同一个函数。没救成就说没救成的那一句（核心库的原话）。
 fn unopened(workspace: &Path, path: &Path, error: &CatalogError) -> String {
-    if matches!(error, CatalogError::Version { .. })
+    if matches!(error, CatalogError::Version(_))
         && let Err(stranded) = romcat_core::site::rescue(workspace, path, error)
     {
         return stranded.to_string();
@@ -1655,7 +1669,7 @@ fn run_shape(args: &ShapeArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let path = workspace::catalog_path(&workspace, slug);
     if !path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let manifest = match args.manifest.load(&workspace) {
         Ok(manifest) => manifest,
@@ -1782,7 +1796,7 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let dat_path = workspace::dat_repo_path(&workspace);
     if !dat_path.exists() {
@@ -2075,6 +2089,18 @@ fn run_identify(args: &IdentifyArgs, cancel: &CancelToken) -> ExitCode {
         let _ = stdout.write_all(text.as_bytes());
         let _ = stdout.flush();
     }
+    // **「这一趟没读它」那半句的去处由命令行补**（票 `core-answers-once/13`）：核心里那句理由只说事实，
+    // 界面上没有「读 zst」这一项（挂单 `Q1797`）。认的是核心里那个常量，不是一句话的字（ADR-0024）。
+    if outcome
+        .report
+        .no_evidence
+        .iter()
+        .any(|row| row.reason.contains(identify::NOT_READ_NOTE))
+    {
+        eprintln!(
+            "内部构成没读的那几份：`romcat scan --zst` 读一趟，结论落进中立库，往后的扫描原样沿用。"
+        );
+    }
     eprintln!(
         "识别用了 {:.1} 秒，回盘读了 {}（{} 份内容），另有 {} 份哈希是从中立库直接取回来的。",
         started.elapsed().as_secs_f64(),
@@ -2356,7 +2382,7 @@ fn run_scrape(args: &ScrapeArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let priorities = match args.load_priorities(&workspace) {
         Ok(priorities) => priorities,
@@ -2663,7 +2689,7 @@ fn run_titles(args: &TitlesArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let priorities = match load_priorities(args.priorities.as_deref(), &workspace) {
         Ok(priorities) => priorities,
@@ -2783,7 +2809,7 @@ fn run_import(args: &ImportArgs) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     if let Some(root) = args.root.as_deref()
         && let Some(target) = args.json.as_deref()
@@ -2864,7 +2890,7 @@ fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
     let workspace = workspace_dir(args.workspace.as_deref());
     let catalog_path = workspace::catalog_path(&workspace, slug);
     if !catalog_path.exists() {
-        return fail(SiteError::not_found(&workspace, slug, &located_by).to_string());
+        return fail(not_found_line(&workspace, slug, &located_by));
     }
     let priorities = match load_priorities(args.priorities.as_deref(), &workspace) {
         Ok(priorities) => priorities,
@@ -2881,7 +2907,7 @@ fn run_export(args: &ExportArgs, cancel: &CancelToken) -> ExitCode {
     // 导出读的正是那份投影。
     let mut site = match Site::open(&workspace, slug, None, &located_by) {
         Ok(site) => site,
-        Err(error) => return fail(format!("{error}")),
+        Err(error) => return fail(open_failure(&error)),
     };
 
     // **裁决先落库**：它是沉淀，不随这一趟导出消失。
@@ -3112,7 +3138,7 @@ impl TriageCommonArgs {
         let (slug, located_by) = locate(self.library.as_deref(), self.root.as_deref())?;
         let workspace = workspace_dir(self.workspace.as_deref());
         Site::open(&workspace, slug, self.root.as_deref(), &located_by)
-            .map_err(|error| format!("{error}"))
+            .map_err(|error| open_failure(&error))
     }
 }
 
@@ -4274,10 +4300,11 @@ fn run_triage_export(args: &TriageExportArgs) -> ExitCode {
         Ok(text) => text,
         Err(error) => return fail(format!("序列化失败：{error}")),
     };
-    if let Err(message) = refuse_writing_into_any_library(&workspace, &args.out) {
-        return fail(message);
-    }
-    if let Err(error) = write_file(&args.out, format!("{text}\n").as_bytes()) {
+    let writing = match refuse_writing_into_any_library(&workspace, &args.out) {
+        Ok(writing) => writing,
+        Err(message) => return fail(message),
+    };
+    if let Err(error) = write_out(&args.out, format!("{text}\n").as_bytes(), writing) {
         return fail(format!("写不出 {}：{error}", path::display(&args.out)));
     }
     println!(
@@ -4798,6 +4825,8 @@ fn prepare(
             target,
             restore_missing: restore,
             priorities,
+            // 命令行这一侧没有人钉「今天」：照系统时钟。
+            today: None,
         },
         // 命令行这一侧没有人按「停下」：这条命令跑几百毫秒就完了，Ctrl-C 直接结束进程
         // 就是干净的（整条只读）。把手在这儿只是白记几行进度——**界面那一侧才用得上它**。
@@ -4918,6 +4947,21 @@ fn warn_about(ready: &sync::Prepared, restore: bool) {
         if let Some(hint) = hint {
             eprintln!("{hint}");
         }
+    }
+    // **差量预览里「转不了」那一栏**：核心里那句只说事实（`capability::UnsupportedReason` 的 `Display`），
+    // 命令是命令行自己的去处，照**种类**在这儿补（ADR-0023 修订段、ADR-0024；票 `core-answers-once/13`）。
+    // 界面上这两件事今天都没有落点——库屏的扫描没有「读 zst」这一项（挂单 `Q1797`）、库体检屏也没有
+    // 「透明容器：内部构成」那一节（挂单 `Q1798`）。
+    if ready
+        .plan
+        .unsupported
+        .iter()
+        .any(|row| row.why == romcat_core::capability::UnsupportedReason::ContentsUnknown)
+    {
+        eprintln!(
+            "内部构成读不出来的那几份：`romcat scan --zst` 读一趟，结论落进中立库、往后的扫描原样沿用；\n\
+             卡在哪一类，`romcat report` 说得出。"
+        );
     }
 }
 
@@ -6346,6 +6390,19 @@ impl OutputArgs {
     }
 }
 
+/// 这一条输出该按哪种方式写：ADR-0004 那条红线定。
+///
+/// 这道守卫后面是一次写文件。**查得出主库的根**时拦的是「落进主库」那一条，落点没落进去就
+/// 照旧写（可以是覆盖）；**查不出根**时退到字节级底线：只放行新建（ADR-0004 修订段，
+/// 挂单 `Q616`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Writing {
+    /// 每一份主库的根都查出来了，而这一条路径也没落进任何一份：照旧写。
+    Freely,
+    /// 有主库的根查不出来：**只放行新建**，已有的文件一个字节都不覆盖。
+    OnlyNew,
+}
+
 /// 同上，用在**不知道主库根在哪**的那几条命令上。
 ///
 /// [`refuse_writing_into_library`] 要调用方手上先有一个根。`triage export --out` 是
@@ -6356,29 +6413,74 @@ impl OutputArgs {
 /// 加一个 `--root` 是站不住的另一条路——一道要人记得带旗子才生效的守卫不是守卫，
 /// 而这条红线护着的是 10 TB 不可再生的东西。
 ///
-/// **开不动的那几份跳过**：它们的根读不出来，而这道守卫宁可少挡一次，也不能挡错一次
-/// （把人往别处写的合法输出拦下来）。用户机器上是三份库（ADR-0023），这一趟三次只读打开。
-/// **中立库住的那个目录读不动时同一个口径**：一份库的根都读不出来，一个都不比。
-fn refuse_writing_into_any_library(workspace: &Path, target: &Path) -> Result<(), String> {
+/// **查不出根时只放行新建**（ADR-0004 修订段，挂单 `Q616`）：中立库住的那个目录读不动（或者
+/// 某一份库开不了、根读不出来）的极端情况下，从前这一支**放行**——而它后面是一次**覆盖写**，
+/// 那就是把一份 ROM 盖掉。现在：落点已存在就拒并说清是因为查不出主库的根，落点不在就交
+/// [`Writing::OnlyNew`]（写的时候用 `create_new`，中间抢进来的那一份也盖不掉）。
+///
+/// 「开不动的那几份跳过」那套口径没翻：说不出来的根照样不比，能比的那几份照旧比——
+/// 新文件碰不到任何已有的字节，拒掉覆盖就把两条判据都守住了。
+fn refuse_writing_into_any_library(workspace: &Path, target: &Path) -> Result<Writing, String> {
     let listing = romcat_core::workspace::catalogs(workspace);
-    let Ok(entries) = listing.entries() else {
-        return Ok(());
+    // 第一处「查不出根」的原因：拿它说清是哪个目录、哪份库怎么了。**开不了的那份照印
+    // 核心库的原话**（它自己说了为什么开不了），命令行不另写一句。
+    let mut 查不出根: Option<String> = None;
+    let entries: &[romcat_core::workspace::CatalogEntry] = match listing.entries() {
+        Ok(entries) => entries,
+        Err(why) => {
+            查不出根 = Some(why.to_string());
+            &[]
+        }
     };
     for entry in entries {
+        let 为什么开不了 = || match &entry.state {
+            romcat_core::workspace::CatalogState::SchemaMismatch { said, .. }
+            | romcat_core::workspace::CatalogState::Broken { said } => {
+                format!("{} 打不开：{said}", path::display(&entry.path))
+            }
+            // 票 `core-answers-once/07` 把「读不动」从「打不开」里分了出来（ADR-0021 再修订）。
+            // 对这条守卫来说两种一样：这一份的根查不出来，落点于是只放行新建。
+            romcat_core::workspace::CatalogState::Unreadable { said } => {
+                format!("{} 读不动：{said}", path::display(&entry.path))
+            }
+            romcat_core::workspace::CatalogState::Openable(_) => {
+                format!("{} 打不开", path::display(&entry.path))
+            }
+        };
         if !entry.state.openable() {
+            查不出根.get_or_insert_with(为什么开不了);
             continue;
         }
         let Ok(catalog) = Catalog::open(&entry.path) else {
+            查不出根.get_or_insert_with(为什么开不了);
             continue;
         };
         let Ok(roots) = Roots::load(&catalog) else {
+            查不出根
+                .get_or_insert_with(|| format!("{} 里的根读不出来", path::display(&entry.path)));
             continue;
         };
         for (_, root) in roots.iter() {
             refuse_writing_into_library(root, target)?;
         }
     }
-    Ok(())
+    let Some(why) = 查不出根 else {
+        return Ok(Writing::Freely);
+    };
+    // **查不出根时只放行新建**：目标已经在了就拒——它可能就是一份 ROM。
+    match target.try_exists() {
+        Ok(false) => Ok(Writing::OnlyNew),
+        Ok(true) => Err(format!(
+            "{} 已经在那儿了。这一趟查不出主库的根（{why}），没法确认它不落在某一份主库里——\
+             已有的文件一个字节都不覆盖，换一个新的文件名再导出",
+            path::display(target)
+        )),
+        Err(source) => Err(format!(
+            "{} 说不出来在不在（{source}）。这一趟查不出主库的根（{why}），没法确认它不落在\
+             某一份主库里——已有的文件一个字节都不覆盖，换一个新的文件名再导出",
+            path::display(target)
+        )),
+    }
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -6388,6 +6490,26 @@ fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, bytes)
+}
+
+/// 照 [`Writing`] 那一档把输出落下去。
+///
+/// `OnlyNew` 用的是 [`fs::OpenOptions::create_new`]：**不肯覆盖**这件事由系统那一下本身兜住，
+/// 不靠「先问一遍在不在、再写」——查出来不在与写到之间还有一瞬。
+fn write_out(path: &Path, bytes: &[u8], writing: Writing) -> io::Result<()> {
+    if writing == Writing::Freely {
+        return write_file(path, bytes);
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(bytes)
 }
 
 #[cfg(test)]

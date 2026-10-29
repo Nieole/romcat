@@ -161,12 +161,6 @@ pub enum Accepts {
 }
 
 impl Accepts {
-    /// 吃得下这个扩展名吗。
-    #[must_use]
-    pub fn takes(&self, extension: &str) -> bool {
-        self.takes_key(&format!("_.{extension}"))
-    }
-
     /// 吃得下这一份吗：`key` 是它的键或者文件名，看的是扩展名（[`Self::Bare`] 看它是不是透明容器）。
     #[must_use]
     pub fn takes_key(&self, key: &str) -> bool {
@@ -501,8 +495,118 @@ pub enum Decision {
         /// 目标想要的是什么形态。
         want: String,
         /// 为什么转不了。
-        why: String,
+        why: UnsupportedReason,
     },
+}
+
+/// **转不了**的原因是哪一种。
+///
+/// `Display` 只说**事实**（ADR-0023 修订段，票 `core-answers-once/13`）：从前有一句里带着
+/// 「（zst 要 `romcat scan --zst`）」与「`romcat report` 说得出它卡在哪一类」，画到子库屏
+/// 差量预览那几行的悬停里就是一句终端命令。命令归命令行补（`crates/cli/src/main.rs` 的
+/// `warn_about`），屏上那一处归界面补——这两件事界面上今天都**没有落点**：库屏的扫描没有
+/// 「读 zst」这一项（挂单 `Q1797`）、库体检屏也没有「透明容器：内部构成」那一节
+/// （挂单 `Q1798`），于是那一份只说事实。
+///
+/// 交成种类而不是一段话，是为了让两个壳照**同一个东西**决定补什么（ADR-0024）：认理由的文字
+/// 去补命令，改一个字就认不出来了。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsupportedReason {
+    /// 这个平台的档案没写转成什么。
+    NoRecipe {
+        /// 主文件的扩展名（小写、不带点）。
+        extension: String,
+    },
+    /// **透明容器，可中立库里没有它的内部构成**：当初穿不透，或者那一趟压根没读它
+    /// （zst 默认不读，ADR-0014）。
+    ///
+    /// 这一种是唯一要两个壳各补去处的：命令行补「读一趟」与「说得出卡在哪一类」两条命令。
+    ContentsUnknown,
+    /// 不是这一版认得的透明容器。
+    NotAContainer {
+        /// 主文件的扩展名（小写、不带点）。
+        extension: String,
+    },
+    /// rar 的内部构成读得出来，字节取不出来。
+    Rar,
+    /// 容器里一个有内容的条目都没有。
+    EmptyContainer {
+        /// 要解出来（`Recipe::Unpack`）还是重打包（`Recipe::Rezip`）——两句话说两件事。
+        unpacking: bool,
+    },
+    /// 重打包出来会越过 ZIP 的 4 GiB 边界。
+    ZipTooBig,
+    /// 条目数越过 ZIP 中央目录的 65535 条边界。
+    TooManyEntries {
+        /// 容器里有几条。
+        count: usize,
+    },
+    /// 解出来的那一条没有名字。
+    NamelessEntry,
+    /// 容器里有好几个内容条目，这一版只解只有一个的。
+    SeveralEntries {
+        /// 容器里有几个内容条目。
+        count: usize,
+    },
+    /// 解出来那份目标同样吃不下。
+    InnerNotWanted {
+        /// 解出来那一份的扩展名（小写、不带点）。
+        extension: String,
+    },
+}
+
+impl std::fmt::Display for UnsupportedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRecipe { extension } => write!(
+                f,
+                "这个平台的档案没写转成什么，`.{extension}` 就只能原样躺在卡上"
+            ),
+            // **两种情况说两句话。** 一句「不是透明容器」套在一个货真价实的 `.zip` 上是自相矛盾的理由
+            // ——那一份其实是当初**穿不透**（要密码、结构读不下去），而穿不透与「不是那个格式」在这个
+            // 项目里从来是分开的两件事（`CONTEXT.md`）。
+            Self::ContentsUnknown => write!(
+                f,
+                "这是透明容器，可中立库里没有它的内部构成：当初穿不透（要密码、结构读不下去），\
+                 或者那一趟压根没读它（zst 默认不读）。内部构成读不出来，于是转不了"
+            ),
+            Self::NotAContainer { extension } => write!(
+                f,
+                "`.{extension}` 不是这一版认得的透明容器（只认 zip、7z、rar 与 zst），\
+                 转换要外部工具，工具做不到"
+            ),
+            Self::Rar => write!(
+                f,
+                "rar 的内部构成读得出来，字节取不出来：解压要 UnRAR 的算法，\
+                 而这个项目刻意没有引进它（许可传染）。要转的话先用外部工具解一次"
+            ),
+            Self::EmptyContainer { unpacking: true } => {
+                write!(f, "容器里一个有内容的条目都没有，解不出东西来")
+            }
+            Self::EmptyContainer { unpacking: false } => {
+                write!(f, "容器里一个有内容的条目都没有，重打包出来会是个空 zip")
+            }
+            Self::ZipTooBig => write!(f, "重打包出来会{ZIP_LIMIT_SAYS}"),
+            Self::TooManyEntries { count } => {
+                write!(f, "容器里有 {count} 条，越过 ZIP 中央目录的 65535 条边界")
+            }
+            Self::NamelessEntry => write!(f, "容器里那一条没有名字，解出来不知道该叫什么"),
+            Self::SeveralEntries { count } => {
+                write!(f, "容器里有 {count} 个内容条目，这一版只解只有一个的")
+            }
+            Self::InnerNotWanted { extension } => {
+                write!(f, "解出来是 `.{extension}`，目标同样吃不下——解了也白解")
+            }
+        }
+    }
+}
+
+/// `--json` 里那一格照旧**是一句话**（挂单 `Q1347` 的口径）：写出去的是 `Display` 那一份事实，
+/// 不是种类的形状。种类是给两个壳认的，读它的工具要的是那句话。
+impl Serialize for UnsupportedReason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
 }
 
 /// 判一个**主文件**该怎么办。
@@ -535,24 +639,18 @@ pub fn decide(
     let Some(recipe) = entry.convert_to else {
         return Decision::Unsupported {
             want: describe(&entry.accepts, None),
-            why: format!("这个平台的档案没写转成什么，`.{extension}` 就只能原样躺在卡上"),
+            why: UnsupportedReason::NoRecipe { extension },
         };
     };
     let want = describe(&entry.accepts, Some(recipe));
     let Some(contents) = contents else {
-        // **两种情况说两句不同的话。** 一句「不是透明容器」套在一个货真价实的 `.zip`
-        // 上是自相矛盾的理由——那一份其实是当初**穿不透**（要密码、结构读不下去），
-        // 而穿不透与「不是那个格式」在这个项目里从来是分开的两件事（`CONTEXT.md`）。
+        // **两种情况说两句话。** 一句「不是透明容器」套在一个货真价实的 `.zip` 上是自相矛盾的理由
+        // ——那一份其实是当初**穿不透**（要密码、结构读不下去），而穿不透与「不是那个格式」在这个
+        // 项目里从来是分开的两件事（`CONTEXT.md`）。两句话都在 [`UnsupportedReason`] 的 `Display` 里。
         let why = if crate::container::ContainerKind::for_path(Path::new(key)).is_some() {
-            "这是透明容器，可中立库里没有它的内部构成：当初穿不透（要密码、\
-             结构读不下去），或者那一趟压根没读它（zst 要 `romcat scan --zst`）。\
-             内部构成读不出来，于是转不了——`romcat report` 说得出它卡在哪一类"
-                .to_string()
+            UnsupportedReason::ContentsUnknown
         } else {
-            format!(
-                "`.{extension}` 不是这一版认得的透明容器（只认 zip、7z、rar 与 zst），\
-                 转换要外部工具，工具做不到"
-            )
+            UnsupportedReason::NotAContainer { extension }
         };
         return Decision::Unsupported { want, why };
     };
@@ -565,10 +663,7 @@ pub fn decide(
     {
         return Decision::Unsupported {
             want,
-            why: "rar 的内部构成读得出来，字节取不出来：解压要 UnRAR 的算法，\
-                  而这个项目刻意没有引进它（许可传染）。\
-                  要转的话先用外部工具解一次"
-                .to_string(),
+            why: UnsupportedReason::Rar,
         };
     }
     match recipe {
@@ -593,7 +688,7 @@ fn rezip(contents: &Contents, key: &str, bytes: u64, want: &str) -> Decision {
     if count == 0 {
         return Decision::Unsupported {
             want: want.to_string(),
-            why: "容器里一个有内容的条目都没有，重打包出来会是个空 zip".to_string(),
+            why: UnsupportedReason::EmptyContainer { unpacking: false },
         };
     }
     // ZIP 的 32 位字段：单条或总量过 4 GiB 就要 ZIP64，而这一版不写（挂账 D90）。
@@ -601,13 +696,13 @@ fn rezip(contents: &Contents, key: &str, bytes: u64, want: &str) -> Decision {
     if total >= ZIP_LIMIT || contents.entries.iter().any(|entry| entry.size >= ZIP_LIMIT) {
         return Decision::Unsupported {
             want: want.to_string(),
-            why: format!("重打包出来会{ZIP_LIMIT_SAYS}"),
+            why: UnsupportedReason::ZipTooBig,
         };
     }
     if count > u16::MAX as usize {
         return Decision::Unsupported {
             want: want.to_string(),
-            why: format!("容器里有 {count} 条，越过 ZIP 中央目录的 65535 条边界"),
+            why: UnsupportedReason::TooManyEntries { count },
         };
     }
     Decision::Convert(Box::new(Conversion {
@@ -632,7 +727,7 @@ fn unpack(contents: &Contents, entry: &Entry, key: &str, bytes: u64, want: &str)
     let Some((index, item)) = inner.next() else {
         return Decision::Unsupported {
             want: want.to_string(),
-            why: "容器里一个有内容的条目都没有，解不出东西来".to_string(),
+            why: UnsupportedReason::EmptyContainer { unpacking: true },
         };
     };
     // ⭐ **只解「只有一个内容条目」的容器。** 多条的解出来是好几个文件，而
@@ -642,17 +737,16 @@ fn unpack(contents: &Contents, entry: &Entry, key: &str, bytes: u64, want: &str)
     if inner.next().is_some() {
         return Decision::Unsupported {
             want: want.to_string(),
-            why: format!(
-                "容器里有 {} 个内容条目，这一版只解只有一个的",
-                contents.entries.iter().filter(|e| e.has_content()).count()
-            ),
+            why: UnsupportedReason::SeveralEntries {
+                count: contents.entries.iter().filter(|e| e.has_content()).count(),
+            },
         };
     }
     let name = item.path.rsplit('/').next().unwrap_or(&item.path);
     if name.is_empty() {
         return Decision::Unsupported {
             want: want.to_string(),
-            why: "容器里那一条没有名字，解出来不知道该叫什么".to_string(),
+            why: UnsupportedReason::NamelessEntry,
         };
     }
     // 解出来的那一份目标也吃不下，就别白解一趟：zip 里套着 rar 正是这种。
@@ -660,7 +754,9 @@ fn unpack(contents: &Contents, entry: &Entry, key: &str, bytes: u64, want: &str)
     if !entry.accepts.takes_key(name) {
         return Decision::Unsupported {
             want: want.to_string(),
-            why: format!("解出来是 `.{inner_extension}`，目标同样吃不下——解了也白解"),
+            why: UnsupportedReason::InnerNotWanted {
+                extension: inner_extension,
+            },
         };
     }
     Decision::Convert(Box::new(Conversion {
@@ -1397,8 +1493,12 @@ mod tests {
                 panic!("RetroArch 不支持 rar，而工具转不了它");
             };
             assert!(
-                why.contains("透明容器") || why.contains("UnRAR"),
+                why.to_string().contains("透明容器") || why.to_string().contains("UnRAR"),
                 "要说清为什么转不了：{why}"
+            );
+            assert!(
+                !why.to_string().contains("romcat "),
+                "转不了的理由里不带命令行命令：{why}"
             );
         }
     }
@@ -1416,7 +1516,14 @@ mod tests {
         ) else {
             panic!("解出来是 rar，解了也白解");
         };
-        assert!(why.contains("白解"), "{why}");
+        assert!(why.to_string().contains("白解"), "{why}");
+        assert_eq!(
+            why,
+            UnsupportedReason::InnerNotWanted {
+                extension: "rar".to_string()
+            },
+            "是哪一种得交成种类：命令行照它补去处"
+        );
     }
 
     #[test]
@@ -1431,7 +1538,7 @@ mod tests {
         ) else {
             panic!("多条的这一版不解");
         };
-        assert!(why.contains("只解只有一个的"), "{why}");
+        assert!(why.to_string().contains("只解只有一个的"), "{why}");
     }
 
     #[test]
@@ -1672,8 +1779,32 @@ mod tests {
         else {
             panic!("穿不透就转不了");
         };
-        assert!(why.contains("穿不透"), "{why}");
-        assert!(!why.contains("不是这一版认得的"), "别说它不是容器：{why}");
+        assert!(why.to_string().contains("穿不透"), "{why}");
+        assert!(
+            !why.to_string().contains("不是这一版认得的"),
+            "别说它不是容器：{why}"
+        );
+    }
+
+    #[test]
+    fn 转不了的理由只说事实_不带命令行命令_是哪一种交成种类() {
+        // 票 `core-answers-once/13`（挂单 `Q1349`）：这一句从前带着「（zst 要 `romcat scan --zst`）」
+        // 与「`romcat report` 说得出它卡在哪一类」，画到子库屏差量预览那几行的悬停里就是一句终端命令。
+        // **事实留在核心库，命令由命令行照种类补**（ADR-0023 修订段）。
+        let profile = 档案("独立模拟器-exfat");
+        let Decision::Unsupported { why, .. } =
+            decide(&profile, Some("PS1"), "PS1/要密码的.zip", 1024, None)
+        else {
+            panic!("穿不透就转不了");
+        };
+        assert_eq!(
+            why,
+            UnsupportedReason::ContentsUnknown,
+            "「内部构成读不出来」要认得出是哪一种——命令行照它补那两条命令"
+        );
+        let 话 = why.to_string();
+        assert!(!话.contains("romcat "), "理由里不该有命令行命令：{话}");
+        assert!(话.contains("内部构成读不出来"), "{话}");
     }
 
     #[test]

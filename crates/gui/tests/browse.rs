@@ -3163,6 +3163,44 @@ fn 浏览屏把还没识别与没有候选印成两个词() {
     // egui 一个字都不画。那一句的两个分岔由核心库那条测试钉着
     // （`WorkVariant::no_candidate_hint`，`crates/core/tests/works.rs`）——
     // 判据收在核心库里的好处正是这个：它验得了，而这一层只是印。
+
+    // **那一句里不带终端命令**（票 `core-answers-once/13`、ADR-0023 修订段）：侧边详情那张卡
+    // 底下画的正是核心库 `no_candidate_hint` 那一句，从前它写着「先跑一趟 `romcat identify`」。
+    let 没跑过的那一句 = {
+        let (browse, site) = app.browse_and_site();
+        anchors
+            .iter()
+            .filter_map(|anchor| {
+                site.catalog
+                    .work_detail(browse.query(), anchor)
+                    .ok()
+                    .flatten()
+            })
+            .flat_map(|detail| detail.variants)
+            .find(|variant| {
+                variant.confidence_label() == romcat_core::catalog::identify::NOT_RUN_LABEL
+            })
+            .expect("三档里有一档是还没识别")
+            .no_candidate_hint()
+            .expect("还没识别有话说")
+            .to_string()
+    };
+    assert!(
+        各栏.iter().any(|栏| 栏.有这一段(&没跑过的那一句)),
+        "还没识别那张卡上没照核心库那句说（{没跑过的那一句}）：\n{}",
+        各栏
+            .iter()
+            .map(一栏::全文)
+            .collect::<Vec<_>>()
+            .join("\n——\n"),
+    );
+    for 栏 in &各栏 {
+        assert!(
+            !栏.全文().contains("romcat "),
+            "侧边详情里画出了终端命令：\n{}",
+            栏.全文()
+        );
+    }
 }
 
 #[test]
@@ -5004,6 +5042,38 @@ fn 筛不出东西的子句屏上逐条点名但不拦着() {
     assert!(
         !屏上.contains("个子句未填写") && !屏上.contains("个子句写错了"),
         "把「筛不出东西」说成了「没生效」，两件事混了：\n{屏上}"
+    );
+}
+
+/// **`!=` 后面写了库里没有的值：屏上说这一条什么都没排除**
+/// （票 `core-answers-once/12`，收挂单 `Q1101`）。
+///
+/// `平台=没这个平台` 是「一个变体都选不中」，`平台!=没这个平台` 却正相反：一个都排不掉。
+/// 判据照样在核心库那一处（`sublibrary::thin_clause`，ADR-0024），这一层只把它印出来。
+#[test]
+fn 不等号后面写了库里没有的值屏上说没排除掉任何东西() {
+    let ctx = headless::context();
+    let mut app = shared::小库(
+        &[("SFC", "短.zip", shared::档::命中)],
+        shared::干净工作目录("romcat-测试-浏览-不等号白写"),
+    );
+    app.show_view(View::Browse);
+    跑(&ctx, &mut app, 3);
+
+    let rule = romcat_core::sublibrary::Rule::parse("平台!=没这个平台").expect("读得懂");
+    app.browse_and_site().0.set_filter_rule(Some(rule));
+    跑(&ctx, &mut app, 2);
+    let 屏上 = shared::画出来的字(&headless::frame(&ctx, 够高的一帧(), |ui| app.ui(ui)));
+
+    // 断的是核心库交回来的那一句，不是「没这个平台」那几个字——那几个字在值那一格与规则原文里
+    // 本来就有。
+    let 那一句 = romcat_core::sublibrary::ThinClause::NothingExcluded(
+        romcat_core::sublibrary::Dimension::Platform,
+    )
+    .advice();
+    assert!(
+        屏上.contains(&那一句),
+        "这一条没被点名：「{那一句}」\n{屏上}"
     );
 }
 

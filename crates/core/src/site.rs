@@ -26,7 +26,11 @@ use crate::workspace::{self, Slug};
 #[derive(Debug, thiserror::Error)]
 pub enum SiteError {
     /// 中立库还不在。
-    #[error("还没有 {0} 这份中立库。先跑一次 `romcat scan`。")]
+    ///
+    /// **只说事实，不带命令**（ADR-0023 那一族、票 `core-answers-once/13`）：这一句会原样出现在
+    /// 开场屏上（`crates/gui/src/program.rs` 的「上次开的那份现在开不了：…」）。「先跑一次
+    /// `romcat scan`」那半句由命令行在它那一层补（`crates/cli/src/main.rs` 的 `not_found_line`）。
+    #[error("还没有 {0} 这份中立库。")]
     NoCatalog(String),
     /// 按这个名字折出来的中立库不在，而这个工作目录里另一份库的**主库原名**正是它——那份
     /// 多半改过名：改名只换主库原名，找库认的仍是建库时那个名字折出来的主库标识（挂单 `Q472`）。
@@ -48,6 +52,22 @@ pub enum SiteError {
     /// 那不像是一份中立库文件。
     #[error("{0} 不像是一份中立库文件。")]
     NotACatalog(String),
+    /// 中立库住的那个目录**读不动**（ADR-0021 第三态，挂单 `Q614`）：说不出来这份库在不在。
+    ///
+    /// 从前那一问问的是 `Path::exists()`，它把「读不动」也报成「不在」——于是屏上说的是
+    /// 「还没有这份库」，人照做就是白扫一趟，而该做的完全不同：
+    /// 去修那个目录的权限。
+    #[error(
+        "中立库住的那个目录读不动：{}（{source}）。说不准里头那份中立库在不在——\
+         先去修那个目录的权限，或者关掉占着它的程序",
+        path::display(.dir)
+    )]
+    Unreadable {
+        /// 说不准在不在的那份中立库住的目录。
+        dir: PathBuf,
+        /// 系统怎么说的。
+        source: std::io::Error,
+    },
     /// 中立库打不开。
     #[error("中立库打不开：{0}")]
     Catalog(#[from] CatalogError),
@@ -97,10 +117,13 @@ impl SiteError {
     ///
     /// 给的是名字、而这个工作目录里另一份库的主库原名正是它时，说清是哪一份
     /// （[`SiteError::Renamed`]，判「是不是它」只在 [`workspace::namesake`]）；否则就是
-    /// 「还没有，先跑一次 `romcat scan`」（[`SiteError::NoCatalog`]）。
+    /// 「还没有这份库」（[`SiteError::NoCatalog`]，只这一句；「先跑哪一条」由命令行补）。
     ///
     /// 中立库住的那个目录列不开时查不了这个名字是哪一份库的原名，就只说「还没有」：那一句
-    /// 只是替人多指一步路，指不出来不改变「按这个名字折出来的那份不在」（挂单 `Q614`）。
+    /// 只是替人多指一步路，指不出来不改变「按这个名字折出来的那份不在」。
+    ///
+    /// **这一句留给真的「不在」**：目录读不动时走的是 [`SiteError::Unreadable`]，不是这一句
+    /// （挂单 `Q614`）。
     #[must_use]
     pub fn not_found(workspace: &Path, slug: Slug<'_>, located_by: &str) -> Self {
         if let Slug::Named(name) = slug
@@ -113,6 +136,17 @@ impl SiteError {
             };
         }
         Self::NoCatalog(located_by.to_string())
+    }
+
+    /// 说不出来这份中立库在不在（它住的那个目录读不动）时该说哪一句。
+    ///
+    /// 「在不在」问的是 [`Path::try_exists`] 而不是 [`Path::exists`]：后者把「读不动」报成
+    /// 「不在」，于是屏上说「还没有这份库」——而正确的下一步是去修权限（挂单 `Q614`）。
+    fn unreadable(catalog: &Path, source: std::io::Error) -> Self {
+        Self::Unreadable {
+            dir: workspace::dir_of(catalog).to_path_buf(),
+            source,
+        }
     }
 }
 
@@ -147,8 +181,12 @@ impl Site {
         located_by: &str,
     ) -> Result<Self, SiteError> {
         let catalog = workspace::catalog_path(workspace, slug);
-        if !catalog.exists() {
-            return Err(SiteError::not_found(workspace, slug, located_by));
+        // **「在不在」要问得能区分「读不动」**（ADR-0021 第三态，挂单 `Q614`）：`Path::exists()`
+        // 把读不动也报成不在，于是打开现场说「还没有这份库，先跑一次 scan」。
+        match catalog.try_exists() {
+            Ok(true) => {}
+            Ok(false) => return Err(SiteError::not_found(workspace, slug, located_by)),
+            Err(source) => return Err(SiteError::unreadable(&catalog, source)),
         }
         Self::at(workspace, &catalog, slug.text(), root)
     }
@@ -166,8 +204,11 @@ impl Site {
         catalog: &Path,
         root: Option<&Path>,
     ) -> Result<Self, SiteError> {
-        if !catalog.exists() {
-            return Err(SiteError::NoCatalog(path::display(catalog)));
+        // 同 [`Site::open`]：读不动不是不在（挂单 `Q614`）。
+        match catalog.try_exists() {
+            Ok(true) => {}
+            Ok(false) => return Err(SiteError::NoCatalog(path::display(catalog))),
+            Err(source) => return Err(SiteError::unreadable(catalog, source)),
         }
         let library_identity = workspace::library_identity_of(catalog)
             .ok_or_else(|| SiteError::NotACatalog(path::display(catalog)))?;
@@ -414,7 +455,7 @@ impl Site {
             Ok(opened) => opened,
             // **结构版本对不上**：那句话会叫人删掉它重扫。删之前，它里面没搬走的人定的东西
             // 得先救进沉淀库——那句「一条不丢」才是真的。
-            Err(error @ CatalogError::Version { .. }) => {
+            Err(error @ CatalogError::Version(_)) => {
                 rescue(workspace, catalog, &error)?;
                 return Err(error.into());
             }
@@ -619,6 +660,19 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn 还没有那份库那一句只说事实_命令行命令由壳来补() {
+        // ADR-0023 那一族（票 `core-answers-once/13`）：这一句会原样出现在开场屏上
+        // （`crates/gui/src/program.rs` 的「上次开的那份现在开不了：…」），所以核心里不缀命令；
+        // 命令行在它那一层补「先跑一次 `romcat scan`」（`crates/cli/src/main.rs` 的 `open_failure`）。
+        let 说的 = SiteError::NoCatalog("小库".to_string()).to_string();
+        assert!(说的.contains("还没有"), "那一句没说清是还没有：{说的}");
+        assert!(
+            !说的.contains("romcat "),
+            "核心库里那句带着命令行命令，界面会把它原样画出来：{说的}"
+        );
+    }
 
     #[test]
     fn 中立库的主文件名就是这份主库的主库标识() {

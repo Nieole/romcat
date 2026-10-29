@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::report::{heading, human_bytes, pad, thousands};
 
-use super::{Fit, LoadedSelection, Selected, Sublibrary, VariantFacts};
+use super::{Fit, LoadedSelection, Selected, Sublibrary, VariantFacts, trim_line};
 
 /// 报告里例外那一栏最多列几个键。
 const EXAMPLES: usize = 10;
@@ -414,7 +414,9 @@ impl SelectionReport {
                             "  {}{}{}",
                             pad(&human_bytes(trim.bytes), 12),
                             pad(&human_bytes(trim.cumulative), 12),
-                            trim.variant,
+                            // **作品名与平台在上、变体的键在下**（挂单 `Q852`）：名字认得出是谁，
+                            // 键是照着写 `--exclude` 的那一串。
+                            trim_line(trim),
                         );
                     }
                     if let Some(last) = room.trim_suggestions.last()

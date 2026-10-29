@@ -577,14 +577,14 @@ pub struct Selected {
     pub thin_dimensions: Vec<&'static str>,
 }
 
-/// 超容量时列几个最大的当裁剪建议。
+/// 超容量时列几个最大的当删减建议。
 ///
 /// 十个是**看得完**与**够用**之间的折中：真库上一条规则能选出上千个变体，全列出来
-/// 谁也读不完；而 [`Trim::cumulative`] 让「这十个全砍掉够不够」一眼看得出来，
+/// 谁也读不完；而 [`Trim::cumulative`] 让「这十个全排除够不够」一眼看得出来，
 /// 不够时报告直接说还差多少。
 pub const TRIM_SUGGESTIONS: usize = 10;
 
-/// 一条**裁剪建议**：砍掉这个变体能腾出多少。
+/// 一条**删减建议**：排除这个变体能腾出多少。
 ///
 /// **落在变体这一层而不是文件**：例外记的是变体的键
 /// （`romcat sublibrary except --exclude <变体的键>`），落在文件上的建议照着做不了。
@@ -592,13 +592,67 @@ pub const TRIM_SUGGESTIONS: usize = 10;
 pub struct Trim {
     /// 变体的键。
     pub variant: String,
-    /// 砍掉它腾出多少字节。
-    pub bytes: u64,
-    /// 从最大的那个砍起、砍到这一条为止一共腾出多少。
+    /// **作品名**：屏上认这一行靠它。认出作品的取作品名，认不出的取那个变体的**正题**
+    /// （[`WorkRow::title`](crate::catalog::browse::WorkRow::title) 同一处剥）；
+    /// 库里查不着这个变体时退回[变体的键](Self::variant)——那时剥正题要的主文件名也不在库里。
+    pub title: String,
+    /// 平台；认不出平台时是 `None`（与浏览屏那一栏同一条口径）。
+    pub platform: Option<String>,
+    /// 排除它腾出多少字节。
     ///
-    /// **「砍到第几个才够」直接读得出来**——没有它，用户对着十行数字还得自己加一遍，
+    /// **它自己的文件**，外加——这一条是它那部作品**最后一个**被排除的变体时——那部作品的
+    /// **作品级媒体**（封面、截图、视频，见 [`TrimName`]）。同一部作品的别的变体还留着时，
+    /// 那几份照旧要铺，于是不算在这里。
+    pub bytes: u64,
+    /// 从最大的那个排除起、排除到这一条为止一共腾出多少。
+    ///
+    /// **「排除到第几个才够」直接读得出来**——没有它，用户对着十行数字还得自己加一遍，
     /// 而超出量动辄是几十上百 GiB。
     pub cumulative: u64,
+}
+
+/// 一条删减建议在**文本报告**里怎么写：**作品名（平台）**在前、变体的键在后。
+///
+/// 两样都要（挂单 `Q852`）：名字让人认得出要排除的是什么，键是照着写 `--exclude` 的那一串。
+#[must_use]
+pub fn trim_line(trim: &Trim) -> String {
+    match trim.platform.as_deref() {
+        Some(platform) => format!("{}（{platform}） · {}", trim.title, trim.variant),
+        None => format!("{} · {}", trim.title, trim.variant),
+    }
+}
+
+/// 删减建议那一行上**库侧那三样**：这一行认的是谁、屏上叫什么、什么平台。
+///
+/// 与 [`Trim`] 分开：那一条是算出来的账，这一份是**库里的字**。名字在库那一侧取（
+/// [`Catalog::trim_names`](crate::catalog::Catalog::trim_names)），界面照印、不自己凑
+/// 「这个变体叫什么」（ADR-0024）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct TrimName {
+    /// 这个变体属于**哪个作品**——`work` 表里那个名字，**身份不是给人看的字**：
+    /// 作品级媒体记在它名下，`work` 表的 `name` 上刻意没有 `UNIQUE`（两个同名作品是真实存在的）。
+    pub work: Option<String>,
+    /// **屏上那一行的名字**：认出作品的写作品名，认不出的写那个变体的**正题**
+    /// （[`WorkRow::title`](crate::catalog::browse::WorkRow::title) 同一处剥）。
+    pub title: String,
+    /// 平台；认不出平台时是 `None`。
+    pub platform: Option<String>,
+}
+
+/// 折删减建议要的**原料**，按两种口径分开记。
+///
+/// 分开是这一条的全部意思（挂单 `Q819`）：**文件按变体记，媒体按作品记**。
+/// 一份作品级媒体被这个作品的几个变体共用，目标上只铺一次；于是排除其中一个变体时它照旧要铺，
+/// 只有这个作品的变体**全被排除**了才算腾出。记在头一个遇到它的变体名下的话，「累计腾出」
+/// 与「排除到这一项就能放下」都会偏乐观。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrimPool {
+    /// 变体自己的文件：变体的键 → 一共多大。
+    pub variants: BTreeMap<String, u64>,
+    /// **作品级媒体**：作品名 → 那几份一共多大。
+    pub works: BTreeMap<String, u64>,
+    /// 变体的键 → 它属于哪部作品、屏上叫什么、什么平台。
+    pub names: BTreeMap<String, TrimName>,
 }
 
 /// **装得下吗**：这一台设备同步完之后卡上占多少、超没超上限。
@@ -666,14 +720,14 @@ pub struct Room {
 }
 
 impl Room {
-    /// **排除到哪一项就放得下**：裁剪建议从最大的排起，排除到第几项（从 0 数）为止腾出来的够抵掉
+    /// **排除到哪一项就放得下**：删减建议从最大的排起，排除到第几项（从 0 数）为止腾出来的够抵掉
     /// 超出量；没超限、或者建议全排除也不够时是 `None`。
     ///
-    /// 判据是「累计腾出 ≥ 超出量」。**累计腾出是计划器按变体记的账**（[`Trim::cumulative`]）：一个
-    /// 变体名下记的是它自己的文件，外加**头一个引用到**的那几份作品级媒体——同一份媒体只铺一次、
-    /// 记在头一个遇到它的变体名下（`sync::media`）。于是排除一个变体、而同作品的别的变体还留着时，
-    /// 那几份媒体照旧要铺，实际腾出的比这里算的少：**这是计划器口径下的估计**，排除之后重排一遍
-    /// 计划才是准数（子库屏按下「排除」会当场重算；挂单 `Q819`）。
+    /// 判据是「累计腾出 ≥ 超出量」。**累计腾出是计划器按变体与作品两本账算出来的准数**
+    /// （[`trim_suggestions`]）：一个变体名下记的是它自己的文件，**作品级媒体记在那部作品名下**
+    /// ——同一份媒体被这个作品的几个变体共用、目标上只铺一次，于是只有把它的变体**全排除**
+    /// 才算腾出。照这张表从上往下排除，排到这一项为止腾出来的就是 [`Trim::cumulative`]
+    /// 写的那个数（挂单 `Q819`）。
     ///
     /// **这是一处判断**，子库屏的删减建议表只照它画那一行（ADR-0024）。
     #[must_use]
@@ -688,7 +742,8 @@ impl Room {
     /// 就放得下时是 `None`。
     ///
     /// 建议只列体积最大的那 [`TRIM_SUGGESTIONS`] 个，而卡上占地方的还有清单之外的文件与元数据
-    /// ——它们不是变体，排除不掉。
+    /// ——它们不是变体，排除不掉。作品级媒体照 [`trim_suggestions`] 那本账算：它的变体没被排除完时
+    /// 还占着地方。
     #[must_use]
     pub fn short_after_all(&self) -> Option<u64> {
         let over = self.over_capacity?;
@@ -833,28 +888,66 @@ fn share(part: u64, whole: u64) -> f32 {
     value.clamp(0.0, 1.0)
 }
 
-/// 按体积排序的**裁剪建议**：最大的那几个变体。
+/// 按体积排序的**删减建议**：最大的那几个变体。
 ///
 /// **只建议，绝不自动截断**（ADR-0016）——同一套规则在两张不同容量的卡上会选出
 /// 完全不同的东西，而用户无从得知它砍掉了什么。
+///
+/// 两种口径各算各的（[`TrimPool`]，挂单 `Q819`）：变体自己的文件按变体记；**作品级媒体记在
+/// 作品名下**，要这个作品的变体**全在已排除的这一批里**才跟着算进那一条的
+/// [`Trim::bytes`]。于是 [`Trim::cumulative`] 是准数：照这张表从上往下排除，排除到那一条
+/// 为止腾出来的就是它。
+///
+/// 排序照**变体自己的文件**体积（作品级媒体不加进去再排）：先排出最大的十个，作品级媒体
+/// 才跟着它的最后一个变体落位，所以某一条的 [`Trim::bytes`] 可能比上一条大——它一并腾出了
+/// 那部作品共用的媒体。
 #[must_use]
-pub fn trim_suggestions(by_variant: impl IntoIterator<Item = (String, u64)>) -> Vec<Trim> {
-    let mut biggest: Vec<(String, u64)> = by_variant.into_iter().collect();
+pub fn trim_suggestions(pool: &TrimPool) -> Vec<Trim> {
+    let mut biggest: Vec<(&str, u64)> = pool
+        .variants
+        .iter()
+        .map(|(variant, bytes)| (variant.as_str(), *bytes))
+        .collect();
     // 体积降序；同体积按键排，同一份输入跑两次结果必须一样。
-    biggest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    biggest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     biggest.truncate(TRIM_SUGGESTIONS);
+    // 作品名 → 它在这份期望状态里挂着哪几个变体。**排除不到的作品永远不算腾出**：
+    // 它的变体不全在建议里，照这张表排除下去也碰不到它。
+    let mut of_work: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (variant, name) in &pool.names {
+        let Some(work) = name.work.as_deref() else {
+            continue;
+        };
+        of_work.entry(work).or_default().push(variant.as_str());
+    }
+    let mut excluded: BTreeSet<&str> = BTreeSet::new();
+    let mut freed: BTreeSet<&str> = BTreeSet::new();
     let mut cumulative = 0;
-    biggest
-        .into_iter()
-        .map(|(variant, bytes)| {
-            cumulative += bytes;
-            Trim {
-                variant,
-                bytes,
-                cumulative,
-            }
-        })
-        .collect()
+    let mut out = Vec::with_capacity(biggest.len());
+    for (variant, own) in biggest {
+        excluded.insert(variant);
+        let mut bytes = own;
+        let name = pool.names.get(variant);
+        if let Some(work) = name.and_then(|name| name.work.as_deref())
+            && !freed.contains(work)
+            && of_work
+                .get(work)
+                .is_some_and(|variants| variants.iter().all(|one| excluded.contains(one)))
+        {
+            bytes += pool.works.get(work).copied().unwrap_or(0);
+            freed.insert(work);
+        }
+        cumulative += bytes;
+        out.push(Trim {
+            variant: variant.to_string(),
+            // 库里查不着这个变体时退回它的键：那一行至少指得准是哪一份。
+            title: name.map_or_else(|| variant.to_string(), |name| name.title.clone()),
+            platform: name.and_then(|name| name.platform.clone()),
+            bytes,
+            cumulative,
+        });
+    }
+    out
 }
 
 /// 判「这条子句筛不筛得出东西」要的那点上下文：**认得哪些值**。
@@ -871,7 +964,8 @@ pub struct KnownValues<'a> {
     pub collections: &'a [String],
 }
 
-/// 一条子句**读得成规则、也存得进去，可库里没有对得上的东西**。
+/// 一条子句**读得成规则、也存得进去，可它对这批数据不起作用**：`=` 上是一个都选不中，
+/// `!=` 上一个都排不掉。
 ///
 /// 与 [`RuleError`] 是两件事，屏上的待遇也不一样：
 ///
@@ -889,6 +983,11 @@ pub enum ThinClause {
     UnknownPlatform(String),
     /// 这个**合集**眼下库里没有。
     NoCollection(String),
+    /// `!=` 后面的值**一个都认不出**：存得进去，可这一条一个变体都不排除。
+    ///
+    /// 与 [`Self::UnknownPlatform`] / [`Self::NoCollection`] 说的是同一批值，话正好相反：
+    /// `平台=没这个平台` 一个都选不中，`平台!=没这个平台` 一个都排不掉。
+    NothingExcluded(Dimension),
     /// 这一维**眼下没有源**：写得出规则，一条值都产不出来（`评分`，挂账 `D68`）。
     NoSource(Dimension),
 }
@@ -905,6 +1004,10 @@ impl ThinClause {
             Self::NoCollection(name) => {
                 format!("合集「{name}」眼下还没有——这条规则存得进去，等你建出这个合集它就生效。")
             }
+            Self::NothingExcluded(dimension) => format!(
+                "这一条没排除掉任何东西：{}这一维没有对得上的值——存得进去，可它一个变体都不排除。",
+                dimension.label()
+            ),
             Self::NoSource(dimension) => format!(
                 "「{}」这一维眼下没有源：写得出规则，可中立库里还没有哪个源在写它，\
                  所以它筛不出东西。",
@@ -916,10 +1019,11 @@ impl ThinClause {
 
 /// 这条子句**筛不筛得出东西**。读得成的子句才轮到它（[`Clause::build`] 先过）。
 ///
-/// **只在 `=` 上判值，`!=` 不判。** 两个都判是错的，而且错得正好反过来：
-/// `平台=没这个平台` 一个变体都选不中，可 `平台!=没这个平台` **全中**——认不出来的那个
-/// 值在 `!=` 上等于「这一条没起作用」，不是「选不中」。那是另一件事、另一句话，
-/// 而这个枚举眼下只说得出前一句（挂单 `Q1101`）。
+/// **`=` 与 `!=` 判的不是同一句话。** `平台=没这个平台` 一个变体都选不中，可
+/// `平台!=没这个平台` **全中**——认不出来的那个值在 `!=` 上等于「这一条什么都没排除」。
+/// 两边都提醒，话正好相反（[`ThinClause::UnknownPlatform`] 对
+/// [`ThinClause::NothingExcluded`]）。`!=` 只在**一个值都认不出**时提醒：几个值里有一个
+/// 认得出，这一条就真排掉了点什么，不是白写。
 ///
 /// **子串那三个运算符也不判**：`平台~GB` 本来就不是拿一个平台名去对——`GB` 撞得上
 /// `GBA`、也撞得上任何带这两个字母的串，拿平台清单去挑它的错是判错了题。
@@ -930,25 +1034,40 @@ pub fn thin_clause(clause: &Clause, known: &KnownValues<'_>) -> Vec<ThinClause> 
     if clause.dimension.no_source() {
         return vec![ThinClause::NoSource(clause.dimension)];
     }
-    if clause.op != Op::Is {
-        return Vec::new();
-    }
     let Bound::Text(values) = &clause.bound else {
         return Vec::new();
     };
-    values
-        .iter()
-        .filter_map(|value| match clause.dimension {
-            Dimension::Platform => known
-                .platforms
-                .platform_named(value)
-                .is_none()
-                .then(|| ThinClause::UnknownPlatform(value.clone())),
-            Dimension::Collection => (!known.collections.iter().any(|one| one == value))
-                .then(|| ThinClause::NoCollection(value.clone())),
-            _ => None,
-        })
-        .collect()
+    match clause.op {
+        Op::Is => values
+            .iter()
+            .filter_map(|value| match clause.dimension {
+                Dimension::Platform => known
+                    .platforms
+                    .platform_named(value)
+                    .is_none()
+                    .then(|| ThinClause::UnknownPlatform(value.clone())),
+                Dimension::Collection => (!known.collections.iter().any(|one| one == value))
+                    .then(|| ThinClause::NoCollection(value.clone())),
+                _ => None,
+            })
+            .collect(),
+        // `!=` 的提醒是**整条**的，不是一个值一句：几个值里只要有一个认得出，这一条就真
+        // 排掉了点什么，不该说「什么都没排除」。
+        Op::IsNot => {
+            let 认得出 = |value: &str| match clause.dimension {
+                Dimension::Platform => known.platforms.platform_named(value).is_some(),
+                Dimension::Collection => known.collections.iter().any(|one| one == value),
+                // 别的维度不在这儿判值（同 `=` 那一支的 `_`）。
+                _ => true,
+            };
+            if values.is_empty() || values.iter().any(|value| 认得出(value)) {
+                Vec::new()
+            } else {
+                vec![ThinClause::NothingExcluded(clause.dimension)]
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// 按选择集在一批事实上求值。**纯函数**：不碰中立库、不碰磁盘、不看时钟。

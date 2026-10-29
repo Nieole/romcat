@@ -38,7 +38,7 @@ use crate::adapter::converge::{self, Anchor};
 use crate::catalog::scrape::ScrapedValue;
 use crate::catalog::{Catalog, CatalogError};
 use crate::scrape::{AnchorKind, Field};
-use crate::title::{Chosen, TitleSet};
+use crate::title::TitleSet;
 
 /// 内置的那一份优先级表。
 const BUILTIN: &str = include_str!("priorities.toml");
@@ -633,8 +633,9 @@ impl FieldShifts {
 /// 导出那一侧的 `converge::layout`，每个字段写出去的是什么问的是 `converge::shown`——
 /// 导出折条目照的也是这两处。于是：补丁、附属内容、非游戏资产不算；认出了作品的条目只看
 /// 作品上的值（汉化组看首选变体身上的）；作品的显示标题是标题集合挑出来的那一个
-/// （[`crate::title::choose`]，平台不参与，按平台的覆盖改了它不跟着变）；年份、简介这些
-/// 只写一条的字段比的是挑出来的那一条，开发商、发行商、类型比的是那个源的全部值。
+/// （[`crate::title::choose_on`]）：导出到哪个平台，就按**那个平台**的覆盖挑（票
+/// `core-answers-once/05`）——街机那一栏的覆盖于是也管得到认出作品的变体；
+/// 年份、简介这些只写一条的字段比的是挑出来的那一条，开发商、发行商、类型比的是那个源的全部值。
 ///
 /// **写出去的字变了才算一处**：两个源说的都是 `1985` 时，换谁说了算，前端里看不出来。
 ///
@@ -667,15 +668,14 @@ pub fn shifts(
     let titles_changed = found
         .iter()
         .any(|shifts| shifts.field == Field::Title.label());
-    let (chosen_before, chosen_after): (BTreeMap<String, Chosen>, BTreeMap<String, Chosen>) =
-        if titles_changed {
-            (
-                converge::chosen_titles(catalog, before)?,
-                converge::chosen_titles(catalog, after)?,
-            )
-        } else {
-            (BTreeMap::new(), BTreeMap::new())
-        };
+    let (chosen_before, chosen_after): (converge::Titles, converge::Titles) = if titles_changed {
+        (
+            converge::chosen_titles(&layout, catalog, before)?,
+            converge::chosen_titles(&layout, catalog, after)?,
+        )
+    } else {
+        (BTreeMap::new(), BTreeMap::new())
+    };
 
     // 一部作品横跨几个平台是几个条目，但「哪几部作品会变」只算一次。
     let mut counted: BTreeSet<(usize, AnchorKind, &str)> = BTreeSet::new();
@@ -692,13 +692,13 @@ pub fn shifts(
                 if counted.contains(&(at, kind, subject)) {
                     continue;
                 }
-                let written = |table: &Priorities, chosen: &BTreeMap<String, Chosen>| {
+                let written = |table: &Priorities, chosen: &converge::Titles| {
                     converge::shown(
                         field,
                         platform,
                         layout.values(one),
                         layout.head_values(one),
-                        chosen.get(one.anchor.name()),
+                        chosen.get(&(one.anchor.name().to_string(), platform.clone())),
                         table,
                     )
                 };

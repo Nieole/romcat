@@ -1521,7 +1521,13 @@ mod tests {
     fn 平台色的键都是平台清单里的平台() {
         // 平台色按**平台名**取（`FC`、`GBA`……），名字由核心库的平台清单定。
         // 令牌里写了一个清单里没有的名字，那一格永远取不到——屏上只会默默落到 other。
-        let manifest = romcat_core::platform::Manifest::builtin();
+        //
+        // 清单走核心库那条查法（`Manifest::locate`，挂单 `Q1031`）：工作目录里没有自己那份
+        // 时用的就是内置那一份，而这一条要核的正是**发出去的那张表**。空的工作目录是临时目录，
+        // 里面不会有 `platforms.toml`。
+        let 工作目录 = romcat_core::testing::temp_dir("gui-tokens-平台色");
+        let manifest = romcat_core::platform::Manifest::locate(None, 工作目录.path());
+        let manifest = manifest.manifest();
         for name in Tokens::builtin().color.platform.names() {
             assert!(
                 manifest.platforms().iter().any(|p| p.name == name),

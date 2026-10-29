@@ -141,6 +141,9 @@ pub fn lay_for(
             anchors.push((AnchorKind::Work.label(), work.clone()));
         }
         for (anchor, subject) in anchors {
+            // 挂**作品**锚点的那几份是**作品级媒体**（封面、截图、视频）：目标上只铺一次，
+            // 而账记在**作品**名下（[`DesiredFile::work`]）——这个作品的变体全被排除才算腾出（挂单 `Q819`）。
+            let work = (anchor == AnchorKind::Work.label()).then(|| subject.clone());
             for reference in catalog.scraped_media(anchor, &subject)? {
                 let Some(kind) = MediaKind::all()
                     .into_iter()
@@ -199,6 +202,7 @@ pub fn lay_for(
                         mtime_ns: Some(0),
                     },
                     variant: key.to_string(),
+                    work: work.clone(),
                     // 媒体不转格式：**能力档案说的是模拟器吃什么**，而封面截图是给
                     // 前端看的，前端吃什么由适配器那一侧决定（票 13 的媒体池已经把
                     // 扩展名规范过了）。

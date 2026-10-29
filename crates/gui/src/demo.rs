@@ -88,6 +88,16 @@ const MARKS: &[&str] = &[
     "同人移植",
 ];
 
+/// 合成数据里**校验变体用的平台清单**。
+///
+/// 这**不是屏上那张平台表**：屏上与命令行读的是同一份（工作目录里那份，没有就用内置的，
+/// [`romcat_core::platform::Manifest::locate`]，挂单 `Q1031`），由 `App::new` 挑好交给那几屏。
+/// 这里只是拿一张清单校验造出来的变体，与工作目录无关——合成的库连工作目录里那份清单的一行
+/// 都没读过。
+fn 校验用的清单() -> Manifest {
+    Manifest::default()
+}
+
 /// 造一个装着 `rows` 个变体的内存中立库。
 ///
 /// # Errors
@@ -124,7 +134,7 @@ pub fn synthetic(rows: u64) -> Result<Catalog, CatalogError> {
             }
         })
         .collect();
-    catalog.replace_variants(&variants, 1, &Manifest::default())?;
+    catalog.replace_variants(&variants, 1, &校验用的清单())?;
     Ok(catalog)
 }
 
@@ -472,7 +482,7 @@ pub fn queue_with_zh(rows: u64) -> Result<(Catalog, Option<ZhMatch>), CatalogErr
         })
         .collect();
     catalog.write(1, &entries)?;
-    catalog.replace_variants(&variants, 1, &Manifest::default())?;
+    catalog.replace_variants(&variants, 1, &校验用的清单())?;
     catalog.put_content_hashes(&hashes)?;
     if let Some(zh) = &zh {
         let work = catalog.add_work(&zh.work, Provenance::Identified)?;
@@ -966,8 +976,8 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
             sample: None,
             container: None,
         });
-        // **每九个留一个带附属文件与内部资源的**：真库上主文件 46,444 个、
-        // 附属文件 142 个、内部资源 158,641 个（`docs/library-facts.md`），
+        // **每九个留一个带附属文件与内部资源的**：真库上主文件四万多个、
+        // 附属文件一百多个、内部资源十五万多个（量级见台账 `docs/library-facts.md`），
         // 一个变体不等于一个文件。详情面板那条「列出选中变体的全部文件」若只在
         // 「一变体一文件」的数据上验，等于没验。
         let mut members = vec![(key.clone(), Role::Main)];
@@ -1009,7 +1019,7 @@ pub fn browse_shaped(rows: u64, works_count: usize) -> Result<Catalog, CatalogEr
         });
     }
     catalog.write(1, &entries)?;
-    catalog.replace_variants(&variants, 1, &Manifest::default())?;
+    catalog.replace_variants(&variants, 1, &校验用的清单())?;
 
     // 一、作品与发行版。发行版是「作品 × 平台 × 地区」里真用得上的那些。
     let mut works = Vec::with_capacity(works_count);

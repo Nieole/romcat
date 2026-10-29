@@ -45,19 +45,19 @@ pub enum Revoke {
     Write,
 }
 
-/// 收掉权限的那个目录；**丢掉时把权限原样还回去**（[`revoke`]）。
+/// 收掉权限的那个目录或那份文件；**丢掉时把权限原样还回去**（[`revoke`] / [`revoke_file`]）。
 ///
 /// 临时目录自己的清理（[`TempDir`] 的 `Drop`）要列得开、删得动它，所以**这个守卫要比那个
 /// 临时目录先丢**——在它后面声明。
 #[derive(Debug)]
 pub struct Revoked {
-    dir: PathBuf,
+    path: PathBuf,
     before: fs::Permissions,
 }
 
 impl Drop for Revoked {
     fn drop(&mut self) {
-        let _ = fs::set_permissions(&self.dir, self.before.clone());
+        let _ = fs::set_permissions(&self.path, self.before.clone());
     }
 }
 
@@ -89,6 +89,61 @@ pub fn revoke(dir: &Path, what: Revoke) -> Option<Revoked> {
             None
         }
     }
+}
+
+/// 把一份**文件**的权限位收掉，造一份**真的**读不动的文件。
+///
+/// 规矩与 [`revoke`] 一字不差：**造不出来就交 `None`，并当场印一行「跳过 <测试名>：为什么」**，
+/// 不许改成「假装读不动」。收不动的那两种也一样：不是 Unix，或者跑测试的是 root
+/// （收完当场试读一次，读得动就还回去）。
+///
+/// 有它的理由：**目录收掉读权限 ≠ 里头那份文件读不动**——不收整个工作目录的读权限
+/// （那会把里面别的都弄没），单独收一份文件才造得出「这份配置读不动、别的都好好的」现场。
+#[must_use]
+pub fn revoke_file(file: &Path) -> Option<Revoked> {
+    match try_revoke_file(file) {
+        Ok(revoked) => Some(revoked),
+        Err(why) => {
+            eprintln!(
+                "跳过 {}：这台机器上造不出一份读不动的文件——{why}",
+                std::thread::current().name().unwrap_or("这条测试"),
+            );
+            None
+        }
+    }
+}
+
+fn try_revoke_file(file: &Path) -> Result<Revoked, String> {
+    let before = fs::metadata(file)
+        .map_err(|error| format!("读不到 {} 的权限：{error}", file.display()))?
+        .permissions();
+    let revoked = revoke_file_bits(file, before)?;
+    if fs::read(file).is_err() {
+        Ok(revoked)
+    } else {
+        // `revoked` 在这儿丢掉，权限跟着还回去。
+        Err(format!(
+            "{} 收了权限照样读得动——跑测试的多半是 root，权限位拦不住它",
+            file.display(),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn revoke_file_bits(file: &Path, before: fs::Permissions) -> Result<Revoked, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::set_permissions(file, fs::Permissions::from_mode(0o000))
+        .map_err(|error| format!("改不动 {} 的权限：{error}", file.display()))?;
+    Ok(Revoked {
+        path: file.to_path_buf(),
+        before,
+    })
+}
+
+#[cfg(not(unix))]
+fn revoke_file_bits(_file: &Path, _before: fs::Permissions) -> Result<Revoked, String> {
+    Err("权限位是 Unix 的东西，这个平台上造不出读不动的文件".to_string())
 }
 
 fn try_revoke(dir: &Path, what: Revoke) -> Result<Revoked, String> {
@@ -131,7 +186,7 @@ fn revoke_bits(dir: &Path, what: Revoke, before: fs::Permissions) -> Result<Revo
     fs::set_permissions(dir, fs::Permissions::from_mode(mode))
         .map_err(|error| format!("改不动 {} 的权限：{error}", dir.display()))?;
     Ok(Revoked {
-        dir: dir.to_path_buf(),
+        path: dir.to_path_buf(),
         before,
     })
 }

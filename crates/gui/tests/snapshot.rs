@@ -443,14 +443,20 @@ fn 工作目录() -> PathBuf {
     PathBuf::from("~/.local/share/romcat")
 }
 
-/// 一份开得了的库：主库原名、变体数、上次扫描时刻（UNIX 纪元起的秒，屏上按 UTC 画）。
+/// 一份开得了的库：主库原名、根数、变体数、上次扫描时刻（UNIX 纪元起的秒，屏上按 UTC 画）。
 fn 开得了(
-    工作目录: &Path, 原名: &str, 主库标识: &str, 变体: u64, 扫于: i64
+    工作目录: &Path,
+    原名: &str,
+    主库标识: &str,
+    根: u64,
+    变体: u64,
+    扫于: i64,
 ) -> CatalogEntry {
     CatalogEntry {
         path: 工作目录.join("catalog").join(format!("{主库标识}.sqlite3")),
         name: 原名.to_owned(),
         state: CatalogState::Openable(Ok(CatalogFacts {
+            roots: 根,
             variants: 变体,
             scanned_at: Some(扫于),
         })),
@@ -463,19 +469,19 @@ fn 有库(工作目录: &Path) -> Listing {
     let 旧库 = 工作目录
         .join("catalog")
         .join("旧库-0824-5e0b1c2d3a4f6978.sqlite3");
-    // 那句话是**核心库的原话**，这里拿核心库那个错误类型折出来，不抄一段字。
-    let 原话 = CatalogError::Version {
-        path: romcat_core::path::display(&旧库),
-        found: 4,
-        expected: SCHEMA_VERSION,
-    }
-    .to_string();
+    // 那两半是**核心库的原话**（短话与细节），这里拿核心库那个错误类型折出来，不抄一段字。
+    let 版本 = romcat_core::catalog::VersionMismatch::new(
+        romcat_core::path::display(&旧库),
+        4,
+        SCHEMA_VERSION,
+    );
     Listing::Catalogs(vec![
         // 2026-09-03 14:58（UTC）
         开得了(
             工作目录,
             "主库",
             "主库-f5c61109a2b3c4d5",
+            2,
             46_444,
             1_788_447_480,
         ),
@@ -484,6 +490,7 @@ fn 有库(工作目录: &Path) -> Listing {
             工作目录,
             "掌机整理",
             "掌机整理-0c9e7d1b24a6f358",
+            1,
             3_102,
             1_788_037_800,
         ),
@@ -493,7 +500,8 @@ fn 有库(工作目录: &Path) -> Listing {
             state: CatalogState::SchemaMismatch {
                 found: 4,
                 expected: SCHEMA_VERSION,
-                said: 原话,
+                said: 版本.brief(),
+                details: 版本.details(),
             },
         },
     ])
@@ -554,6 +562,162 @@ fn 开场_读不动_暗色() {
     拍("opening/unreadable-dark", Theme::Dark, move |ui| {
         drop(开场.ui(ui));
     });
+}
+
+/// **读不动的一份**：文件在、刚列出来，只是这会儿打不开（权限不够、被别的程序占着那一类）。
+///
+/// 那一格是**核心库判出来的**：这里只把「别的程序正锁着它」时 SQLite 真报的那一条错
+/// （`SQLITE_BUSY` / `database is locked`）交进去，那句话它自己会折——不抄一段字、也不假装
+/// 一份库读不动。锁着的那一份真造得出来（另开一条连接 `BEGIN EXCLUSIVE`），但那份要在
+/// `busy_timeout` 上等十秒，而这一张图要的只是那一行**长什么样**。
+fn 读不动的一份(工作目录: &Path) -> Listing {
+    let 文件 = 工作目录
+        .join("catalog")
+        .join("被锁着-7b1c2d3e4f5a6978.sqlite3");
+    let 原话 = CatalogError::Sqlite {
+        path: romcat_core::path::display(&文件),
+        source: rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_owned()),
+        ),
+    }
+    .unreadable()
+    .expect("被锁着的那一份该判成读不动");
+    Listing::Catalogs(vec![
+        开得了(
+            工作目录,
+            "主库",
+            "主库-f5c61109a2b3c4d5",
+            2,
+            46_444,
+            1_788_447_480,
+        ),
+        CatalogEntry {
+            path: 文件,
+            name: "被锁着".to_owned(),
+            state: CatalogState::Unreadable { said: 原话 },
+        },
+    ])
+}
+
+#[test]
+fn 开场_有一份库读不动_浅色() {
+    let mut 开场 = Screen::listed(工作目录(), 读不动的一份(&工作目录()));
+    拍(
+        "opening/unreadable-library-light",
+        Theme::Light,
+        move |ui| {
+            drop(开场.ui(ui));
+        },
+    );
+}
+
+#[test]
+fn 开场_有一份库读不动_暗色() {
+    let mut 开场 = Screen::listed(工作目录(), 读不动的一份(&工作目录()));
+    拍("opening/unreadable-library-dark", Theme::Dark, move |ui| {
+        drop(开场.ui(ui));
+    });
+}
+
+#[test]
+fn 开场_读不动的那一份写着读不动_下一步是修权限() {
+    // ADR-0021 那条再修订、挂单 `Q613`：**四态**里那两态在屏上得认得出不同——文件坏了是
+    // 「打不开」、下一步删掉重扫；读不动是「读不动」、下一步去修权限或关掉占着它的程序。
+    // 造不出一份真读不动的文件也没关系：这一条只看**核心库那句话交到屏上之后**画出来的是什么，
+    // 而那句话本身由核心库造（`CatalogError::unreadable`）。
+    let ctx = headless::context();
+    look::install(&ctx);
+    let mut 开场 = Screen::listed(工作目录(), 读不动的一份(&工作目录()));
+    let mut out = headless::frame(&ctx, headless::input(), |ui| {
+        drop(开场.ui(ui));
+    });
+    for _ in 0..2 {
+        out = headless::frame(&ctx, headless::input(), |ui| {
+            drop(开场.ui(ui));
+        });
+    }
+    let 屏上 = shared::画出来的字(&out);
+    assert!(
+        正好画着的每一处(&out, "读不动").len() == 1,
+        "那一行上没有一枚写着「读不动」的标签：\n{屏上}"
+    );
+    assert!(
+        屏上.contains("关掉占用它的程序"),
+        "读不动那一行没说下一步（关掉占用它的程序）：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("删掉"),
+        "读不动那一行让人删库——那正是这一条要治的：\n{屏上}"
+    );
+    // 好的那一份照旧：根数、变体数、上次扫描一样不少。
+    assert!(
+        屏上.contains("2 个根 · ") && 屏上.contains("个变体 · 上次扫描"),
+        "开得了的那一行没写根数（照稿是「N 个根 · N 个变体 · 上次扫描 …」）：\n{屏上}"
+    );
+}
+
+#[test]
+fn 开场_版本对不上那一行只有一行高_细节在悬停里() {
+    // 挂单 `Q841`：那句话从前是五个分句的长话，在这张卡里折成六行，比别的行高出一大截。
+    // 现在那一行只印**短话**（一行高），细节——删库留得住什么、会跟着丢什么——挂在悬停里，
+    // 一个字不少（ADR-0001 的修订）。
+    let ctx = headless::context();
+    look::install(&ctx);
+    let mut 开场 = Screen::listed(工作目录(), 有库(&工作目录()));
+    let mut 跑 = |ctx: &egui::Context| {
+        let mut out = headless::frame(ctx, headless::input(), |ui| {
+            drop(开场.ui(ui));
+        });
+        for _ in 0..2 {
+            out = headless::frame(ctx, headless::input(), |ui| {
+                drop(开场.ui(ui));
+            });
+        }
+        out
+    };
+    let out = 跑(&ctx);
+    // 量的是**那一行底下那句字有多高**：别的行底下那句小字是一行，版本对不上的那一行从前是
+    // 五个分句的长话、折成六行，于是这一行比别的行高出一大截。（比行距看不出来——它在最后
+    // 一行，撑高自己不影响底下任何一行的位置。）
+    let 那一段 = |字: &str| {
+        let 处 = 画着的每一处含(&out, 字);
+        let [一段] = 处.as_slice() else {
+            panic!(
+                "「{字}」屏上该正好画着一处，画了 {} 处：\n{}",
+                处.len(),
+                shared::画出来的字(&out)
+            );
+        };
+        *一段
+    };
+    let 别的行的一句 = 那一段("上次扫描 2026-09-03").height();
+    let 这一行的一句 = 那一段("结构版本是 4").height();
+    assert!(
+        这一行的一句 < 别的行的一句 * 1.5,
+        "版本对不上的那一行比别的行高（{} 点 对 {} 点）：\n{}",
+        这一行的一句,
+        别的行的一句,
+        shared::画出来的字(&out)
+    );
+    // 那一行上画着的是**短话**，不是那一整段。
+    let 屏上 = shared::画出来的字(&out);
+    assert!(
+        屏上.contains("结构版本是 4，本程序认得的是 7。删掉它重扫一遍即可"),
+        "那一行没印短话：\n{屏上}"
+    );
+    assert!(
+        !屏上.contains("会跟着丢的"),
+        "那一行把整段细节也印出来了：\n{屏上}"
+    );
+    // **细节在悬停里**：指针停在那一行上就看得到。
+    let 停住之后 = shared::悬停在(&ctx, "结构版本是 4", |ui| {
+        drop(开场.ui(ui));
+    });
+    assert!(
+        停住之后.contains("会跟着丢的有两样") && 停住之后.contains("手动加的例外"),
+        "悬停里没有那段细节：\n{停住之后}"
+    );
 }
 
 #[test]
@@ -758,6 +922,36 @@ const 疑似的变体: 一个变体 = 一个变体 {
     作品: Some(疑似的作品),
 };
 
+/// **认出了作品的街机**那一对才摆的一个作品（挂单 `Q1340`，票 `core-answers-once/05` 那条行为）：
+/// 同一部街机游戏，No-Intro 给的条目名是 `Contra (World)`（作品名就是从它折出来的），
+/// MAME 给的条目名是 `Contra`——两条同一档的英文官方名，只有源名次分先后。
+///
+/// 于是同一部作品有两个显示标题，看**有没有平台语境**：
+///
+/// - 浏览屏主列表没有平台语境，问 `title::choose`，按通用那条顺序挑——No-Intro 在前，
+///   挑出来的是 [`街机的作品`] 自己那一个写法；
+/// - 作品详情按**变体所在的平台**问（`Catalog::variant_detail` 里的 `title::choose_on`），
+///   内置那份 `priorities.toml` 的「街机 / 标题」那条**按平台覆盖**（界面上叫「按平台」）
+///   把 MAME 排到 No-Intro 前面（ADR-0010：街机上 MAME 是权威），挑出来的是 [`街机按平台显示标题`]。
+///
+/// **只有那一对摆它**：别的态照旧是五个作品、八行，那几张基线的内容一个字都不动。
+const 街机的作品: &str = "Contra (World)";
+
+/// 那部作品在详情页（有平台语境）挑出来的显示标题：MAME 那一条。
+const 街机按平台显示标题: &str = "Contra";
+
+/// 它那一个变体：街机平台、认出了作品。
+const 街机的变体: 一个变体 = 一个变体 {
+    平台: "街机",
+    路径: "Contra (World).zip",
+    字节: 3 * MIB,
+    落在: 档::命中(Confidence::High),
+    作品: Some(街机的作品),
+};
+
+/// 街机那一行**元数据那一格**写着的字：缺发行商（整张表只有它一行是这个词，按它就是点那一行）。
+const 街机那一行: &str = "缺发行商";
+
 /// 浏览屏那一份现场。
 struct 浏览现场 {
     app: App,
@@ -802,7 +996,13 @@ fn 浏览现场(收起两栏: bool) -> 浏览现场 {
 /// 同上，`疑似` 为真时多摆一个作品与它那一个变体，于是库里**有一对疑似同一作品**
 /// （[`疑似的作品`]）。别的态一律走 `false`，那几张基线的内容一个字都不动。
 fn 浏览现场_(收起两栏: bool, 疑似: bool) -> 浏览现场 {
-    搭浏览现场(收起两栏, 疑似, false)
+    搭浏览现场(收起两栏, 疑似, false, false)
+}
+
+/// 只给街机那一对（`work/arcade-mame-*`）用的现场：同 [`浏览现场`]，多摆一部**认出了作品的街机**
+/// （[`街机的作品`]）。别的态一律不摆它，那几张基线的内容一个字都不动。
+fn 街机现场() -> 浏览现场 {
+    搭浏览现场(false, false, false, true)
 }
 
 /// 同 [`浏览现场_`]，`库在盘上` 为真时中立库写在工作目录里的一份文件上（而不是只活在内存里）。
@@ -810,7 +1010,11 @@ fn 浏览现场_(收起两栏: bool, 疑似: bool) -> 浏览现场 {
 /// 刮削弹层「按不动」那一张要它（票 `gui-draws-the-rest-of-the-design/17`）：只活在内存里的库，按「开始刮削」那一趟
 /// **就地跑完**、主窗口下一帧就认领了它；库在盘上时那一趟才真的排进任务台、排在占着位子的那一趟后头，「上一趟还没收场」
 /// 才停得住。主库原名照旧是 [`浏览的根`]，左栏那张卡上写的名字与别的几张一样。
-fn 搭浏览现场(收起两栏: bool, 疑似: bool, 库在盘上: bool) -> 浏览现场 {
+///
+/// `街机` 为真时多摆一部**认出了作品的街机**与它那一个变体（[`街机的作品`]，只有 `work/arcade-mame-*` 那一对走真）。
+fn 搭浏览现场(
+    收起两栏: bool, 疑似: bool, 库在盘上: bool, 街机: bool
+) -> 浏览现场 {
     let 目录 = temp_dir("gui-截图门-浏览");
     let mut catalog = if 库在盘上 {
         Catalog::create(&目录.path().join("中立库.sqlite"), 浏览的根).expect("建得出中立库")
@@ -824,6 +1028,7 @@ fn 搭浏览现场(收起两栏: bool, 疑似: bool, 库在盘上: bool) -> 浏�
         .iter()
         .copied()
         .chain(疑似.then_some(疑似的变体))
+        .chain(街机.then_some(街机的变体))
         .collect();
     let 变体: Vec<Variant> = 这一趟的变体
         .iter()
@@ -856,6 +1061,18 @@ fn 搭浏览现场(收起两栏: bool, 疑似: bool, 库在盘上: bool) -> 浏�
             &[(Field::Year, "1996"), (Field::Genre, "角色扮演")][..],
             false,
         )))
+        // 街机那部：缺发行商（MAME 那一路本来就不给），于是那一行的元数据那格写「缺发行商」——
+        // 整张表只有它一行是这个词，[`街机那一行`] 按的就是它。没有封面（同 [`疑似的作品`]）。
+        .chain(街机.then_some((
+            街机的作品,
+            &[
+                (Field::Year, "1987"),
+                (Field::Developer, "Konami"),
+                (Field::Genre, "射击"),
+                (Field::Description, "跑轰两路的街机射击游戏。"),
+            ][..],
+            false,
+        )))
         .collect();
     for (名字, _, _) in &这一趟的作品 {
         let id = catalog
@@ -885,6 +1102,32 @@ fn 搭浏览现场(收起两栏: bool, 疑似: bool, 库在盘上: bool) -> 浏�
         })
         .collect();
     catalog.put_titles(&译名).expect("写得进标题集合");
+    // **认出了作品的街机那两条标题**（[`街机的作品`]，挂单 `Q1340`）：两条同一档的英文官方名，
+    // 一条 No-Intro（与作品名同一个写法）、一条 MAME。内置那份 `priorities.toml` 里
+    //「街机 / 标题」那条按平台覆盖把 MAME 排到前面（ADR-0010），所以**有没有平台语境**决定挑中哪一条：
+    // 浏览屏列表（`title::choose`）挑 No-Intro 那一条，详情页按变体所在的平台（`title::choose_on`）
+    // 挑 MAME 那一条。
+    if 街机 {
+        let 一条 = |value: &str, source: &str| romcat_core::catalog::TitleRow {
+            work: 街机的作品.to_owned(),
+            value: value.to_owned(),
+            language: romcat_core::title::Language::English,
+            kind: romcat_core::title::TitleKind::Official,
+            source: source.to_owned(),
+            region: None,
+            variant_key: None,
+            confidence: Confidence::High,
+            seam: None,
+            evidence: "基线里摆的".to_owned(),
+            seen: 1,
+        };
+        catalog
+            .put_titles(&[
+                一条(街机的作品, "No-Intro"),
+                一条(街机按平台显示标题, "MAME"),
+            ])
+            .expect("写得进标题集合");
+    }
     let 号 = |名字: &str| {
         作品号
             .iter()
@@ -933,7 +1176,7 @@ fn 搭浏览现场(收起两栏: bool, 疑似: bool, 库在盘上: bool) -> 浏�
                 units: 1,
                 nkit: 0,
                 read_bytes: 0,
-                work_id: one.作品.map(&号),
+                work_id: one.作品.map(号),
                 release_id: None,
                 candidates,
             })
@@ -1369,7 +1612,7 @@ fn 拍刮削弹层(名字: &str, 主题: Theme, 态: 刮削态) {
     if 该跳过(名字) {
         return;
     }
-    let 浏览现场 { mut app, 目录 } = 搭浏览现场(false, false, 态 == 刮削态::按不动);
+    let 浏览现场 { mut app, 目录 } = 搭浏览现场(false, false, 态 == 刮削态::按不动, false);
     // DAT 取回过、中文离线源没摆：数据源那一栏 DAT 那一行写照稿那句小字，中文离线源那一行不勾、写核心库给的状态词
     // ——一张图上两种写法都看得见。
     shared::摆一份取回过的dat库(目录.path());
@@ -2267,6 +2510,67 @@ fn 拍详情页滚过(名字: &str, 主题: Theme, 面: Tab, 滚过: Option<f32>
     drop(目录);
 }
 
+/// 街机那一对（`work/arcade-mame-*`，挂单 `Q1340`）：现场多摆一部**认出了作品的街机**
+/// （[`街机的作品`]），点开它、停在「标题」那一面——**按平台重挑显示标题**这件事就画在这一面上
+/// （票 `core-answers-once/05`，ADR-0010：街机上 MAME 是权威）。
+///
+/// **单开一支出图**，不接 [`拍详情页`] 那一套：这一页不带媒体池（「标题」那一面一个图格都没有，
+/// 也就没有后台解码要等），别的详情页那几样料（第几版、子库、导出、收藏与合集）挂的都是那部 SFC 的作品。
+/// 于是别的详情页基线一个字节都不动。
+///
+/// 拍之前先认三眼，认的正是这一票该守住的东西：
+///
+/// 1. 点开之前，浏览屏那张列表上画着的是 [`街机的作品`]（没有平台语境的那一个显示标题）；
+/// 2. 打开之后，「浏览 / …」那段面包屑写的是 [`街机按平台显示标题`]——头上那个大标题跟着它走；
+/// 3. 这一面真是「标题」那一面。
+#[track_caller]
+fn 拍街机详情页(名字: &str, 主题: Theme) {
+    if 该跳过(名字) {
+        return;
+    }
+    let 浏览现场 { mut app, 目录 } = 街机现场();
+    let 换面 = std::rc::Rc::new(std::cell::Cell::new(None::<Tab>));
+    let 要换 = std::rc::Rc::clone(&换面);
+    let 画一帧 = move |ui: &mut egui::Ui| {
+        if let Some(面) = 要换.take() {
+            app.browse_and_site().0.open_page(面);
+        }
+        app.ui(ui);
+    };
+    let mut harness = 开一个(主题, 画一帧);
+    // **点开之前**：浏览屏那张列表上，同一部作品的显示标题是 No-Intro 那一条——列表不分平台。
+    let 列表上 = shared::画出来的字(harness.output());
+    assert!(
+        列表上.lines().any(|line| line == 街机的作品),
+        "{名字}：浏览屏列表上没画着「{街机的作品}」——没有平台语境的地方该挑 No-Intro 那一条"
+    );
+    assert!(
+        !列表上.lines().any(|line| line == 街机按平台显示标题),
+        "{名字}：浏览屏列表上画着「{街机按平台显示标题}」——那张列表不分平台，一部作品只有一个显示标题"
+    );
+    // 点那一行照人的操作点它的元数据那一格（同 [`点开的作品那一行`]）。
+    按(&mut harness, 街机那一行);
+    换面.set(Some(Tab::Titles));
+    harness.run_steps(2);
+    harness.run();
+    assert!(
+        最后一处正好画着(harness.output(), "← 返回浏览").is_some(),
+        "{名字}：作品详情页没打开，拍下来的不是它"
+    );
+    let 页上 = shared::画出来的字(harness.output());
+    let 面包屑 = format!("浏览 / {街机按平台显示标题}");
+    assert!(
+        页上.lines().any(|line| line == 面包屑),
+        "{名字}：详情页的面包屑不是「{面包屑}」——头上那个大标题没按变体所在的平台重挑"
+    );
+    assert!(
+        页上.lines().any(|line| line == "显示标题"),
+        "{名字}：拍的这一面不是「标题」那一面"
+    );
+    拍下(harness, 名字);
+    drop(目录);
+}
+
 #[test]
 fn 详情页_概览_浅色() {
     拍详情页("work/overview-light", Theme::Light, Tab::Overview);
@@ -2305,6 +2609,16 @@ fn 详情页_标题_浅色() {
 #[test]
 fn 详情页_标题_暗色() {
     拍详情页("work/titles-dark", Theme::Dark, Tab::Titles);
+}
+
+#[test]
+fn 详情页_街机按平台挑显示标题_浅色() {
+    拍街机详情页("work/arcade-mame-light", Theme::Light);
+}
+
+#[test]
+fn 详情页_街机按平台挑显示标题_暗色() {
+    拍街机详情页("work/arcade-mame-dark", Theme::Dark);
 }
 
 #[test]
@@ -4249,10 +4563,15 @@ fn 拍目标设置弹层(名字: &str, 主题: Theme) {
     拍下(harness, 名字);
 }
 
-/// 平台表判「陈旧」用的「今天」钉死（票 `gui-looks-like-the-design/21`）：截图里才没有当前日期。内置档案的核实日期是
-/// 2026-08-31，钉在 2026-09-15 不陈旧。
+/// 截图里钉死的「今天」（`YYYY-MM-DD`）：内置档案的核实日期是 2026-08-31，钉在 2026-09-15 不陈旧。
+///
+/// 平台表判「陈旧」（票 `gui-looks-like-the-design/21`）与排计划判「这份能力档案超过半年没核实」
+/// （票 `core-answers-once/14`）用的是同一个「今天」（`Screen::set_today`）：钉住一处，两处都钉住，
+/// 截图里才没有当前日期、也不会到了某一天（2027-02-27 前后）凭空多出一行。
+const 钉死的今天: &str = "2026-09-15";
+
 fn 钉死今天(mut 现场: 子库现场) -> 子库现场 {
-    现场.app.sublibrary_and_site().0.set_today("2026-09-15");
+    现场.app.sublibrary_and_site().0.set_today(钉死的今天);
     现场
 }
 
@@ -4375,6 +4694,7 @@ fn 拍刚同步完(名字: &str, 主题: Theme) {
         Some("retroarch-exfat"),
         &["平台=SFC"],
     );
+    现场.app.sublibrary_and_site().0.set_today(钉死的今天);
     现场.摊开(那一台);
     现场.排一遍差量();
     现场.同步到底();
@@ -4606,6 +4926,7 @@ fn 摆着异常的一台() -> 子库现场 {
             ("SFC/圣剑传说 3 汉化版.zip", 8_192),
         ],
     );
+    现场.app.sublibrary_and_site().0.set_today(钉死的今天);
     现场.摊开(摆着异常的那一台);
     现场.排一遍差量();
     现场

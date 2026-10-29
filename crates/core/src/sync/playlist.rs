@@ -134,7 +134,9 @@ pub fn lay(
             .matrix
             .entry_for(platform)
             .map_or(&Accepts::Anything, |entry| &entry.accepts);
-        if !accepts.takes(EXTENSION) {
+        // 档案认不认 `.m3u`：`takes_key` 只看扩展名，给它一个带这个扩展名的代表性键。
+        // （不走一个只收扩展名的判断：那种写法碰到多段扩展名会把最后一段当全部。）
+        if !accepts.takes_key(&format!("_.{EXTENSION}")) {
             continue;
         }
         let Some(paths) = discs
@@ -257,6 +259,7 @@ mod tests {
                         mtime_ns: Some(1),
                     },
                     variant: member.variant_key.clone(),
+                    work: None,
                     convert: None,
                 })
                 .collect(),

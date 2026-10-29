@@ -80,7 +80,9 @@ use crate::catalog::{Catalog, CatalogError, MemberFile};
 use crate::container::Contents;
 use crate::path;
 use crate::platform::Manifest as PlatformManifest;
-use crate::sublibrary::{Selected, Sublibrary, Trim, over_capacity, trim_suggestions};
+use crate::sublibrary::{
+    Selected, Sublibrary, Trim, TrimName, TrimPool, over_capacity, trim_suggestions,
+};
 
 pub use execute::{Outcome, Placement, Sources};
 pub use observe::{ObserveError, observe};
@@ -191,6 +193,14 @@ pub struct DesiredFile {
     pub source_stamp: Stamp,
     /// 属于哪个**变体**。报告按它把文件数折回用户认得的那个数。
     pub variant: String,
+    /// 这一份是**作品级媒体**吗：挂在**作品**上的封面、截图、视频（[`AnchorKind::Work`](crate::scrape::AnchorKind)），
+    /// 记在这部**作品**名下。
+    ///
+    /// 同一份媒体被这个作品的几个变体共用、目标上只铺一次，于是「排除一个变体腾出多少」
+    /// 要把它算在**作品**那一本账上（[`TrimPool`]，挂单 `Q819`）：
+    /// 这个作品的变体全被排除才算腾出。`variant` 那一格照旧记**头一个**引用到它的变体
+    /// （报告按变体折账）；两格回答的是两个问题。
+    pub work: Option<String>,
     /// 这一份是**转换产物**吗；`None` 就是原样搬（票 21、ADR-0017）。
     ///
     /// 有值时 [`Self::path`] 已经是**产物**的落点（`.7z` 变 `.zip`、容器变裸文件），
@@ -220,6 +230,7 @@ impl DesiredFile {
                 mtime_ns: Some(0),
             },
             variant,
+            work: None,
             // 生成物不转格式：折出来的就是目标要的那一份。
             convert: None,
         }
@@ -296,8 +307,8 @@ pub struct Unsupported {
     pub bytes: u64,
     /// 目标要的是什么形态。
     pub want: String,
-    /// 为什么转不了。
-    pub why: String,
+    /// 为什么转不了——**是哪一种**（`Display` 只说事实，命令由命令行照种类补、屏上那一处由界面补）。
+    pub why: crate::capability::UnsupportedReason,
 }
 
 /// 一个子库的**期望状态**：目标上该有的全部文件。
@@ -325,6 +336,14 @@ pub struct Desired {
     /// （[`Filesystem::max_file_fact`]）。记在筛的那一刻，于是屏上说的就是真拦过这一趟的那一份——
     /// 事后照子库记着的档案名再去名册里查一遍的话，名册改过就会说出另一份的话来。
     pub filesystem: Filesystem,
+    /// 删减建议那几行要的**库侧事实**：变体的键 → 它属于哪部作品、屏上叫什么、什么平台
+    /// （[`TrimName`]）。
+    ///
+    /// **由 `sync::prepare` 补上**（`Catalog::trim_names`）：认不出作品的变体要剥**正题**，
+    /// 剥它要工作目录里那份**剥离规则**——折期望状态这一层是纯的，手上没有规则。
+    /// 手工拼一份 `Desired` 时这一格是空的：那时删减建议那一行退回**变体的键**与没有平台，
+    /// 不是凭空的字。
+    pub trim_names: BTreeMap<String, TrimName>,
 }
 
 impl Desired {
@@ -1503,23 +1522,28 @@ pub fn plan(
         .unwrap_or(0);
     out.over_capacity = over_capacity(sublibrary.capacity, out.after_bytes);
     if out.over_capacity.is_some() {
-        // **裁剪建议落在变体上**（[`Trim`]）：它的去处是一条排除例外，而例外记的是变体的键。
+        // **删减建议落在变体上**（[`Trim`]）：它的去处是一条排除例外，而例外记的是变体的键。
         // 前端元数据挂在一个记号名下（[`frontend::NOT_A_VARIANT`]），它不是变体、排除不掉——
         // 列进建议里，子库屏上那颗「排除」就会记下一条指着「（前端元数据）」的例外。它照旧占着
         // 卡上的地方（算在同步之后那个数里），于是「全排除也还差多少」里有它。
-        let mut by_variant: BTreeMap<&str, u64> = BTreeMap::new();
+        //
+        // **两种口径分开记**（[`TrimPool`]，挂单 `Q819`）：变体自己的文件按变体记；作品级媒体
+        // （挂作品锚点的那几份）按**作品**记，于是这个作品的变体全被排除时才跟着腾出。
+        let mut pool = TrimPool {
+            names: desired.trim_names.clone(),
+            ..TrimPool::default()
+        };
         for file in desired
             .files
             .iter()
             .filter(|file| is_variant(&file.variant))
         {
-            *by_variant.entry(file.variant.as_str()).or_default() += file.bytes;
+            match &file.work {
+                Some(work) => *pool.works.entry(work.clone()).or_default() += file.bytes,
+                None => *pool.variants.entry(file.variant.clone()).or_default() += file.bytes,
+            }
         }
-        out.trim_suggestions = trim_suggestions(
-            by_variant
-                .into_iter()
-                .map(|(variant, bytes)| (variant.to_string(), bytes)),
-        );
+        out.trim_suggestions = trim_suggestions(&pool);
     }
     out
 }
@@ -1777,6 +1801,17 @@ pub fn desired(
     Ok(Footprint::gather(catalog, selected, platform_manifest)?.desired(profile))
 }
 
+/// 一条**子库里的相对路径**的头一级目录换成落点目录；没有平台那一级（直接躺在根下）的补上一级。
+///
+/// 子库里的布局照搬主库里的键、剥掉根名（挂账 D79），于是键的头一级就是平台目录——那个平台目录
+/// 被**平台纠正**搬过的时候，换掉的正是这一段。
+fn relocated(path: &str, directory: &str) -> String {
+    match path.split_once('/') {
+        Some((_, rest)) => format!("{directory}/{rest}"),
+        None => format!("{directory}/{path}"),
+    }
+}
+
 /// 一份选择集在主库里的**脚印**：选中了哪些变体、各自属于哪个平台、它们的成员文件、多碟变体的各张碟，以及每张碟的
 /// 主文件里透明容器的内部构成。
 ///
@@ -1785,8 +1820,12 @@ pub fn desired(
 /// 按平台覆盖，当场重算，不再碰库。[`desired`] 就是这两半接起来，于是两条路折出来的永远是同一个值（ADR-0024）。
 #[derive(Debug, Clone, Default)]
 pub struct Footprint {
-    /// 选中的变体（键）→ 平台。
+    /// 选中的变体（键）→ **落点平台**（有平台纠正听纠正，否则照目录声明，
+    /// `Catalog::placement_platforms`）：能力档案、播放列表与落点都问它。
     platforms: BTreeMap<String, Option<String>>,
+    /// 选中的变体（键）→ **落点目录**：它在卡上占那一级目录（`Catalog::placement_directories`）。
+    /// 没被平台纠正搬过的变体不在里面（就是键里那一级目录）；全空时一个字节都不因此改变。
+    directories: BTreeMap<String, String>,
     /// 选中变体的成员。
     members: Vec<MemberFile>,
     /// 多碟变体（键）→ 各张碟的主文件，按碟序（[`shape::discs`](crate::shape::discs)）。不是多碟的变体不在里头。
@@ -1827,6 +1866,7 @@ impl Footprint {
             members,
             discs,
             contents: BTreeMap::new(),
+            directories: BTreeMap::new(),
         }
     }
 
@@ -1847,16 +1887,25 @@ impl Footprint {
             .iter()
             .map(|variant| variant.key.clone())
             .collect();
+        // **落点平台**、**落点目录**都从中立库读回来（判断在识别那一趟，ADR-0024）：
+        // 一个变体被平台纠正搬过之后，卡上那一级目录跟着变——期望状态、落点预览、铺媒体与前端
+        // 元数据全从这两份取。
+        let placed = catalog.placement_platforms()?;
         let platforms = selected
             .picked
             .iter()
-            .map(|variant| (variant.key.clone(), variant.platform.clone()))
+            .map(|variant| (variant.key.clone(), placed.get(&variant.key).cloned()))
             .collect();
         let mut out = Self::new(
             platforms,
             catalog.variant_files(&picked)?,
             platform_manifest,
         );
+        out.directories = catalog
+            .placement_directories(platform_manifest)?
+            .into_iter()
+            .filter(|(key, _)| picked.contains(key))
+            .collect();
 
         // 每张碟的主文件里凡是**透明容器**的，把内部构成一次取回来。转换要不要得起、转出来多大，
         // 全看这一份——而它零解压就在中立库里躺着（调研第 5 部分 L4）。
@@ -1889,6 +1938,9 @@ impl Footprint {
 
     /// 选中的变体分属哪几个平台：按名字排、不重复。**没定出平台的变体不在里头**——它们走矩阵的兜底那一条，
     /// 没有一个平台名可以按平台覆盖。
+    ///
+    /// 是**落点平台**（`Catalog::placement_platforms`）：人在**平台纠正**里定过的那一组听人的，
+    /// 没定过的照目录声明（票 `core-answers-once/03`）。能力档案与播放列表都问它。
     #[must_use]
     pub fn platforms(&self) -> Vec<String> {
         self.platforms
@@ -1898,6 +1950,29 @@ impl Footprint {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    /// 这个变体在卡上的**落点键**：键里那一级平台目录换成**落点目录**；没被纠正搬过的是原样。
+    ///
+    /// 问「这个平台的内容在卡上住哪个目录」的地方拿它当键用（`converge::platform_directory`），
+    /// 与 `desired` 折出来的落点永远同一段。
+    fn landing_key(&self, key: &str) -> String {
+        let Some(directory) = self.directories.get(key) else {
+            return key.to_string();
+        };
+        crate::path::join_root(
+            crate::path::root_of_key(key),
+            &relocated(crate::path::relative_of_key(key), directory),
+        )
+    }
+
+    /// 这个变体在卡上的**落点**：`path`（相对子库根）的头一级目录换成它的落点目录。
+    /// 没被平台纠正搬过的变体原样交回。
+    fn relocated(&self, variant: &str, path: &str) -> String {
+        match self.directories.get(variant) {
+            Some(directory) => relocated(path, directory),
+            None => path.to_string(),
+        }
     }
 
     /// **按一份能力档案折期望状态**那一半：纯的，一个字节的库都不读。处置见 [`desired`] 的文档。
@@ -1921,7 +1996,10 @@ impl Footprint {
             if let Decision::Unsupported { want, why } = &decision {
                 out.unsupported.push(Unsupported {
                     // 与落点同一个口径：这是**子库里**那条路径，不带根名。
-                    path: path::relative_of_key(&member.key).to_string(),
+                    path: self.relocated(
+                        &member.variant_key,
+                        crate::path::relative_of_key(&member.key),
+                    ),
                     variant: member.variant_key.clone(),
                     platform: platform.map(ToString::to_string),
                     bytes: member.len.unwrap_or(0),
@@ -1960,6 +2038,10 @@ impl Footprint {
                     member.len.unwrap_or(0),
                 ),
             };
+            // **平台纠正搬过的那几个：落点的头一级目录跟着变**（票 `core-answers-once/03`）。
+            // 变换格式那一条路径也是从键上折出来的，同一段换掉；子库里的布局照旧照搬键，
+            // 只是那一级平台目录听纠正的。
+            let path = self.relocated(&member.variant_key, &path);
             out.files.push(DesiredFile {
                 path,
                 kind: FileKind::Rom,
@@ -1971,6 +2053,7 @@ impl Footprint {
                     mtime_ns: member.mtime_ns,
                 },
                 variant: member.variant_key.clone(),
+                work: None,
                 convert: conversion,
             });
             if member.len.is_none() {
@@ -2082,7 +2165,19 @@ impl Footprint {
                         },
                     );
                 }
-                Some(_) => {}
+                Some(file) => {
+                    // **落点挪过目录**（平台纠正）：条目照卡上那条路径写、铺媒体也照它起名，
+                    // 与转了格式、换了播放列表同一条路（`Launch`）。没挪过的照旧不记。
+                    if file.path != path::relative_of_key(&member.key) {
+                        launch.insert(
+                            member.variant_key.clone(),
+                            Launch {
+                                file: file.path.clone(),
+                                hidden: Vec::new(),
+                            },
+                        );
+                    }
+                }
                 None => {
                     if let Some(reason) = barred.get(member.key.as_str()) {
                         left_off.insert(member.variant_key.clone(), LeftOff::Rejected(*reason));
@@ -2156,6 +2251,8 @@ impl Footprint {
     /// **头一个变体的真实落点**：照这份档案折出来的期望状态里按路径排的头一份 ROM（要转格式的是转出来那一份）；元数据位置照
     /// 导出时收敛的同一条规则——那个平台的内容在主库里只住一个目录就用那个目录名，散在几个目录里退回平台名
     /// （[`converge::platform_directory`](crate::adapter::converge::platform_directory)）。什么都没选中时是 `None`。
+    ///
+    /// 目录数的是**落点键**（`Self::landing_key`）：平台纠正搬过的那几个，卡上住的就是新那一级目录。
     #[must_use]
     pub fn landing(&self, profile: &Profile, adapter: &dyn Adapter) -> Option<Landing> {
         let desired = self.desired(profile);
@@ -2168,13 +2265,16 @@ impl Footprint {
             .get(&first.variant)
             .and_then(Option::as_deref)
         {
-            Some(platform) => crate::adapter::converge::platform_directory(
-                self.platforms
+            Some(platform) => {
+                let 同平台的: Vec<String> = self
+                    .platforms
                     .iter()
                     .filter(|(_, of)| of.as_deref() == Some(platform))
-                    .map(|(key, _)| key.as_str()),
-            )
-            .unwrap_or_else(|| platform.to_string()),
+                    .map(|(key, _)| self.landing_key(key))
+                    .collect();
+                crate::adapter::converge::platform_directory(同平台的.iter().map(String::as_str))
+                    .unwrap_or_else(|| platform.to_string())
+            }
             None => path::platform_of_key(&first.source)?.to_string(),
         };
         Some(Landing {
@@ -2340,6 +2440,7 @@ mod tests {
             source: path.to_string(),
             source_stamp: 戳(bytes),
             variant: path.to_string(),
+            work: None,
             convert: None,
         }
     }

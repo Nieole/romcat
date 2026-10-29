@@ -168,13 +168,77 @@ impl 现场 {
         hash
     }
 
-    /// 折一趟：期望状态 + 计划 + 执行要的那几样。**不作声称**的档案，不转也不检查。
-    fn 排一趟(&self, 规则: &str, manifest: &Manifest) -> 一趟 {
-        self.排一趟_按档案(规则, manifest, &Profile::unclaimed())
+    /// 把几个变体挂到同一个**作品**底下（识别结论）：库里有了作品，作品级媒体才有地方挂。
+    fn 归到作品(&mut self, 作品: &str, keys: &[&str]) {
+        let work = self
+            .catalog
+            .add_work(作品, romcat_core::catalog::Provenance::Identified)
+            .expect("建得出作品");
+        let records: Vec<romcat_core::catalog::Identification> = keys
+            .iter()
+            .map(|key| romcat_core::catalog::Identification {
+                variant_key: (*key).to_string(),
+                platform: None,
+                standalone: None,
+                edition: None,
+                state: romcat_core::catalog::State::Matched,
+                reason: None,
+                units: 1,
+                nkit: 0,
+                read_bytes: 0,
+                work_id: Some(work),
+                release_id: None,
+                candidates: Vec::new(),
+            })
+            .collect();
+        self.catalog
+            .write_identifications(&records)
+            .expect("识别结论写得进");
     }
 
-    /// 同上，但指定一份**能力档案**——转格式与文件系统检查都从这儿来（票 21）。
-    fn 排一趟_按档案(&self, 规则: &str, manifest: &Manifest, profile: &Profile) -> 一趟 {
+    /// 往**媒体池**里塞一份媒体，并把它挂到某个**作品**上（作品级媒体）：这个作品的几个变体共用这一份，
+    /// 目标上只铺一次。
+    fn 收一份作品媒体(&mut self, 作品: &str, kind: MediaKind, bytes: &[u8]) -> String {
+        let hash = romcat_core::catalog::frontend::hash_of(bytes);
+        let at = self.pool.path_of(&hash, "png");
+        写(&at, bytes);
+        self.catalog
+            .put_media(&hash, "png", bytes.len() as u64, Measured::default())
+            .expect("池里记得下");
+        self.catalog
+            .put_scraped(&[Harvested {
+                anchor: AnchorKind::Work.label().to_string(),
+                subject: 作品.to_string(),
+                source: format!("本地媒体-{}", kind.label()),
+                input: format!("{作品}/{hash}"),
+                values: Vec::new(),
+                media: vec![HarvestedMedia {
+                    kind: kind.label().to_string(),
+                    hash: hash.clone(),
+                    evidence: "测试".to_string(),
+                }],
+            }])
+            .expect("引用写得进");
+        hash
+    }
+
+    /// 折一趟：期望状态 + 计划 + 执行要的那几样。**不作声称**的档案，不转也不检查。
+    fn 排一趟(&self, 规则: &str, manifest: &Manifest) -> 一趟 {
+        self.排一趟_按档案_上限(规则, manifest, &Profile::unclaimed(), None)
+    }
+
+    /// 同上，但给子库记一个**容量上限**：删减建议要有超限才列得出来。
+    fn 排一趟_带上限(&self, 规则: &str, manifest: &Manifest, 上限: u64) -> 一趟 {
+        self.排一趟_按档案_上限(规则, manifest, &Profile::unclaimed(), Some(上限))
+    }
+
+    fn 排一趟_按档案_上限(
+        &self,
+        规则: &str,
+        manifest: &Manifest,
+        profile: &Profile,
+        上限: Option<u64>,
+    ) -> 一趟 {
         let selected = 选中(&self.catalog, 规则);
         let adapter = adapter::find("Pegasus").expect("带着 Pegasus 适配器");
         let priorities = Priorities::builtin();
@@ -183,6 +247,13 @@ impl 现场 {
         let footprint = sync::Footprint::gather(&self.catalog, &selected, &platform_manifest)
             .expect("读得出脚印");
         let mut desired = footprint.desired(profile);
+        // 与 `sync::prepare` 同一个次序：删减建议那几行屏上的名字（作品名／正题、平台）在这里补。
+        // 剥正题要的剥离规则与浏览屏、扇削交的是同一份（内置那一份）。
+        let keys: Vec<&str> = selected.picked.iter().map(|one| one.key.as_str()).collect();
+        desired.trim_names = self
+            .catalog
+            .trim_names(&keys, &romcat_core::filename::Rules::builtin())
+            .expect("名字读得出来");
         // 与 `sync::prepare` 同一个次序：先筛 ROM，多碟变体的播放列表排在筛过之后、再筛一遍；选中的变体在卡上落成
         // 什么样照筛过之后的期望状态定（播放列表、转出来的那一份、没上卡的那几个），交给媒体与前端元数据，最后几样一起
         // 再筛一遍。
@@ -224,7 +295,7 @@ impl 现场 {
         let mut generated = playlists.bytes;
         generated.extend(frontend.bytes);
 
-        let mut 子库 = Sublibrary::at("掌机", self.卡.path(), "Pegasus", None);
+        let mut 子库 = Sublibrary::at("掌机", self.卡.path(), "Pegasus", 上限);
         子库.capability = Some(profile.name.clone());
         // 与 `sync::prepare` 同一条线：落点的目录段先与目标折齐，再排计划。
         let mut from_pool = media.from_pool;
@@ -2280,7 +2351,16 @@ fn 有一张碟转不了_差量预览里那张碟照转不了报出来_播放列
         那一行.variant, "库/ps/某游戏/游戏 (Disc 1).zip",
         "挂在那个多碟变体名下"
     );
-    assert!(那一行.why.contains("2 个内容条目"), "{}", 那一行.why);
+    assert!(
+        那一行.why.to_string().contains("2 个内容条目"),
+        "{}",
+        那一行.why
+    );
+    assert!(
+        !那一行.why.to_string().contains("romcat "),
+        "转不了的理由只说事实，命令由命令行补：{}",
+        那一行.why
+    );
     let 预览 = prepared.plan.render_text();
     assert!(预览.contains("到了目标上打不开"), "{预览}");
     assert!(预览.contains("ps/某游戏/游戏 (Disc 2).zip"), "{预览}");
@@ -3312,4 +3392,54 @@ fn 主文件转了格式的变体_卡上转出来的那一份设备上缺失_这
             "{格式}：转出来的那一份设备上缺失、这一趟不补，不该列：{条目:#?}"
         );
     }
+}
+
+#[test]
+fn 作品共用的媒体_变体的没全排除就不算腾出_全排了才跟着算() {
+    // 挂单 `Q819`：一份作品级媒体（封面、截图）被这个作品的几个变体共用，目标上只铺一次。
+    // 于是排除**一个**变体、而同作品别的变体还留着时，那几份照旧要铺——「累计腾出」里不能含它。
+    // 记在头一个遇到它的变体名下的话，「排除到这一项就能放下」会偏乐观。
+    let mut 现场 = 现场::摆好();
+    现场.归到作品("魂斗罗", &["库/FC/魂斗罗.zip", "库/FC/超级玛丽.zip"]);
+    // 一份 2000 字节的封面：比两个变体都小，但足以让「只排除大的那个」那一档骗人。
+    const 封面: u64 = 2000;
+    现场.收一份作品媒体("魂斗罗", MediaKind::Cover, &[7_u8; 封面 as usize]);
+    // 先把这一趟该占多少问出来（不设上限），再让上限比它少 5000：
+    // 单独排除哪个变体都不够，两个都排除才够——差的那一截正是那份封面。
+    let 不设限 = 现场.排一趟("平台=FC", &Manifest::empty());
+    let 超出 = 5000;
+    let 一趟 = 现场.排一趟_带上限(
+        "平台=FC",
+        &Manifest::empty(),
+        不设限.plan.after_bytes - 超出,
+    );
+    assert_eq!(
+        一趟.plan.over_capacity,
+        Some(超出),
+        "前提没摆对：这份计划该超出 {超出} 字节"
+    );
+    let 建议 = &一趟.plan.trim_suggestions;
+    assert_eq!(建议.len(), 2, "两个变体各一条：{建议:#?}");
+    // 从大的排起：超级玛丽 4096 > 魂斗罗 2048。
+    assert_eq!(建议[0].variant, "库/FC/超级玛丽.zip");
+    assert_eq!(
+        建议[0].bytes, 4096,
+        "只排除超级玛丽时魂斗罗还留着，封面照旧要铺——它不该算进腾出：{:#?}",
+        建议[0]
+    );
+    assert_eq!(建议[0].cumulative, 4096, "{:#?}", 建议[0]);
+    assert_eq!(建议[1].variant, "库/FC/魂斗罗.zip");
+    assert_eq!(
+        建议[1].bytes,
+        2048 + 封面,
+        "魂斗罗也排除之后这个作品的变体全排除了，封面才跟着腾出：{:#?}",
+        建议[1]
+    );
+    assert_eq!(建议[1].cumulative, 4096 + 2048 + 封面, "{:#?}", 建议[1]);
+    // 「排除到这一项就能放下」跟着是准数：头一项不够（4096 < 5000），两项才够。
+    assert_eq!(
+        romcat_core::sublibrary::Room::of(&一趟.plan).fits_after(),
+        Some(1),
+        "排除头一项腾出的（变体自己的 4096）不够 5000，得排到第二项"
+    );
 }

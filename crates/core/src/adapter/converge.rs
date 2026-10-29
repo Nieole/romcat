@@ -328,8 +328,8 @@ pub fn run_within(
     launch: &BTreeMap<String, Launch>,
 ) -> Result<Converged, CatalogError> {
     let layout = layout(catalog, only)?;
-    // 票 15 挑出来的**显示标题**与**排序标题**。这一层一个字都不改它。
-    let chosen = chosen_titles(catalog, priorities)?;
+    // 票 15 挑出来的**显示标题**与**排序标题**，按平台各挑一次。这一层一个字都不改它。
+    let chosen = chosen_titles(&layout, catalog, priorities)?;
 
     let mut out = Converged {
         variants: layout.variants,
@@ -359,7 +359,22 @@ pub fn run_within(
             planned
                 .iter()
                 .flat_map(|one| &one.members)
-                .map(|variant| variant.key.as_str()),
+                // **落点**：卡上/子库里真要住的那一份（`Launch`）。平台纠正搬过的变体换了头一级目录，
+                // 那一段就体现现在这里；导出（主库里写元数据）没有 `Launch`，数的是键本身。
+                .map(|variant| {
+                    launch.get(&variant.key).map_or_else(
+                        || variant.key.clone(),
+                        |launch| {
+                            crate::path::join_root(
+                                crate::path::root_of_key(&variant.key),
+                                &launch.file,
+                            )
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str),
         );
         // **不给 `shortname`。** Pegasus 拿它去对第三方资源目录（Skraper、ES 的
         // system 名），而那套名字与我们的平台名不是一回事——FC 在那边叫 `nes`。
@@ -397,7 +412,7 @@ pub fn run_within(
                 platform,
                 layout.values(one),
                 layout.head_values(one),
-                chosen.get(one.anchor.name()),
+                chosen.get(&(one.anchor.name().to_string(), platform.clone())),
                 priorities,
                 one.why,
                 launch,
@@ -466,20 +481,42 @@ impl Layout {
     }
 }
 
-/// 每部作品的**显示标题**与**排序标题**（票 15 的 [`title::choose`]），键是作品名。
+/// `(作品名, 平台)` → 那个平台上挑好的**显示标题**与**排序标题**。
+pub(crate) type Titles = BTreeMap<(String, String), Chosen>;
+
+/// 每部作品在每个平台上的**显示标题**与**排序标题**（票 15 的 [`title::choose`]），键是
+/// `(作品名, 平台)`。
+///
+/// **按平台各挑一次**（票 `core-answers-once/05`，挂单 `Q783`）：一部作品横跨几个平台时，
+/// 每个平台上的条目按那个平台的覆盖挑——ADR-0010 定的「街机以 MAME 为权威」于是落到
+/// **认出作品**的变体头上，与没认出作品的那些一致。没有平台语境的那几处（浏览屏列表、
+/// 标题报告、合并向导）照旧问 [`title::choose`]，一部作品只有一个显示标题。
 ///
 /// 与 [`Layout`] 一样，导出与「换一份优先级表之前哪几处显示值会变」共用。
 pub(crate) fn chosen_titles(
+    layout: &Layout,
     catalog: &Catalog,
     priorities: &Priorities,
-) -> Result<BTreeMap<String, Chosen>, CatalogError> {
-    Ok(title::work_titles(catalog)?
-        .into_iter()
-        .map(|set| {
-            let picked = title::choose(&set, priorities);
-            (set.work, picked)
-        })
-        .collect())
+) -> Result<Titles, CatalogError> {
+    let all = title::work_titles(catalog)?;
+    let sets: BTreeMap<String, &title::TitleSet> =
+        all.iter().map(|set| (set.work.clone(), set)).collect();
+    let mut out = BTreeMap::new();
+    for (platform, planned) in &layout.platforms {
+        for one in planned {
+            let Anchor::Work(work) = &one.anchor else {
+                continue;
+            };
+            let Some(set) = sets.get(work) else {
+                continue;
+            };
+            out.insert(
+                (work.clone(), platform.clone()),
+                title::choose_on(set, priorities, Some(platform)),
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// 摆料：见 [`Layout`]。`only` 给了就只摆这几个变体。
@@ -532,41 +569,32 @@ pub(crate) fn layout(
         by_variant,
     };
 
-    // 平台 → 作品名（或变体的键）→ 那几个变体。
-    let mut grouped: BTreeMap<String, BTreeMap<Anchor, Vec<VariantRow>>> = BTreeMap::new();
+    // 条目键（平台 × 锚点）→ 那几个变体。
+    let mut grouped: BTreeMap<EntryKey, Vec<VariantRow>> = BTreeMap::new();
     for variant in variants {
         match entries.of(&variant) {
             Err(why) => out.excluded.push((why, variant.key)),
-            Ok((platform, anchor)) => grouped
-                .entry(platform)
-                .or_default()
-                .entry(anchor)
-                .or_default()
-                .push(variant),
+            Ok(key) => grouped.entry(key).or_default().push(variant),
         }
     }
 
-    for (platform, anchors) in grouped {
-        let planned = anchors
-            .into_iter()
-            .map(|(anchor, mut members)| {
-                // **首选变体排在最前。** 同一档之内按键排，同一份库跑两次结果必须一样。
-                let picked = overrides.get(&(anchor.name().to_string(), platform.clone()));
-                members.sort_by(|a, b| {
-                    let rank = |v: &VariantRow| {
-                        (preference_of(v, &marks, &releases, picked), v.key.clone())
-                    };
-                    rank(a).cmp(&rank(b))
-                });
-                let why = preference_of(&members[0], &marks, &releases, picked);
-                Planned {
-                    anchor,
-                    members,
-                    why,
-                }
-            })
-            .collect();
-        out.platforms.insert(platform, planned);
+    for (key, mut members) in grouped {
+        // **首选变体排在最前。** 同一档之内按键排，同一份库跑两次结果必须一样。
+        let picked = overrides.get(&(key.anchor.name().to_string(), key.platform.clone()));
+        members.sort_by(|a, b| {
+            let rank =
+                |v: &VariantRow| (preference_of(v, &marks, &releases, picked), v.key.clone());
+            rank(a).cmp(&rank(b))
+        });
+        let why = preference_of(&members[0], &marks, &releases, picked);
+        out.platforms
+            .entry(key.platform)
+            .or_default()
+            .push(Planned {
+                anchor: key.anchor,
+                members,
+                why,
+            });
     }
 
     Ok(out)
@@ -590,6 +618,19 @@ impl Anchor {
     }
 }
 
+/// **一个变体落进哪个前端条目**：平台 × 锚点。
+///
+/// 这一对在好几处当键用（导出摆料、移除一个根少几条、合并/移出前后各几条）。
+/// 从前各处自己摆裸元组 `(String, Anchor)`，两样同型的东西挨着传，写颠倒了编译照过
+/// （同 `NewRelease` 那一类形状）——给它一个名字，两处共用同一把键。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct EntryKey {
+    /// 条目落在哪个平台（合集按平台切）。
+    pub(crate) platform: String,
+    /// 条目挂在哪：一个作品，或者一个还没认出作品的变体。
+    pub(crate) anchor: Anchor,
+}
+
 /// **一个变体落进哪个前端条目**：平台 × 锚点，连「它根本做不成条目」那一档。
 ///
 /// ## 为什么提成一份东西
@@ -607,6 +648,9 @@ pub(crate) struct Entries {
     abnormal: BTreeMap<String, String>,
     /// 识别那一趟判过的「自己不能独立运行」，读落了库的结论即可（ADR-0024 推论 3）。
     not_standalone: BTreeMap<String, Standalone>,
+    /// 变体的键 → **落点平台**（有平台纠正听纠正，否则照目录声明，
+    /// `Catalog::placement_platforms`）：一个变体进哪个前端合集问它。
+    placement: BTreeMap<String, String>,
 }
 
 impl Entries {
@@ -619,23 +663,25 @@ impl Entries {
             works: catalog.work_names()?,
             abnormal: catalog.abnormal_main_members()?,
             not_standalone: catalog.not_standalone()?,
+            placement: catalog.placement_platforms()?,
         })
     }
 
     /// 这个变体落进哪个前端条目；做不成条目的答 `Err`，连为什么。
-    pub(crate) fn of(&self, variant: &VariantRow) -> Result<(String, Anchor), NotAnEntry> {
+    pub(crate) fn of(&self, variant: &VariantRow) -> Result<EntryKey, NotAnEntry> {
         if let Some(why) = excluded(variant, &self.abnormal, &self.not_standalone) {
             return Err(why);
         }
-        let platform = variant
-            .platform
-            .clone()
+        let platform = self
+            .placement
+            .get(&variant.key)
+            .cloned()
             .unwrap_or_else(|| crate::report::UNKNOWN_PLATFORM_LABEL.to_string());
         let anchor = match variant.work_id.and_then(|id| self.works.get(&id)) {
             Some(work) => Anchor::Work(work.clone()),
             None => Anchor::Loose(variant.key.clone()),
         };
-        Ok((platform, anchor))
+        Ok(EntryKey { platform, anchor })
     }
 }
 
@@ -737,8 +783,8 @@ fn has_chinese_language(languages: &str) -> bool {
 /// 优先级表之前算「哪几处显示值会变」照它比
 /// （[`scrape::priority::shifts`](crate::scrape::priority::shifts)，ADR-0024）。
 ///
-/// - **标题**：认出了作品的，是标题集合挑出来的那一个（`chosen`，票 15）；没认出作品的，
-///   照这张表挑一条。
+/// - **标题**：认出了作品的，是标题集合挑出来的那一个（`chosen`，票 15，按这个条目的平台
+///   重挑）；没认出作品的，照这张表挑一条。
 /// - **汉化组**：挂在变体上（ADR-0012），从首选变体身上取（`head_values`）。
 /// - **开发商、发行商、类型**：集合字段，胜出那个源的全部值（[`Priorities::pick_all`]）。
 /// - **年份、简介**：挑一条（[`Priorities::pick`]）。

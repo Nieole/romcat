@@ -1997,6 +1997,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **在哪：** `crates/gui/src/browse/work.rs` 的 `hero_facts`（六格等宽、一行放不下截尾巴，照稿 `.hfacts b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}`）；基线 `crates/gui/tests/snapshots/work/*-{light,dark}.png` 头上那一块「平台」那一格
 - **为什么没停线：** 截法照稿（稿上那一格本来就是一行、截尾巴），egui 截过的那一段悬停时给全文；改法是那一格的版式问题，不出这张票，也不是这张票造的新行为——是拿主意的人 2026-10-02「全名一律带厂名」那条裁定带出来的。
 - **这张票实际做了什么：** 照稿截，没另改那一格。
+- **票 `core-answers-once/11` 做掉了（2026-10-28）：** `hero_facts` 里「平台」那一格换成按词折行、两行封顶（`LayoutJob` 的 `wrap.max_rows = 2`），别的五格照旧一行截尾巴；六面 × 两套主题一共 12 张 `work/*` 基线重批（`work/sticky-*` 两张没动——那时头上那一块已经滚出去了）。测试 `crates/gui/tests/work.rs::头上平台那一格折成两行看得全_别的几格照旧一行`；对照材料在仓库外 `/Users/nicoer/dev/game-wt/logs/cao-11-compare/`（`CHANGED.md` 与十二张 `旧｜新`）。
 - **两条路：** 甲（本票做的）：照稿一行截尾巴，悬停看全名。乙：「平台」那一格放宽或许它折成两行（稿上没有这一种），或者头上那一格改写代号、全名只留在悬停里。
 - **建议留：** 甲。稿上就是这么截的，「变体」那一格（「2 个 · 8.00 MiB」）一样会截；真库里多平台的作品那一格（「A / B」）本来就放不下。要改就六格一起改版式，不单为平台开例外。
 - **裁决：** 拿主意的人 2026-10-02 裁：乙的前半——「平台」那一格允许折成两行，全名看得全。托给票 `core-answers-once/11`（它本来就动详情页、要重批 `work/*` 基线），已在那张票正文追加「收挂单 `Q1450`」。
@@ -2302,6 +2303,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **建议留：** 乙。这几句不是挪一挪措辞就收得了的：`capability::decide` 那句里的 `romcat scan --zst` 在界面上**没有落点**（库屏扫描没有读 zst 那一项），`romcat report` 的去处是库体检屏——先要答「界面上有没有那件事」（ADR-0023），再谈去命令；它画在子库屏差量预览「目标吃不下」那几行的悬停里，命令行报告逐条印它，要交种类就得改 `Decision::Unsupported` 与计划里那一列。`no_candidate_hint` 那句画在浏览屏与作品详情上，改了要重批那几张基线。界面那三句同样要先答落点。（两轴审查 Spec 那一轴点了 `decide` 那一句，认为与 `Q1348` 的理由自相矛盾；`Q1348` 收的是同一个函数、同一个枚举里**只差搬命令**的那几句，这一句差的是落点，不是同一种活。）
 - **谁来裁：** 拿主意的人
 - **状态：** settled（拿主意的人 2026-10-04 裁：乙，另开票，活托给 `core-answers-once/13`）
+- **票 `core-answers-once/13` 做掉了什么：** 三句核心话去命令、原因交成种类——`WorkVariant::no_candidate_hint` 只说事实并点出「识别」这件事的名字；`capability::Decision::Unsupported` 的 `why` 换成 `UnsupportedReason`（`Display` 只说事实，`--json` 里照旧是一句话），计划里那一列（`sync::Unsupported`）跟着交种类；`identify::collect` 那句穿不透的理由去掉「（`romcat scan --zst`）」，那一截收成常量 `identify::NOT_READ_NOTE`。命令由命令行那两层各补：`crates/cli/src/main.rs` 的 `warn_about` 补「`romcat scan --zst` 读一趟」与「`romcat report` 说得出卡在哪一类」，`run_identify` 补「`romcat scan --zst` 读一趟」。界面自己写死的三句逐句答了落点：子库规则移除那句**有落点**（浏览屏筛选栏顶上那条横幅，那一行自己就指着），悬停里那句命令行指路删掉；库屏选根（`PICK_ROOT_NONE`）与「不是同一个」的撤销**没有落点**，改成只说事实、不编去处（挂单 `Q1800`、`Q1801`）。另记 `Q1797`（界面没有「读 zst」这一项）、`Q1798`（库体检屏没有「透明容器：内部构成」那一节）、`Q1799`（浏览屏那两处指路要改 `browse.rs` 本体）、`Q1802`（识别候选的依据里还剩一句 `romcat switch sync`）。
 
 ### Q1350 — 界面补的几句屏上去处，设计稿没画
 
@@ -2357,11 +2359,12 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **类别：** 路过发现，不在范围内
 - **在哪：** `crates/core/src/sync/prepare.rs` 的 `prepare_selected`（`stale_claims: profile.stale_claims(&today())`，真钟）；`crates/gui/tests/snapshot.rs` 里挑了 `retroarch-exfat` / `retroarch-fat32` 又排过差量预览的那几张（约 `:3544`、`:3810`、`:4021`）；`crates/core/src/capability/profiles.toml` 最早一条核实日期是 2026-08-31。界面平台表那一格的「今天」截图测试钉死了（`crates/gui/src/sublibrary.rs` 约 `:594`），差量预览这一格没钉
 - **为什么没停线：** 眼下（2026-10-04）一条都不陈旧，基线不受影响；本票只改了那一句的字，没改它什么时候出现。
-- **这张票实际做了什么：** 没动。
+- **这张票实际做了什么：** 没动（票 06）。
 - **两条路：** 甲：照旧，到 2027-02-27 前后那几张基线会多出一行、门禁红。乙：让排计划收一个「今天」（`Request` 里一格，不给就是真钟），截图测试钉死它，与平台表那一格同一个办法。
 - **建议留：** 乙，在那一天之前做；不然那一天的门禁红在一张与它无关的票上。
 - **谁来裁：** 拿主意的人
 - **状态：** settled（拿主意的人 2026-10-04 裁：乙，开小票，活托给 `core-answers-once/14`）
+- **票 `core-answers-once/14` 做掉了什么：** 乙这条路走完了。`sync::Request` 多一格 `today: Option<&'a str>`（不给就是真钟，`prepare_selected` 末尾一处 `request.today.map_or_else(today, ToString::to_string)`）；界面那一格 `Screen::set_today` 同时喂给平台表与排计划（`Screen::preview` 里两处 `Request` 都带它）；截图那一侧把字面量提成 `const 钉死的今天: &str = "2026-09-15"`（`crates/gui/tests/snapshot.rs`），`摆着异常的一台()` 与 `拍刚同步完` 两个现场都钉上。变异检查做过一次（常量挪到 `2027-03-19` → 差量预览那 10 张 + 平台表那 4 张红；挪回来全绿），基线一张没变。核心那两支测试：`crates/core/tests/sync.rs::排计划收一个今天_给了就照它判档案陈旧`、`::排计划不给今天时照真钟判档案陈旧`。
 
 ### Q1467 — 高亮改存作品身份之后，换排序照旧把高亮丢掉
 
@@ -2817,7 +2820,281 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **谁来裁：** 拿主意的人
 - **状态：** open
 
+### Q1317 — 导出到主库那一侧，平台纠正之后的合集元数据文件名仍按**内容实际在的那一级目录**，与卡上的不一致
+
+- **来自：** 票 `core-answers-once/03`（收 `Q1033` 时路过）
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/adapter/converge.rs` 的 `run_within`（`platform_directory` 那一处）；`crates/core/src/adapter.rs` 的 `Adapter::metadata_path`、`crates/core/src/adapter/gamelist.rs` 的 `metadata_path`
+- **为什么没停线：** 「那一级目录叫什么」要从**平台清单**上取一眼（库里那个平台的变体全被纠正走了时一个目录都数不出来），而导出那条路（`adapter::converge::run` → `transfer::export_task` → `export`）手上没有平台清单；递进去要改四处公开签名与三十来个测试调用点，不出这一票。
+- **这张票实际做了什么：** 甲。导出折出来的合集名与条目分组照**落点平台**（`FDS`），而 `Collection.directory` 与元数据文件名照**内容实际在的那一级目录**（`fc.metadata.pegasus.txt`，ES-DE 是 `gamelists/fc/gamelist.xml`）——主库里那些文件确实躺在 `fc/` 下，导出一个字节都不搬（ADR-0004），指向真实位置才对。**同步那一侧不是这样**：卡上的目录是我们自己摆的，落点目录就是纠正之后那一级（`fds.metadata.pegasus.txt`）。
+- **两条路：** 甲（本票做的）：导出照内容实际在的目录。乙：把平台清单递进 `converge` / `export_task`，两边都用落点目录（Pegasus 的文件名与 ES-DE 的 `gamelists/<目录>/` 都跟着变）。
+- **建议留：** 乙——但等票 `core-answers-once/04`（平台清单的查找链提进核心库）落地之后再动，那时导出手上本来就该有一份清单，不必为这件事单开一条参数。乙还要答一句：ES-DE 的 `es_systems.xml` 里那个 system 的 `<path>` 指着 `fc/`，gamelist 摆在 `gamelists/fds/` 下算不算对。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1318 — 落点平台要**重跑一趟识别**才生效：只纠正不识别，导出与同步照旧用旧的落点
+
+- **来自：** 票 `core-answers-once/03`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/identify.rs` 的 `flush`（`Catalog::put_placements`）；`crates/core/src/catalog/identify.rs` 的 `placement_platforms`（`COALESCE(i.placement, v.platform)`）；界面上那一句 `crates/gui/src/health.rs` 的 `PLATFIX_FOOTNOTE`
+- **为什么没停线：** 这与会话里「**识别判定的平台**」是同一条约定（那一列也要下一趟识别才更新，`CONTEXT.md` 平台条与票 `one-criterion-per-thing/03` 都这么写），落点跟着它就是一致的；要改成当场生效得让读落点的那一侧带上沉淀库，或者纠正那一下就地写一行——那是另一条设计，不该由这张票顺手定。
+- **这张票实际做了什么：** 甲。落点平台与识别判定的平台出自**同一个决定**、同一趟落库；纠正之后跑一趟识别（增量那趟不算——它只算还没识别的），导出与同步就跟着变。屏上那句照实写「下次识别时按新平台重新匹配；导出与同步按纠正后的平台放置」。
+- **两条路：** 甲（本票做的）：照识别的物化结论。乙：纠正那一刻就写出落点（`set_platform_correction` 那一处顺带重算，或者在读落点时把沉淀库带上），屏上那句也改成「立刻生效」。
+- **建议留：** 甲。它在整条线上只有一个「什么时候生效」的答案，而乙会让「识别判定的平台」与「落点平台」两个说法在时间上错开——同一个决定，一处立刻生效一处等下一趟。人在纠正那一层按下去之后本来就要跑一趟识别（那一层的末句就这么说）。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1319 — 子库报告的「按平台」那一栏仍按**目录声明的平台**分组，纠正之后卡上的落点已经换了
+
+- **来自：** 票 `core-answers-once/03`（路过 `sublibrary::report`）
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/sublibrary/report.rs` 的 `Report::build`（`picked.platform`）；`crates/core/src/sublibrary.rs` 的 `Picked::platform`（`select` 从 `VariantFacts::platform` 折出来，那是目录声明的那一列）
+- **为什么没停线：** 那张报告分平台的口径这一票没被要求改；改它要动 `VariantFacts` 或 `Picked` 的语义（规则求值也读 `VariantFacts.platform`，那是**目录声明**的口径，不许被纠正带着走），不出这张票。
+- **这张票实际做了什么：** 没动。报告里按平台那一栏照旧是目录声明的平台；卡上怎么摆照落点平台（`sync::Footprint::platforms`）。
+- **两条路：** 甲（本票做的）：报告照旧。乙：`Picked` 上多一格落点平台，报告按它分组（规则求值照旧读目录声明那一格）。
+- **建议留：** 乙。一个纠正过的变体，报告说它属于 `PSP`、差量预览说它落在 `gbc/`，读报告的人分不出是两套口径还是算错了。乙只动 `Picked` 与报告两处。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q1320 — 落点目录与 `platform_directory` 在「一个平台散在几个目录里」时退回的东西不一样
+
+- **来自：** 票 `core-answers-once/03`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/catalog/identify.rs` 的 `placement_directories`（退回平台清单里这个平台的**头一个目录**）；`crates/core/src/adapter/converge.rs` 的 `platform_directory`（数不出唯一那个时交 `None`，调用方退回**平台名**）
+- **为什么没停线：** 这条支路只在「纠正的目标平台在这个库里散在两个以上目录里」时走到——真库上二十来个平台各自只用一个目录（见台账 `docs/library-facts.md`），而这张票的验收全在单目录的夹具上。
+- **这张票实际做了什么：** 甲。搬过去的变体落进平台清单里该平台的头一个目录（`gb`、`gameboy` → `gb`）；没搬的变体照旧走 `platform_directory`（散在几个目录里退回平台名）。
+- **两条路：** 甲（本票做的）：落点目录退回清单里的头一个。乙：与 `platform_directory` 同样退回平台名（`GBC/`），两边一个口径，代价是那个目录名在大小写敏感的目标上可能对不上任何 system。
+- **建议留：** 甲。搬过去的变体总得落进**某个**具体目录，而清单里那个名字至少是用户确认过的；乙会让两个平台的内容落到同一个以平台名命名的目录里。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q1321 — 这台机器上的 `cargo` 是 Homebrew 的 1.99.1，仓库钉的是 1.98.1：门禁的 `clippy` 因此红在两处与本次改动无关的旧代码上
+
+- **来自：** 票 `core-answers-once/03`（跑门禁时撞上；`slot2` / `slot3` 同一趟门禁上一模一样）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/gui/tests/snapshot.rs:936`（`needless_borrows_for_generic_args`：`one.作品.map(&号)`）；`crates/core/src/scrape/priority.rs:671`（`type_complexity`）。两处都在 `117eb7f` 上就是这样，本票一个字节没碰
+- **为什么没停线：** 它们不是这一票的代码，也不是这一票的行为；改它们是两处与落点无关的 lint 修
+- **这张票实际做了什么：** 没动。`rust-toolchain.toml` 钉的 1.98.1 这一版 `clippy` 不报这两条（落那一版时实测过），而这台机器上 `which cargo` 是 `/opt/homebrew/bin/cargo`（1.99.1）、没有 rustup 可切
+- **两条路：** 甲：门禁照旧，谁跑谁看见这两条红并知道是工具链的事。乙：把那两处就地改掉（`&号` → `号`；`(BTreeMap<…>, BTreeMap<…>)` 提成两个类型），让 1.99 也绿。丙：给门禁的 `clippy` 那一条钉一条 `rustup run 1.98.1`（要先有 rustup）
+- **建议留：** 乙。两处都是机械改，改完 1.98 与 1.99 都绿，门禁的「全绿」才重新是一个能咬住的断言。
+- **谁来裁：** 拿主意的人
+- **状态：** settled（编排者 2026-10-28 在合完三张票的门禁上核：乙已由票 `core-answers-once/05`、`/12` 顺手改掉——`snapshot.rs` 的 `&号` 与 `priority.rs` 那个 `type_complexity` 都收了，合后的门禁 `clippy` 绿，见日志 `cao-int-gate1.log`）
+### Q1337 — 子库「手动例外」那张表每行都写着平台，显示标题却照无平台的挑法挑
+
+- **来自：** 票 `core-answers-once/05`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/catalog/sublibrary.rs` 的 `sublibrary_exception_details`（第二趟 `title::choose`）；表上那一行是 `crates/gui/src/sublibrary.rs` 的主栏
+- **为什么没停线：** 票把「有平台语境的地方」点名成导出与作品详情；这是一张列表，改它要连带定「列表要不要按平台跳名字」，不出这张票。
+- **这张票实际做了什么：** 照甲：那一列照旧问 `title::choose`（与浏览屏主列表同一支），一个作品一个名字。
+- **两条路：** 甲（本票）：列表一律无平台，与浏览屏同一支。乙：每行按 `ExceptionDetail::platform` 问 `title::choose_on`——街机那条例外写 MAME 的名字，与详情页、导出对得上，代价是同一部作品几条例外跨几个平台时名字不一样。
+- **建议留：** 乙更对得上「这一行明明写着平台」，但先得裁「有平台语境的清单算不算它」。留给人裁。
+- **谁来裁：** `/grill-with-docs`
+- **状态：** open
+
+### Q1338 — 标题报告里那一栏的显示标题仍无平台，可能与导出写出去的不同
+
+- **来自：** 票 `core-answers-once/05`
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/title/report.rs`（`choose` 那一处）与命令行的标题报告
+- **为什么没停线：** 报告是全库口径，改成按平台要先定「一部横跨几个平台的作品在报告里列几行」，那是报告口径的事。
+- **两条路：** 甲（本票）：报告照旧一部作品一行、无平台，并在报告口径里说明它与导出可能不同。乙：报告按 `(作品, 平台)` 列，显示标题照那个平台重挑。
+- **建议留：** 甲 + 口径那一句；乙留给写报告口径的那张票。
+- **谁来裁：** `/grill-with-docs`
+- **状态：** open
+
+### Q1339 — 词表「显示标题」条没写平台语境
+
+- **来自：** 票 `core-answers-once/05`
+- **类别：** 记
+- **在哪：** `CONTEXT.md` 的**显示标题**条（「导出到某个前端时实际写进去的那一个标题」）
+- **为什么没停线：** 票只要求改屏上那句实话；「平台」条与词表那一摊归票 `core-answers-once/01`／`04` 那一路，别在两处抢同一件事。
+- **两条路：** 甲（本票）：词表一个字不动，等「平台」条那一批统一补。乙：显示标题条补一句「有平台语境时（导出、详情按变体所在的平台）按那个平台的按平台覆盖重挑」。
+- **建议留：** 乙（一句话），落点由写词表那一路定。
+- **谁来裁：** 拿主意的人／写词表那一票
+- **状态：** open
+
+### Q1340 — 截图夹具里没有一部认出作品的街机，这一票的界面效果没有基线作证
+
+- **来自：** 票 `core-answers-once/05`
+- **类别：** 记
+- **在哪：** `crates/gui/tests/snapshot.rs` 的 `浏览的变体` / `浏览的作品`（平台只有 SFC / GBA / GB / FC / GBC，标题集合里没有 MAME）
+- **为什么没停线：** 往夹具里加一部街机作品会连带改浏览屏那一批基线；这一票改的行为不在这份夹具上显形，截图一张没变。
+- **两条路：** 甲（本票）：不碰夹具，三条核心库测试钉着行为，对照材料写明为什么没有图。乙：加一部认出作品的街机（标题集合 No-Intro + MAME），重批浏览屏与详情页那几张。
+- **建议留：** 乙，但归下一次动截图夹具的票，别单为这一条重批。
+- **谁来裁：** 拿主意的人
+- **状态：** settled（拿主意的人 2026-10-29 裁：乙；票 `cao-05b` 做掉，补一张**只这一态才摆**的街机现场）：`crates/gui/tests/snapshot.rs` 里新添 `街机的作品` / `街机的变体` / `街机现场()`——一部认出了作品的街机（街机平台，标题集合里 No-Intro 的 `Contra (World)` 与 MAME 的 `Contra`，内置那份 `priorities.toml` 的「街机 / 标题」按平台覆盖管着先后），走 `搭浏览现场(…, 街机: true)` 那条 `chain`，**共享的 `浏览的变体` / `浏览的作品` 一行没动**，于是别的基线一张都没重批（不带 `UPDATE_SNAPSHOTS` 跑一趟：旧基线 163 张全绿，只有新的两条报 `Missing snapshot`）。新增成对基线 `work/arcade-mame-light.png` / `work/arcade-mame-dark.png`（作品详情页停在「标题」那一面）：浏览屏列表挑 `Contra (World)`、详情页按变体所在的平台挑 `Contra`，图上看得见面包屑、大标题、「显示标题」那一格与标题表两行。测试：`crates/gui/tests/snapshot.rs::详情页_街机按平台挑显示标题_浅色` / `_暗色`（拍之前还断言列表上是 `Contra (World)`、面包屑是 `浏览 / Contra`）。对照材料：`/Users/nicoer/dev/game-wt/logs/cao-05b-compare/CHANGED.md`（新增，无旧图；四个拿不准的样式问题）。裁决证据也补在票 `core-answers-once/05` 的截图那一条验收底下。
+
+### Q1341 — 集成分支尖端 clippy 红了一处（gd-23 带进 `snapshot.rs` 的 `map(&号)`）
+
+- **来自：** 票 `core-answers-once/05`（跑门禁时撞上，不是这一票的改动）
+- **类别：** 活
+- **在哪：** `crates/gui/tests/snapshot.rs:936` 的 `work_id: one.作品.map(&号)`；`号` 是个 `Copy` 的闭包，clippy 的 `needless_borrows_for_generic_args` 报红（`-D clippy::all`）
+- **为什么没停线：** 一行机械改法、不改行为；不修的话这一票的门禁 clippy 那一条永远红在别人带进来的地方，也就看不出这一票有没有弄红别的。
+- **这张票实际做了什么：** 改成 `one.作品.map(号)`（一处分号，`snapshot.rs` 的截图一张没变）。记在这儿是让编排者知道它是 q8/cao-int 尖端就有的红，不是这一票弄出来的。
+- **两条路：** 甲（本票）：当场按 clippy 的建议改掉。乙：留给 gd-23 那一侧的收尾去改，这一票的门禁 clippy 红着交。
+- **建议留：** 甲。**但若 `main` 上还能重现，说明是工具链/clippy 版本换了口径**，得看清是 lint 新口径还是真写错了。
+- **谁来裁：** 编排者
+- **状态：** settled（本票当场改掉）
+
+### Q1377 — 折删减建议的名字，在排计划那一趟把选择集整份读了一遍
+
+- **来自：** 票 `core-answers-once/09`（收挂单 `Q852`）
+- **类别：** 记
+- **在哪：** `crates/core/src/sync/prepare.rs` 的 `prepare_selected`（`catalog.trim_names(&picked, &rules)`）；名字本体在 `crates/core/src/catalog/sublibrary.rs` 的 `Catalog::trim_names`
+- **为什么没停线：** 要算准「这个作品的变体全被排除才算腾出」，计划器就得知道**每一个**选中变体属于哪部作品（少一个就会提前把作品级媒体算成腾出）；而「屏上叫什么」也要按变体取主文件名剥正题。两样合一条路走，代价是一次按选择集整份读变体行。
+- **这张票实际做了什么：** 甲（整份读）。删减建议只列最大的十个，可那一份 `work` 表是**判据**不是装饰——只读前四十个会把作品级媒体的释放算早。
+- **两条路：** 甲（本票）：排计划那一趟读一遍（`variants_of` 分批 `IN` + `work_name` 按作品去重）。乙：只给**可能进前十**的那几十个变体取名字（按 `Selected.picked` 的下界排序），作品归属另存一张只含键与作品的表——那张表依旧要整份，省下的是剥正题与平台那两步。
+- **建议留：** 乙，等真库上的排计划耗时量出来再动；`Footprint::gather` 本来就整份读过一次成员，这一条不是最贵的那一档。
+- **谁来裁：** `/grill-with-docs`
+- **状态：** open
+
+### Q1378 — 删减建议的「释放」那一列不再严格降序：一部作品最后一个被排除的变体会一并算上共用媒体
+
+- **来自：** 票 `core-answers-once/09`（收挂单 `Q819`）
+- **类别：** 岔
+- **在哪：** `crates/core/src/sublibrary.rs` 的 `trim_suggestions`（排序照**变体自己的文件**，作品级媒体事后再落位）；两处文本报告 `crates/core/src/sublibrary/report.rs` 与 `crates/core/src/sync/report.rs` 的那几行；界面 `trim_ui` 的两栏
+- **为什么没停线：** 「累计腾出是准数」与「释放这一列从上往下不增」在这套记账下没法同时成立：准数要求作品级媒体落在**最后一个**被排除的变体上，而排序是事前定的（那时还不知道哪个是最后一个）。
+- **这张票实际做了什么：** 甲：排序照变体自己的文件，`bytes` 含「这一条顺手腾出的作品级媒体」，于是某一条可能比上一条大；`cumulative` 照旧是往上加的，`Trim::bytes` 的文档与 `trim_suggestions` 的文档都写明了。
+- **两条路：** 甲（本票，准数优先）。乙：排序把作品级媒体也摊进去（把整部作品的媒体记到它最大的那个变体名下）——那一列严格降序，但那个变体自己的「释放」会变成大半个作品，而它的兄弟变体看着像白排除。
+- **建议留：** 甲。真库上作品级媒体（封面、截图、视频）比 ROM 小两个量级，错位不明显；但这是一处**看得见的观感**，要拿主意的人点头。
+- **谁来裁：** 拿主意的人
+- **状态：** open（对照材料在 `/Users/nicoer/dev/game-wt/logs/cao-09-compare/`，那一屏的夹具里没有作品级媒体，图上看不出这一档）
+
+### Q1379 — 删减建议那一行写的是**作品名**，手动例外那张表写的是**显示标题**：同一部作品可能两个名字
+
+- **来自：** 票 `core-answers-once/09`（收挂单 `Q852`）
+- **类别：** 规格没说
+- **在哪：** `crates/core/src/catalog/sublibrary.rs` 的 `Catalog::trim_names`（取 `work.name`，认不出作品的取 `browse::loose_title`）；对照那一处是 `Catalog::sublibrary_exception_details`（认出作品的取 `title::choose` 逐出来的显示标题）与浏览屏主列表的 `WorkRow::display`
+- **为什么没停线：** 票与规格逐字写的是「作品名（正题）」——那是文件名那侧的名字，不是按优先级表挑的显示标题；而显示标题要多交一份优先级表进排计划那一趟（`Catalog::titles_of_works` + `title::choose`），那是另一个判断。
+- **这张票实际做了什么：** 甲（作品名／正题）。认得出作品的写 `work.name`，认不出的写正题；两犷剥正题的实现是**同一处**（`browse::loose_title`），没有第二个判据。
+- **两条路：** 甲（本票）：作品名——与「删减建议带作品名」逐字对得上，代价是一部标题集合里有中文译名的作品，在子库屏的删减表与例外表上会写成两个名字。乙：改用**显示标题**（`title::choose`，按优先级表挑的那一个）——与浏览屏、作品详情、手动例外、导出同一串名字，代价是排计划那一趟要多一层优先级表与每部作品的叫法。
+- **建议留：** 乙更符合 ADR-0024「同一份内容在几屏上就是两个名字」，但要拿主意的人点头——那会把「正题」从这张屏上抹掉。
+- **谁来裁：** 拿主意的人
+### Q1807 — 不是截图的那几份测试照旧用真钟排计划，2027-02-27 前后它们会不会红，这一票没管
+
+- **来自：** 票 `core-answers-once/14`（收 `Q1354` 时路过）
+- **类别：** 路过发现，不在范围内
+- **在哪：** 票 14 只钉了**截图**那一侧（`crates/gui/tests/snapshot.rs`）。核心与界面另几份测试照样照真钟排计划：`crates/gui/tests/sublibrary.rs` 里排预览的那几支（除了本来就拨陈旧名册的那一支）、`crates/core/tests/sync.rs` 的 `排计划(catalog, 工作区)` 助手（`Request::default()`，子库是「不作声称」，那份矩阵的核实日期是 2026-09-02）。到 2027-03-01 前后它们排出来的计划会多一条 `Concern::StaleClaims`，断言是多用 `contains` 写的，多半不会红——但没逐支核过。
+- **为什么没停线：** 票 14 的合同是「截图测试钉死它」，别的测试照真钟是**对的行为**（它们验的正是「不给就是真钟」）；逐支去核、去钉，是另一件事。
+- **这张票实际做了什么：** 只把界面上那一格（`Screen::set_today`）接到排计划上，于是**已经钉了「今天」的那两支界面测试顺带也钉住了计划**；没钉的那几支一字未动。
+- **两条路：** 甲：照旧，到那一天门禁真红了再逐支看。乙：现在就把那几支也钉上（`Request { today: Some(...) }` / `set_today`），与截图那一侧齐。
+- **建议留：** 甲。它们该验的是真钟；先钉上反而把「不给就是真钟」这条盖住。
+- **谁来裁：** 收尾
+- **状态：** open
+
+### Q1357 — 「读不动」这个词不在词表里，而它从票 04 起已经上了两屏
+
+- **来自：** 票 `core-answers-once/07`（写那一行的时候撞上）
+- **类别：** 规格没说
+- **在哪：** `CONTEXT.md`「库的状况」那一节有**不可读**（说的是文件元数据读不到，ADR-0021 的第一段），没有「读不动」；而它已经用在：票 04 开窗那一行「工作目录里那份优先级表读不动：…」、`sources::SourceState::label` 那一档（票 10）、本票开场那一行的标签与句子（`CatalogError::unreadable`）
+- **为什么没停线：** 词表是拿主意的人的东西（`docs/agents/domain.md` 那条「要用的概念词表里没有，是个信号」），这一票照 ADR-0021 再修订的原词写，不去自己立词条；而它已经三处用着同一个意思，不是一处的随手话。
+- **这张票实际做了什么：** 一个字没往 `CONTEXT.md` 里加，屏幕上的词照 ADR-0021 再修订与票 04 的先例（「读不动」），句子由核心库一处出（`CatalogError::unreadable`）。
+- **两条路：** 甲：在词表「库的状况」下补一条**读不动**（与**不可读**并排，说清前者说的是「这一份库这会儿打不开」、后者说的是「这一个文件元数据读不到」）。乙：不立词条，把 ADR-0021 再修订那一段当作它的定义，代码里指过去。
+- **建议留：** 甲。两份概念只差一个字，而「不可读」是文件级的、「读不动」是库级的——不写清，下一个人会当成同一个。
+- **谁来裁：** 拿主意的人（`/domain-modeling`）
+- **状态：** open
+
+### Q1358 — 读不动那一行把整串路径也印了出来，与版本对不上那一行的取舍不一样
+
+- **来自：** 票 `core-answers-once/07`（重批开场基线上看见的）
+- **类别：** 岔
+- **在哪：** `CatalogError::unreadable()`（`crates/core/src/catalog.rs`）那句「中立库 {path} 这会儿读不动（{原话}）——…」；对照的是 `VersionMismatch::brief()` 那一句已经从短话里把路径拿掉（那一行左边已经印着这份库叫什么）。图上：`crates/gui/tests/snapshots/opening/unreadable-library-light.png`
+- **为什么没停线：** 判据是「照印原话」——SQLite 那句自己就把路径写在里头（`unable to open database file: /…`），剥掉它等于改核心库的原话；而这一行的行高没有像版本那一行那样的硬约束（票面只说「下一步是修权限或关掉占用它的程序」）。
+- **这张票实际做了什么：** 甲（留着）。代价是那一行折成三行、左边那个名字重复了一遍。
+- **两条路：** 乙：核心库为「上屏」与「终端」各交一句，屏上那句只说「这会儿读不动（database is locked）——去修权限，或者关掉占用它的程序」，路径不上屏（与版本那一行同一个取舍，代价是两处措辞从此可能漂，得指着一处生成）。丙：路径留着、折成两行封顶（截断加悬停），照根名那一列的办法。
+- **建议留：** 乙，但要拿主意的人点头——它改的是屏幕上那一行的字数与行数，不只是措辞。
+- **谁来裁：** 拿主意的人（对照材料：`/Users/nicoer/dev/game-wt/logs/cao-07-compare/CHANGED.md`）
+### Q1797 — 库屏的扫描没有「读 zst」这一项：`romcat scan --zst` 那句在界面上没有落点
+
+- **来自：** 票 `core-answers-once/13`（收 `Q1349`）
+- **类别：** 规格没说（界面上有没有这件事）
+- **在哪：** `crates/core/src/capability.rs` 的 `UnsupportedReason::ContentsUnknown`（差量预览「目标吃不下」那几行的悬停）与 `crates/core/src/identify.rs` 的 `NOT_READ_NOTE`（侧边详情「为什么没定下来」那一行）——两句话从前都带着「（`romcat scan --zst`）」。界面上那一项在 `crates/gui/src/stages.rs` 的扫描那道工序（`ScanOptions` 上没有 `decompress_zst`）与 `crates/gui/src/roots.rs` 的扫描那一行
+- **为什么没停线：** 票 `core-answers-once/13` 的活是「核心那几句去命令、界面自己写死的三句逐句答落点」；这一句答出来的结果是「界面上没有这件事」。补上它是一样新能力（扫描的选项、界面那一格、差量预览跟着变），不拆本票。
+- **这张票实际做了什么：** 核心那两句只说事实（`UnsupportedReason` 的 `Display`、`identify::NOT_READ_NOTE`）；命令由命令行补（`crates/cli/src/main.rs` 的 `warn_about` 与 `run_identify` 各补一句「`romcat scan --zst` 读一趟」）。界面上那两处**只说事实、不指路**——不编一个不存在的去处。
+- **两条路：** 甲：界面补上这件事——库屏扫描那一行加一格「读 zst」（核心库的 `ScanOptions.decompress_zst` 已经有了，命令行 `--zst` 走的就是它），勾上之后重新扫一遍；那两句在屏上就有去处可指了。乙：照实说，界面上不补（这一项要付全量解压的几小时，界面上没有「挂后台跑很久」之外的入口，而扫描本来就在任务台上）。
+- **建议留：** 甲，但排在「扫描那一行还差什么」那一批里一起做：一格勾选框加上去容易，难的是一趟几小时、界面上要说得清代价（ADR-0023 的判据里「挂后台跑很久」正是允许只在命令行的那一类，而扫描在界面上已经有落点了）。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1798 — 库体检屏没有「透明容器：内部构成」那一节：`romcat report` 那句在界面上没有落点
+
+- **来自：** 票 `core-answers-once/13`（收 `Q1349`）
+- **类别：** 规格没说（界面上有没有这件事）
+- **在哪：** `crates/core/src/capability.rs` 的 `UnsupportedReason::ContentsUnknown`（从前那句末尾写着「`romcat report` 说得出它卡在哪一类」）。那一节在核心库只有命令行的文本报告里（`crates/core/src/report/render.rs` 的「透明容器：内部构成」，含「还没读过 / 其中的 zst 穿不透」那几行）；界面的库体检屏只有概要八格（`Finding::ALL` 七格加「疑似同一作品」）与它们的明细，没有容器那一节
+- **为什么没停线：** 同 `Q1797`：这是「界面有没有这件事」的答案，补它要新增一格的数与明细（`ScanReport::containers` 那几样），不拆本票。
+- **这张票实际做了什么：** 核心那句只说事实；命令行 `sublibrary plan` / `sync` 那一份补一句「卡在哪一类，`romcat report` 说得出」（`warn_about`）。界面上那几行的悬停只说事实。
+- **两条路：** 甲：库体检屏补一节「透明容器：内部构成」（穿不透几个、还没读过几个、其中的 zst 几个、带 CRC 的几成），那几句就指得到屏上那一处。乙：照实说，不补——那一节说的是扫描那一趟读盘的事，界面要动它得回扫描那一行（`Q1797`），体检屏上再摆一份反而是第二个入口。
+- **建议留：** 甲与 `Q1797` 一起裁：两处其实是同一件事的两个入口（「读它」与「看它卡在哪」）。只补一个的话，建议补 `Q1797` 那个（能办），这一节留在命令行报告里。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1799 — 浏览屏侧边详情与作品详情页那句「还没识别」该指到库屏工序段的「识别」那一行，要改 `browse.rs` 本体
+
+- **来自：** 票 `core-answers-once/13`（收 `Q1349`）
+- **类别：** 路过发现，不在范围内（与另一串票改的同一批文件重叠）
+- **在哪：** `crates/gui/src/browse.rs` 的 `basis_lines`（侧边详情）与 `crates/gui/src/browse/work.rs` 的 `candidates_table`（作品详情页），两处都直接印 `WorkVariant::no_candidate_hint` 那一句；工序段在库屏（`crates/gui/src/roots.rs`），队列屏另有一颗「运行识别」（`crates/gui/src/queue.rs` 的 `identify_shortcut`）
+- **为什么没停线：** 票的编排交代写着「浏览屏 `browse.rs` 本体这一串票（gd 05–09、19、20）在改；你只碰 `browse/suspicion.rs` 与核心那句」。指路那半句要改的正是那两处。
+- **这张票实际做了什么：** 核心那句去掉命令、点出「先跑一趟识别」这件事的名字；界面那两处照旧原样印（不再有终端命令）。**有落点、没有指过去**——`Q1799` 这一条就是那半句。
+- **两条路：** 甲：那两处各补一句「库屏「工序」那一段的「识别」那一行是同一趟活」；队列屏那颗「运行识别」的悬停已经有同一句话。乙：浏览屏自己再摆一颗「运行识别」（与队列屏那颗同一处记号、同一趟活），那句就不必指路。乙与 `Q1457` 那族「详情页多摆几颗按钮」同一个形状。
+- **建议留：** 甲——指路比多一颗按钮便宜；而浏览屏那一串票本来就在重排那两处，顺手做。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1800 — 选择窗口弹不出来时，界面上没有第二个加根的入口
+
+- **来自：** 票 `core-answers-once/13`（收 `Q1349`）
+- **类别：** 规格没说（界面上有没有这件事）
+- **在哪：** `crates/gui/src/roots.rs` 的 `PICK_ROOT_NONE`（屏头「添加根…」那个选目录窗口什么都没交回来时那一句）；加根的唯一入口是同一份文件的 `ADD_ROOT` 那颗按钮（`Screen::picked_root` → `crate::pick::directory`）
+- **为什么没停线：** 从前那句话教人去终端敲 `romcat scan`；按 ADR-0023 修订段那本身就是一条缺陷，而**界面上补哪个入口**是一个新决定（手打路径？还是别的一处），不拆本票。
+- **这张票实际做了什么：** 那句话改成只说事实（「选择窗口弹不出来时（例如远程会话），这一下就加不了这个根」），**不编一个不存在的去处**。
+- **两条路：** 甲：加根那一层补一个「直接写路径」的框（与「添加根…」弹层同一层，判据照旧走 `catalog::roots::add_root`）。乙：照实说，不补——远程会话里本来也不该拿这台的界面去加一台不在眼前的盘上的根。
+- **建议留：** 甲。加根是「就在这台机器上、就现在、就这一份库」的动作，选择窗口弹不出来是一种真实处境（远程会话、无 GUI 的会话），一条手打路径的入口不推翻任何判据。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1801 — 记过「不是同一个」之后，界面上没有撤回它的地方
+
+- **来自：** 票 `core-answers-once/13`（收 `Q1349`）
+- **类别：** 规格没说（界面上有没有这件事）
+- **在哪：** `crates/gui/src/browse/suspicion.rs` 那颗「不是同一个」的悬停（从前写着「要撤回请用命令行 `romcat triage same-work --not-same … --undo`」）；核心库那一侧有 `triage::same_work::undo_not_same`，而界面只把记过的那些**读回来做过滤**（`crates/gui/src/health.rs` 与 `crates/gui/src/shaping.rs` 的 `not_same_works`），一处都不列出来
+- **为什么没停线：** 按 ADR-0023 修订段，「这件事界面做不到、人得回终端」是缺陷；补一个「记过的那几对」的列表（摆哪儿、怎么撤）是一个新决定，不拆本票。
+- **这张票实际做了什么：** 悬停只说事实（「它不是一条裁决，撤销也不在裁决记录里」），**不指一个界面上不存在的去处**。
+- **两条路：** 甲：库体检屏「疑似同一作品」那一格底下加一节「记过不是同一个的那几对」，每对一颗「撤销」（调 `undo_not_same`）——那一趟本来就把这些读回来了。乙：作品详情页那张建议卡上多一颗「撤回以前那条」（只在那一对记过时摆）。丙：不补，把那句「撤销也不在裁决记录里」也去掉。
+- **建议留：** 甲。撤销与记录落在同一屏、同一趟数据上；乙要在一张「建议卡」上摆一条「已经不是建议」的东西，读起来别扭。丙最省事，但「按下去就再也回不来」正是 ADR-0023 要治的那种。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
+### Q1802 — 识别候选的「依据」里还带着一句终端命令：`romcat switch sync`
+
+- **来自：** 票 `core-answers-once/13`（收尾时搜「核心交给界面的话」路过）
+- **类别：** 路过发现，不在范围内
+- **在哪：** `crates/core/src/identify/switch.rs` 的 `candidate`（`evidence` 那一段：「本机还没取过 titledb，所以说不出这是哪个版本——`romcat switch sync` 取一次就能把这一条抬到高置信」）；界面把它原样画在侧边详情的候选那几行（`crates/gui/src/browse.rs` 的 `basis_lines`）与待确认屏的「依据」那一格（`crates/gui/src/queue.rs`）
+- **为什么没停线：** 它不是拒绝话，是**候选的依据**——一句话里既有事实（没取过 titledb）、又有下一步（取一次）。票 `core-answers-once/13` 点名的三句里没有它；改成「事实 + 种类」要给候选的依据立一个种类（`Candidate.evidence` 现在是一段自由文本，全仓十几处拼它），那是另一张票的规模。
+- **这张票实际做了什么：** 没动。
+- **两条路：** 甲：`Candidate` 上多一格「下一步是哪一种」（取数据源 / 跑识别 / 补裁决），依据那一段只留事实；命令行照种类补命令，界面照种类补屏上的去处（数据源那一块在库屏与设置屏）。乙：只把这一句的命令删掉，界面与命令行都只说事实。
+- **建议留：** 甲——它是这一族里最后一块「核心交给界面的话里带命令」的地方，而它要的形状与 `Q1349` 那三句一样。乙会让命令行也不再提示怎么补。
+- **谁来裁：** 拿主意的人
+- **状态：** open
+
 ---
+
+### Q1890 — 「平台在卡上住哪一级目录」有两条回退链，一个平台散在几个目录里时它们答得不一样
+
+- **来自：** 本轮代码审查（Standards 轴，2026-10-29）
+- **类别：** 岔（一个判断两处实现，ADR-0024）
+- **在哪：** `Catalog::placement_directories`（`crates/core/src/catalog/identify.rs`）——数这个平台**没被搬走的**变体用着哪几个目录，只剩一个就用它，数不出来照**平台清单里这个平台的头一个目录**，清单里也没有才退回平台名；`converge::platform_directory`（`crates/core/src/adapter/converge.rs`，`sync::Footprint::landing` 用它）——只有「这个平台选中的变体全在同一个目录」才答得出，否则 `None`，调用方退回平台名。两条链在「一个平台散在几个目录里」时可能答出不同的目录（清单头一个目录 对 平台名）。
+- **为什么没停线：** 票 03 那一张只要求「落点平台在核心库立一处」，两条链都各自有票钉着（`placement_directories` 那边有「库里那个平台全被纠正走了」的测试）；把两条合成一条要动同步落点那一侧的行为，不是这一轮该顺带做的事。
+- **两条路：** 甲：让 `Footprint::landing` 也问 `placement_directories`（它手上有 `Catalog`），两条链收成一处。乙：把 `platform_directory` 收成「目录 → 清单头一个目录 → 平台名」这一条，`placement_directories` 反过来读它。
+- **建议留：** 甲（`placement_directories` 那一侧知道「平台纠正」与清单，是更完整的那一份）；谁来裁：拿主意的人
+
+### Q1891 — 命令行靠 `reason` 的子串认出「这一趟没读 zst」，理由那句话一改字就静默失效
+
+- **来自：** 本轮代码审查（Standards 轴，2026-10-29）
+- **类别：** 岔（判断题）
+- **在哪：** `crates/core/src/identify.rs` 的 `NOT_READ_NOTE` 与 `crates/cli/src/main.rs` 的 `row.reason.contains(identify::NOT_READ_NOTE)`
+- **为什么没停线：** 票 13 已经把「两个壳问的是同一个常量」做到了（谁也不抄字面量），ADR-0024 那一半是守住的；剩下的只是「理由是一句话，用 `contains` 认它」这一层脆性——同一趟里 `capability` 那一族已经改成交种类了。
+- **两条路：** 甲：照旧（常量共享，改字两边一起改）。乙：`collect` 那一趟把「为什么没读」交成一个种类（与 `UnsupportedReason` 同形），命令行照种类补话。
+- **建议留：** 乙，但排在「理由那一列要不要结构化」那一批里一起做，不单开；谁来裁：拿主意的人
 
 ## 结算索引（第四轮收口，`Q364`–`Q448`）
 
@@ -2987,10 +3264,10 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q606` | 「识别判定的平台」词表里没有，没往 `CONTEXT.md` 加 | **活** | 迁回票 `one-criterion-per-thing/03`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
 | `Q611` | 「目录写不动」那一问只在 Unix 上答得出，Windows 上交给建库那一下自己报错 | **岔** | 迁回票 `no-mute-spots-opening-a-catalog/04`；追认，维持现状 |
 | `Q612` | 中立库住的那个目录列不开时，建库、改名与向导第一步都「查不了重名就不收」 | **记** | 迁回票 `no-mute-spots-opening-a-catalog/04`；记下，无事可做 |
-| `Q613` | 一份中立库文件自己读不动（权限、被锁），落在「文件坏了」那一支 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘） |
-| `Q614` | `Site::open` 先问一句 `catalog.exists()`，目录读不动时说的是「还没有这份库，先跑一次 scan」 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘） |
-| `Q615` | 向导第一步拦下时说的是核心库原话，「换个名字，或者去开那一份」那半句没了 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
-| `Q616` | 「不许写进任何一份主库」那道守卫在中立库目录读不动时照旧放行 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘） |
+| `Q613` | 一份中立库文件自己读不动（权限、被锁），落在「文件坏了」那一支 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘）；票 `core-answers-once/07` 做掉了（**settled**）：`workspace::CatalogState` 多一支 `Unreadable`，分法在核心库一处 `CatalogError::unreadable()`（照打开时 SQLite 的错码逐条判：`SQLITE_PERM` / `SQLITE_CANTOPEN` / `SQLITE_BUSY` / `SQLITE_LOCKED`，**判不准的归「文件坏了」并照印原话**），那句话带下一步「去修这份文件与它那个目录的权限，或者关掉占用它的程序」；开场那一行画一枚「读不动」标签，不画「打不开」也不叫人删库。测试 `crates/core/tests/catalog_list.rs::一份中立库的读权限被收掉时列举交出读不动`（收权限造不出来就如实跳过）、`crates/gui/tests/snapshot.rs::开场_读不动的那一份写着读不动_下一步是修权限`；新基线 `opening/unreadable-library-{light,dark}.png`（待点头） |
+| `Q614` | `Site::open` 先问一句 `catalog.exists()`，目录读不动时说的是「还没有这份库，先跑一次 scan」 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘）；票 `core-answers-once/11` 做掉了（settled）：`Site::open`／`Site::open_file` 的「在不在」换成 `try_exists`，说不出来时交 `SiteError::Unreadable`——「中立库住的那个目录读不动：…（系统怎么说的）。说不准里头那份中立库在不在——先去修那个目录的权限，或者关掉占着它的程序」，不再说成「还没有这份库」。测试 `crates/core/tests/catalog_list.rs::工作目录读不动时打开现场说的也是读不动不是还没有这份库`（收权限造不出来就如实跳过）；命令行那六处开库前的预问仍照旧，见 `Q1398` |
+| `Q615` | 向导第一步拦下时说的是核心库原话，「换个名字，或者去开那一份」那半句没了 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/07` 做掉了（**settled**）：`CatalogError::AlreadyExists` 补上「换个名字，或者去开那一份」（不带命令，ADR-0023）；`CatalogError::BlankLibraryName` 改成不带路径（那一句里从前印着 `catalog/library-<哈希>.sqlite3` 那种按空名字折出来的怪东西）。测试 `crates/core/tests/library_name.rs::撞名与空名字那两句都说得出下一步`、`crates/gui/tests/pick.rs::向导起名那一问撞名时说得出下一步` 与 `::向导起名那一问空着时不带按空名字折出来的路径` |
+| `Q616` | 「不许写进任何一份主库」那道守卫在中立库目录读不动时照旧放行 | **活** | 迁回票 `no-mute-spots-opening-a-catalog/04`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘）；票 `core-answers-once/11` 做掉了（settled）：照 ADR-0004 修订段——`refuse_writing_into_any_library` 查不出主库的根时交 `Writing::OnlyNew`，落点**已存在就拒**并说清「这一趟查不出主库的根（…），没法确认它不落在某一份主库里——已有的文件一个字节都不覆盖，换一个新的文件名再导出」；落点不在就用 `create_new` 写（不肯覆盖由系统那一下兜住，不靠「先问一遍再写」）。「开不动的那几份跳过」那套口径没翻：能比的根照旧比，新文件碰不到任何已有的字节。测试 `crates/cli/tests/triage.rs::中立库目录读不动时导出只放行新建_已存在的拒掉且一个字节不动`（收权限造不出来就如实跳过） |
 | `Q621` | 逐条流里 `U` 撤的仍是本进程刚落下的那一批，不是沉淀库里最新在册的那一批 | **岔** | 迁回票 `gui-answers-all-six/06`；追认，维持现状 |
 | `Q622` | 被后来的一批盖住时那句话原样画，里面带着一句命令行指路 | **活** | 迁回票 `gui-answers-all-six/06`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
 | `Q623` | `Q419` 那条测试落在库屏那份界面测试里，不在待确认队列那份 | **记** | 迁回票 `gui-answers-all-six/06`；记下，无事可做 |
@@ -3050,7 +3327,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q761` | 截图门的依赖 `egui_kittest` 钉死 `=0.36.1`，不跟补丁版 | **记** | 迁回票 `gui-looks-like-the-design/05`；记下，无事可做 |
 | `Q762` | 单行输入框高 28，不照设计稿 `.input` 的 30 | **记** | 迁回票 `gui-looks-like-the-design/05`；已落地：票 gui-looks-like-the-design/05 |
 | `Q763` | 向导标头那一排「走到第几问」长在 `Dialog` 上，不在向导自己的内容区里 | **记** | 迁回票 `gui-looks-like-the-design/05`；记下，无事可做 |
-| `Q764` | 稿上主库那一行的「N 个根」「硬盘未连接，仍可打开」「在文件系统中打开」没做 | **活** | 迁回票 `gui-looks-like-the-design/05`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q764` | 稿上主库那一行的「N 个根」「硬盘未连接，仍可打开」「在文件系统中打开」没做 | **活** | 迁回票 `gui-looks-like-the-design/05`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/07` 做掉了前一件（**settled**，后两件按裁定不做）：「N 个根」——核心库 `CatalogFacts` 多交一个 `roots`，界面照稿画成「2 个根 · 46,444 个变体 · 上次扫描 …」。测试 `crates/core/tests/catalog_list.rs::开得了的那一份说得出它有几个根`，基线 `opening/catalogs-{light,dark}.png` 重批 |
 | `Q765` | 开场列一遍库，就在每份中立库旁边留下 `-wal` / `-shm` | **记** | 迁回票 `gui-looks-like-the-design/05`；记下，无事可做 |
 | `Q766` | 截图基线出自 macOS，Windows 那台验证机上会不会红没有量过 | **活** | 迁回票 `gui-looks-like-the-design/05`；托给票 `rom-metadata-automation/28` |
 | `Q767` | 工作目录读不动时，开场右栏不摆「添加主库」 | **记** | 迁回票 `gui-looks-like-the-design/05`；记下，无事可做 |
@@ -3065,7 +3342,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q776` | 变体那一层的查询默认全列，只有主列表默认收起 | **岔** | 迁回票 `gui-looks-like-the-design/08`；追认，维持现状 |
 | `Q781` | 工作目录那份优先级表的路径收进 `workspace::priorities_path`，读写两侧都调它 | **岔** | 迁回票 `gui-looks-like-the-design/30`；追认，维持现状 |
 | `Q782` | 优先级弹层的临时入口挂在刮削面板那句「不该靠重采」旁边，正式入口留给设置屏 | **岔** | 迁回票 `gui-looks-like-the-design/30`；追认，维持现状 |
-| `Q783` | 街机那条标题覆盖管不到已经认出作品的显示标题，屏上照实说了 | **活** | 迁回票 `gui-looks-like-the-design/30`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q783` | 街机那条标题覆盖管不到已经认出作品的显示标题，屏上照实说了 | **活** | 迁回票 `gui-looks-like-the-design/30`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；**收于票 `core-answers-once/05`（2026-10-05）：settled**——`title::choose_on` 按平台挑，导出与详情走它，浏览屏列表照旧；屏上那句改成实话 |
 | `Q784` | 写回的那一份不带每条的「说明」 | **岔** | 迁回票 `gui-looks-like-the-design/30`；追认，维持现状 |
 | `Q785` | 「恢复默认」之后保存，写一份与内置相同的文件，而不是删掉工作目录那份 | **岔** | 迁回票 `gui-looks-like-the-design/30`；裁：「恢复默认」后保存改成删掉工作目录那份（翻案，照条目建议 B）；产出一件活 |
 | `Q786` | 「保存后的变化」在画帧那条线程上同步算 | **岔** | 迁回票 `gui-looks-like-the-design/30`；追认，维持现状 |
@@ -3094,7 +3371,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q816` | 空态上有两颗「新建子库」：屏头一颗，空态卡上一颗 | **岔** | 迁回票 `gui-looks-like-the-design/20`；追认，维持现状 |
 | `Q817` | 没按「算一遍容量」之前，卡上规则的数、合计、选中都写「—」「还没算」 | **岔** | 迁回票 `gui-looks-like-the-design/20`；追认，维持现状 |
 | `Q818` | 例外那一行写「收入」，设计稿与票 22 写「包含」 | **记** | 迁回票 `gui-looks-like-the-design/20`；已落地：票 gui-looks-like-the-design/22 |
-| `Q819` | 删减建议的「累计腾出」按计划器记账，作品共用的媒体记在头一个变体名下，「排除到这一项就能放下」可能偏乐观 | **活** | 迁回票 `gui-looks-like-the-design/20`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q819` | 删减建议的「累计腾出」按计划器记账，作品共用的媒体记在头一个变体名下，「排除到这一项就能放下」可能偏乐观 | **活** | 迁回票 `gui-looks-like-the-design/20`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/09` 做掉了（settled）：计划器的媒体记账按作品——作品级媒体记在作品名下（`DesiredFile::work`），这个作品的变体全被排除才算腾出，「累计腾出」与「排除到这一项就能放下」跟着变成准数（`sublibrary::TrimPool`／`trim_suggestions`） |
 | `Q820` | 浏览屏还有三处注释写着「子库屏一个写的动作都没有」 | **记** | 迁回票 `gui-looks-like-the-design/20`；文档就地改正：crates/gui/src/browse.rs |
 | `Q821` | 工序段扫描那一行数的是还没完整扫过一趟的根，不数盘上变了多少 | **岔** | 迁回票 `gui-looks-like-the-design/06`；追认，维持现状 |
 | `Q822` | 裁决那一行要读沉淀库：`Stages::survey` 多收了沉淀库与主库标识 | **记** | 迁回票 `gui-looks-like-the-design/06`；记下，无事可做 |
@@ -3116,9 +3393,9 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q838` | 等待中那一行的「移除」：设计稿是小号幽灵按钮，`look` 里没有幽灵那一档，眼下是小号普通按钮 | **记** | 迁回票 `gui-looks-like-the-design/25`；已落地：票 gui-looks-like-the-design/25（look::ghost_button） |
 | `Q839` | 任务屏与设计稿还差的几处小节（空台卡片、抬头、任务名、「约剩」、页脚那句），并成一条 | **记** | 迁回票 `gui-looks-like-the-design/25`；已落地：票 gui-looks-like-the-design/25 |
 | `Q840` | 任务屏几处字号取令牌里最近的一档：表头 11.5→11、历史行 12.5→13/12、屏头说明 12.5→12 | **记** | 迁回票 `gui-looks-like-the-design/25`；已落地：票 gui-looks-like-the-design/25（令牌加两档） |
-| `Q841` | 旧库版本对不上那句核心库原话，在开场上折成六行，比别的行高出一截 | **活** | 迁回票 `gui-looks-like-the-design/05`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q841` | 旧库版本对不上那句核心库原话，在开场上折成六行，比别的行高出一截 | **活** | 迁回票 `gui-looks-like-the-design/05`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/07` 做掉了（**settled**）：`CatalogError::Version` 的载荷换成 `catalog::VersionMismatch`，`brief()` 是一行短话（不带路径）、`details()` 是那段「留得住什么、会跟着丢什么」、`Display` 是两半合起来的整句（终端里一个字不少）；开场那一行只画短话，细节挂悬停。测试 `crates/gui/tests/snapshot.rs::开场_版本对不上那一行只有一行高_细节在悬停里`（红时 136 点 对 17 点）、`crates/core/tests/catalog_list.rs::结构版本对不上的库照列并说清是哪个版本对哪个版本`；基线 `opening/catalogs-{light,dark}.png` 重批 |
 | `Q851` | 核心库「目标不在位」那句带着命令行命令与系统错误原文，界面该不该一律用自己的话 | **活** | 迁回票 `gui-looks-like-the-design/20`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
-| `Q852` | 删减建议只带变体的键，没有作品名与平台 | **活** | 迁回票 `gui-looks-like-the-design/20`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q852` | 删减建议只带变体的键，没有作品名与平台 | **活** | 迁回票 `gui-looks-like-the-design/20`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/09` 做掉了（settled）：`sublibrary::Trim` 带上 `title`（认出作品的取作品名，认不出的取正题，走 `Catalog::trim_names` 那一处）与 `platform`；界面与两处文本报告照印，不自己凑「这个变体叫什么」 |
 | `Q853` | 卡头标签：稿上「未连接」撞词表**连接**；颜色与用词都已裁成照稿 | **记** | 迁回票 `gui-looks-like-the-design/20`；已落地：票 gui-looks-like-the-design/20 |
 | `Q854` | 删减建议表的格子内边距稿子写 6，令牌里没有这一档 | **岔** | 迁回票 `gui-looks-like-the-design/20`；裁：维持现状：格子内边距 8×10，不新立令牌 |
 | `Q855` | 卡头「目标不在位」是上一回看的时候记下的，插上卡要等下一回才换过来 | **记** | 迁回票 `gui-looks-like-the-design/20`；记下，无事可做 |
@@ -3188,7 +3465,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q946` | 待确认屏与刮削弹层里的单选框还是 egui 自带的黑点，没换成共用的 `look::radio_option` | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
 | `Q947` | 分大小写那块盘没挂上时，编译在 `ring` / `zstd-sys` 处退出 1，报的却是 clang 的错 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（门禁、测试与约定） |
 | `Q948` | ego-browser 窗口停在 maximized 时截不出图，CDP 一直超时 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（门禁、测试与约定） |
-| `Q949` | `Accepts::takes` 眼下一个调用方都没有，而且多段扩展名会判错 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q949` | `Accepts::takes` 眼下一个调用方都没有，而且多段扩展名会判错 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/12` 做掉了（settled）：`Accepts::takes` 删掉，唯一那一处调用（`sync/playlist.rs` 判吃不吃 `.m3u`）改问 `takes_key` |
 | `Q950` | 目标设置弹层照稿还差两处：容量填错时按钮照样按得动、选择集空时「设备上的位置」整格不画 | **活** | 迁回票 `gui-looks-like-the-design/21`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
 | `Q951` | 成型存疑的判据由票 27 立在核心库，票 29「同结构的其他几组列在库体检里」照它读 | **记** | 迁回票 `gui-looks-like-the-design/27`；已落地：票 gui-looks-like-the-design/29 |
 | `Q952` | 重复拷贝：词表写「同一个内容锚」，实现与屏上是「同名且同大小」 | **岔** | 迁回票 `gui-looks-like-the-design/27`；裁：词表改成实际口径「同名且同大小」 |
@@ -3209,14 +3486,14 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q973` | 手动例外只撤得掉一条，撤不掉「刚加进来的那一整个作品」 | **活** | 迁回票 `gui-looks-like-the-design/22`；无家可归 → `/grill-with-docs`（沉淀库该收、还没收的人手写的东西） |
 | `Q974` | 手动例外弹层里搜作品搜不到「还没识别」的那几份，也没有翻页 | **岔** | 迁回票 `gui-looks-like-the-design/22`；裁：补一句「还有 N 个，去浏览屏筛」加跳转；产出一件活 |
 | `Q975` | 共用弹层没有「标头那一排」与「页脚说明字」两个槽，手动例外那两样只好挪进内容区 | **记** | 迁回票 `gui-looks-like-the-design/22`；已落地：票 gui-looks-like-the-design/22（crate::dialog Dialog::head / footer_note） |
-| `Q976` | 开窗时优先级表读不动**静默退回内置那份**，屏上一个字都不说 | **活** | 迁回票 `gui-looks-like-the-design/22`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q976` | 开窗时优先级表读不动**静默退回内置那份**，屏上一个字都不说 | **活** | 迁回票 `gui-looks-like-the-design/22`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/04` 做掉了（settled）：`App::new` 那处 `if let Ok(priorities)` 不再吞掉，开窗屏最上方一行说「工作目录里那份优先级表读不动：…。眼下用的是内置那一份；去修那一份的权限，或者关掉占着它的程序。」；`sync::prepare::priorities` 的问法从 `Path::exists()` 换成 `try_exists`，「说不出来在不在」按读不动办。测试 `crates/gui/tests/manifest.rs::开窗时优先级表读不动也说出来`（收权限造不出来就如实跳过，`testing::revoke_file` 印那一行） |
 | `Q983` | 算「移除这个根的代价」那一下跑在画帧那条线程上，真库量级上可能卡过一秒 | **活** | 迁回票 `gui-looks-like-the-design/26`；托给票 `queue-followups/09` |
-| `Q984` | 两轴审查挑出的三处形状，本票按住没动（都与别的树在改的文件重叠） | **活** | 迁回票 `gui-looks-like-the-design/26`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q984` | 两轴审查挑出的三处形状，本票按住没动（都与别的树在改的文件重叠） | **活** | 迁回票 `gui-looks-like-the-design/26`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/12` 做掉了（settled）：`impact` 并成 `impact(ui, tone, parts)` 一支，`(字, 强调)` 换成具名的 `ImpactPart`；`Entries::of` 答具名的 `EntryKey`，三处当键用的地方跟着换 |
 | `Q985` | 移除一个根之后，子库屏缓着的那几台是整批作废的，没按「这一台真受影响吗」挑 | **记** | 迁回票 `gui-looks-like-the-design/26`；记下，无事可做 |
 | `Q993` | `release.revision` 眼下只有 DAT 那一条路在写，刮削那一侧的「修订」没有落点 | **记** | 迁回票 `gui-looks-like-the-design/34`；记下，无事可做 |
 | `Q994` | 卡带内部头读出来的版本号仍只躺在 JSON 里，与「第几版」那条链不通 | **活** | 迁回票 `gui-looks-like-the-design/34`；无家可归 → `/grill-with-docs`（沉淀库该收、还没收的人手写的东西） |
 | `Q995` | 老库里入过池的媒体那三格永远空着，没有补齐的入口 | **活** | 迁回票 `gui-looks-like-the-design/34`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘） |
-| `Q996` | 详情页「子库」「导出」两行读不动时退回「—」与「还没导出」，把不可读压成了「没有」 | **活** | 迁回票 `gui-looks-like-the-design/34`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q996` | 详情页「子库」「导出」两行读不动时退回「—」与「还没导出」，把不可读压成了「没有」 | **活** | 迁回票 `gui-looks-like-the-design/34`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/11` 做掉了（settled）：「子库」「导出」「收藏」三行改交三态（`crates/gui/src/browse/work.rs` 的 `Readable`：`Known(..)` ／ `Unreadable`），读不动画「读不动」（留神那一对色），不画「—」「未收藏」「还没导出」。测试 `crates/gui/tests/work.rs::详情页三行读不动时画读不动_不画破折号与还没导出`（从另一条连接把变体表与导出账弄坏造出读不动）；「合集」那一行照旧，见 `Q1397` |
 | `Q997` | `Catalog::add_release` 八个位置参数，其中五个同型 `Option<&str>`（本票已收） | **记** | 迁回票 `gui-looks-like-the-design/34`；已落地：票 gui-looks-like-the-design/34（catalog::content::NewRelease） |
 | `Q1010` | 合并作品落成的裁决把 DAT 条目名里的**修订标记**丢了（`release.revision` 过不来） | **活** | 迁回票 `gui-looks-like-the-design/16`；无家可归 → `/grill-with-docs`（沉淀库该收、还没收的人手写的东西） |
 | `Q1011` | 合并向导第三步那笔账走一遍全库，攥在手里而不是每帧算 | **活** | 迁回票 `gui-looks-like-the-design/16`；托给票 `queue-followups/09` |
@@ -3236,9 +3513,9 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q1028` | 排差量那趟活没有稿上那句副标题「只读取库和设备上的目录，不写入文件」 | **活** | 迁回票 `gui-looks-like-the-design/24`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
 | `Q1029` | 勾一下「补回」会让台上那一趟白跑；「放不进目标」那一行的容量把撞车的几份各算一遍 | **活** | 迁回票 `gui-looks-like-the-design/24`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘） |
 | `Q1030` | 「目录与内容平台不符」在核心库有**两处**判据，而稿上打头的 GB↔GBC 两组今天一条都出不来 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
-| `Q1031` | 平台清单：界面一律用内置那一份，命令行走工作目录那条链 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q1031` | 平台清单：界面一律用内置那一份，命令行走工作目录那条链 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/04` 做掉了（settled）：那条链在核心库立成一处 `Manifest::locate(given, workspace)`（`platform::Choice`：眼下用哪一份、从哪儿来、读不动时的原因），命令行只把 `--manifest` 交进去、读不动照旧停下（`Choice::strict`），`sources::manifest` 收成它的壳；界面七处（库体检、平台纠正、重新成型、扫描、筛选器、成型存疑、平台全名与合并向导组头）改读开窗那一刻挑好的那一份。测试 `crates/core/tests/platform_lookup.rs` 四条、`crates/gui/tests/manifest.rs` 三条 |
 | `Q1032` | 「平台纠正」屏上叫「记为裁决」，词表里它是**人工纠正** | **记** | 迁回票 `gui-looks-like-the-design/28`；已落地：票 gui-looks-like-the-design/28（health.rs「记为人工纠正」＋反向断言） |
-| `Q1033` | 导出与同步还不读平台纠正：照旧按目录放置 | **活** | 迁回票 `gui-looks-like-the-design/28`；无家可归 → `/grill-with-docs`（导出、同步与设置屏：落点、半截与程序级落盘） |
+| `Q1033` | 导出与同步还不读平台纠正：照旧按目录放置 | **记** | 迁回票 `gui-looks-like-the-design/28`；**settled**：票 `core-answers-once/03` 在核心库立了**落点平台**（有平台纠正听纠正，否则照目录声明，`identify::platform_of` 一处判、落库成 `identification.placement`，导出与同步都读它），卡上那一级目录跟着走、旧落点由下一趟同步照清单清掉（ADR-0015）；库体检那一句改成实话 |
 | `Q1034` | 平台标的字号与字距与设计稿差半号，全仓没有「字距」这一维 | **记** | 迁回票 `gui-looks-like-the-design/28`；记下，无事可做 |
 | `Q1035` | 平台色只给了六个平台，其余一律兜底灰 | **记** | 迁回票 `gui-looks-like-the-design/28`；记下，无事可做 |
 | `Q1036` | 定过的那一组不调淡、回话画在弹层里而不是弹提示条 | **记** | 迁回票 `gui-looks-like-the-design/28`；记下，无事可做 |
@@ -3285,7 +3562,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q1098` | 卡片工具条那个下拉：`(作品, 倒着)` 照样显示「默认」 | **记** | 迁回票 `gui-looks-like-the-design/11`；已落地：票 gui-looks-like-the-design/12（卡片下拉拆成默认/名称两档） |
 | `Q1099` | 屏上那句「搜索结果按匹配程度排序。」现在只在默认排法下成立 | **记** | 迁回票 `gui-looks-like-the-design/11`；已落地：票 gui-looks-like-the-design/11（那句只在搜索时画，有断言） |
 | `Q1100` | 截图夹具从来不折标题，于是截图门上排序标题那一列恒为 NULL | **记** | 迁回票 `gui-looks-like-the-design/11`；记下，无事可做 |
-| `Q1101` | `!=` 上认不出的值等于「这一条没起作用」，屏上眼下不说 | **活** | 迁回票 `gui-looks-like-the-design/12`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处） |
+| `Q1101` | `!=` 上认不出的值等于「这一条没起作用」，屏上眼下不说 | **活** | 迁回票 `gui-looks-like-the-design/12`；无家可归 → `/grill-with-docs`（核心库该多交一样东西、或把一个判据收到一处）；票 `core-answers-once/12` 做掉了（settled）：核心库立 `ThinClause::NothingExcluded`，`!=` 后面的值一个都认不出时屏上说「这一条没排除掉任何东西」；`=` 那几支原有的提醒照旧 |
 | `Q1102` | 那几颗批量按钮从屏头挪回表格上方那一条，推翻了 `Q876` 的落点 | **记** | 迁回票 `gui-looks-like-the-design/12`；已落地：票 gui-looks-like-the-design/12（三条照稿，16 张基线已入库） |
 | `Q1103` | 「加入合集」弹层里稿上那句「其中 N 个只能按路径记录」，印不出那个 N | **记** | 迁回票 `gui-looks-like-the-design/13`；记下，无事可做 |
 | `Q1104` | 默认窗口下左栏那句「有 N 条筛不出东西」在折线以下，眼下余量是零 | **活** | 迁回票 `gui-looks-like-the-design/13`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴）；票 `gui-draws-the-rest-of-the-design/07` 做掉了（settled） |
@@ -3323,3 +3600,8 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 | `Q1183` | 「加入子库」那一层有三处没照稿画 | **活** | 迁回票 `gui-looks-like-the-design/23`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
 | `Q1184` | `replace_rules` 把名字抹成 `NULL`，「改选择」那条回程会连别的规则一起清掉 | **活** | 迁回票 `gui-looks-like-the-design/23`；无家可归 → `/grill-with-docs`（缺陷：先修，别等整摊） |
 | `Q1185` | 「只加入勾选的」在「全选筛选结果」那一档按得动，稿上是禁的 | **活** | 迁回票 `gui-looks-like-the-design/23`；无家可归 → `/grill-with-docs`（界面照稿还差的尾巴） |
+| `Q1327` | 工作目录里那几份配置的「在不在」还是 `Path::exists()`：`sources::rules`（`name-rules.toml`）、`sources::load_registry`（`sources.toml`）、`capability::Roster::in_workspace` | **活** | 与 `Q1031` / `Q976` 同一个病：目录读不动时 `exists()` 报「不在」，那份配置就静静换成了内置那份，屏上（或命令行）一个字都没有。核心库那一处已经改成 `try_exists`（`Manifest::locate`、`sync::prepare::priorities`），这三处照同一形状改；谁来裁：拿主意的人 |
+| `Q1328` | 工作目录里那份平台清单与优先级表只在**开窗那一刻**读一次，外面改了要重开窗才生效 | **记** | 界面都是开窗时挑好、交给各屏（`App::new`），屏上没有重读的路。优先级那一份从界面上保存时有回程（`set_priorities`），手工改文件就没有；那句「读不动」的提示同理，修好之后不会自己消失。记下，无事可做（重开窗不贵）；谁来裁：拿主意的人 |
+| `Q1329` | 合成数据那三处（`crates/gui/src/demo.rs`）用 `Manifest::default()` 校验造出来的变体 | **记** | 它不是「界面读上屏那张表」——演示库压根不读工作目录里那份清单，`App::new` 挑的那一份只管屏上。留给照着 grep「界面不许取内置清单」复核的人一句解释：这三处是有意留的；谁来裁：拿主意的人 |
+| `Q1397` | 收藏读不动时，状态块只有「收藏」那一行画「读不动」；同一趟读不动的「合集」那一行照旧画「—」，头上那颗按钮照旧画「☆ 收藏」 | **活** | 票 `core-answers-once/11` 只收了 `Q996` 点名的三行（「子库」「导出」「收藏」）。`standing_of_work` 一次答出收藏与自建合集两样，读不动时三样都是同一个错。**合集那一行已经改了**（本轮代码审查挑出来、编排者当场修：`browse/work.rs` 的 `collections` 换成 `Readable<Vec<…>>`，读不动画「读不动」；`crates/gui/tests/work.rs::详情页三行读不动时画读不动_不画破折号与还没导出` 现在数 4 处）。**剩下的**：头上那颗按钮画「☆ 收藏」（读作「没收藏」，按下去会照一个没读出来的前提去写）；谁来裁：拿主意的人 |
+| `Q1398` | 命令行那六处开库前的「在不在」预问仍是 `Path::exists()`：目录读不动时，那几条命令照旧说「还没有这份库，先跑一次 `scan`」 | **活** | `Q523` 追认过「另外六处留着」，`Site::open` 现在会说读不动了（`Q614`）——可这六处**在它之前**就返回了，命令行上「打开现场说读不动」那一条只走得到不经预问的那两条路。要不要把六处换成 `try_exists`（失败就交给 `Site::open` 那一句），得由拿主意的人把 `Q523` 那条追认翻过来；谁来裁：拿主意的人 |

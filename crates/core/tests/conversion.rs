@@ -448,6 +448,7 @@ fn 内置_fat32_档案对一份_4_5_gib_的镜像判放不下() {
             mtime_ns: Some(1),
         },
         variant: "库/PS2/某作.iso".to_string(),
+        work: None,
         convert: None,
     });
     desired.screen(&fat32, 0);

@@ -605,8 +605,9 @@ pub struct Screen {
     rules: Option<Rules>,
     /// 剥离规则读不动时那句话。
     rules_error: Option<String>,
-    /// 「今天」：平台表判「陈旧」用（`Claim::is_stale`）。`None` 是照系统时钟（`capability::today`）；截图测试钉死它
-    /// （[`Self::set_today`]），截图里才没有当前日期。
+    /// 「今天」：平台表判「陈旧」（`Claim::is_stale`）与排计划判「这份能力档案超过半年没核实」
+    /// （`Request::today`，票 `core-answers-once/14`）都用它。`None` 是照系统时钟（`capability::today`）；
+    /// 截图测试钉死它（[`Self::set_today`]），截图里才没有当前日期、也不会到了某一天凭空多出一行。
     today: Option<String>,
     /// 这一台选择集在眼下挑的档案（叠上覆盖）下**放不下哪几份**：档案名、覆盖、结果（`Footprint::too_big`）。
     /// 纯算，但与选择集一样大——只在档案或覆盖变了时重算。
@@ -1374,21 +1375,29 @@ impl Screen {
         // **「补回」是排它那一刻定下的**：那份计划此后怎么被看都改不了它，屏上那个勾
         // 改一下就得重排一趟（[`Self::set_restore_missing`]）。
         let restore_missing = self.restore_missing;
+        // **「今天」也跟着这一趟走**（票 `core-answers-once/14`，挂单 `Q1354`）：计划里「这份能力档案超过半年没核实」
+        // 那一条判的就是它。与平台表那一格是同一个「今天」（[`Self::set_today`]）：钉住一处，两处都钉住。
+        let today = self.today.clone();
         self.previewing = Some(match site.catalog.read_only() {
-            Ok(reader) => tasks.queue(caption, move |task| {
-                sync::prepare(
-                    &reader,
-                    &workspace,
-                    &name,
-                    &sync::Request {
-                        restore_missing,
-                        ..sync::Request::default()
-                    },
-                    task,
-                )
-                .map(|prepared| Product::Preview(Box::new(prepared)))
-                .map_err(Cutoff::from)
-            }),
+            Ok(reader) => {
+                // 这一趟排到任务台上、整份带走，于是另备一份给那个 `move`。
+                let today = today.clone();
+                tasks.queue(caption, move |task| {
+                    sync::prepare(
+                        &reader,
+                        &workspace,
+                        &name,
+                        &sync::Request {
+                            restore_missing,
+                            today: today.as_deref(),
+                            ..sync::Request::default()
+                        },
+                        task,
+                    )
+                    .map(|prepared| Product::Preview(Box::new(prepared)))
+                    .map_err(Cutoff::from)
+                })
+            }
             // **只活在内存里的库分不出第二份连接**（合成数据走这条），那是意料之中的：
             // 这一趟就地跑完，几毫秒的事。
             Err(CatalogError::NotOnDisk { .. }) => tasks.run_here(caption, |task| {
@@ -1398,6 +1407,7 @@ impl Screen {
                     &name,
                     &sync::Request {
                         restore_missing,
+                        today: today.as_deref(),
                         ..sync::Request::default()
                     },
                     task,
@@ -1990,7 +2000,8 @@ impl Screen {
         }
     }
 
-    /// 钉死平台表判「陈旧」用的「今天」（`YYYY-MM-DD`）：截图测试钉死它，截图里才没有当前日期。
+    /// 钉死「今天」（`YYYY-MM-DD`）：平台表判「陈旧」与排计划判「超过半年没核实」都照它（票 `core-answers-once/14`）。
+    /// 截图测试钉死它，截图里才没有当前日期，也不会到了某一天凭空多出一行。
     pub fn set_today(&mut self, today: &str) {
         self.today = Some(today.to_string());
     }
@@ -2860,15 +2871,15 @@ impl Screen {
             // **处置它的那条路在浏览屏上**（票 `gui-redesign/14`，挂单 `Q86`）：筛选器摆的是一棵
             // 读得懂的树，一条读不回来的原文在那儿没有位置，所以它跟着「从浏览添加…」或「✎」那一趟整条带过去，
             // 摆在**筛选栏顶上**那条横幅里逐条扔。
+            //
+            // **悬停里那句终端命令删了**（票 `core-answers-once/13`）：它从前写着「命令行那条路也还在：
+            // `romcat sublibrary rule <子库> --remove <序号>`」。去处就在这一行自己指的那一处，
+            // 再兼一个命令行指路是把「这件事界面做不到」写上了屏（ADR-0023 修订段）。
             ui.weak(format!(
                 "读不懂的这 {} 条要扔掉：按上面「从浏览添加…」跳去浏览屏，\
                  筛选栏顶上那条横幅里逐条扔得掉。改对了再来一条，走那儿的筛选器。",
                 broken.len(),
-            ))
-            .on_hover_text(
-                "命令行那条路也还在：`romcat sublibrary rule <子库> --remove <序号>`，\
-                 序号就是上面印着的那个。",
-            );
+            ));
         }
         let Some(report) = report else {
             return 按了;
@@ -3781,13 +3792,17 @@ fn concerns_ui(ui: &mut egui::Ui, prepared: &Prepared) {
             ),
         );
         for row in plan.unsupported.iter().take(TOP_NOTES) {
+            // 悬停里那句只说**事实**（`capability::UnsupportedReason` 的 `Display`）：从前它带着
+            // 「（`romcat scan --zst`）」与「`romcat report` 说得出它卡在哪一类」。那两件事
+            // 界面上今天都没有落点（库屏扫描没有「读 zst」——挂单 `Q1797`；库体检屏没有
+            // 「透明容器：内部构成」那一节——挂单 `Q1798`），所以**不编一个去处**。
             ui.label(format!(
                 "{}｜{}｜要的是 {}",
                 row.path,
                 human_bytes(row.bytes),
                 row.want
             ))
-            .on_hover_text(&row.why);
+            .on_hover_text(row.why.to_string());
         }
         if plan.unsupported.len() > TOP_NOTES {
             ui.weak(format!(
@@ -4464,20 +4479,25 @@ impl Screen {
                 ui.add_space(step(2));
                 look::impact(
                     ui,
+                    None,
                     &[
-                        ("设备上已经同步的文件", false),
-                        ("不会删除", true),
-                        ("。删除后它们成为清单外的文件，工具不再管理。", false),
+                        look::ImpactPart::plain("设备上已经同步的文件"),
+                        look::ImpactPart::strong("不会删除"),
+                        look::ImpactPart::plain("。删除后它们成为清单外的文件，工具不再管理。"),
                     ],
                 );
                 look::impact(
                     ui,
-                    &[(
+                    None,
+                    &[look::ImpactPart::plain(
                         "如果想同时清空设备：先移除全部规则并同步一次，再删除子库。",
-                        false,
                     )],
                 );
-                look::impact(ui, &[("主库和元数据不受影响。", false)]);
+                look::impact(
+                    ui,
+                    None,
+                    &[look::ImpactPart::plain("主库和元数据不受影响。")],
+                );
                 if let Some((picked, bytes)) = picked {
                     ui.add_space(step(2));
                     look::help(
@@ -4639,33 +4659,32 @@ impl Screen {
                 "收回之后清单记下设备上眼下这一份，差量预览不再把它们列进「{}」。",
                 SurpriseKind::Changed.shown()
             );
-            look::impact(ui, &[(不再列进.as_str(), false)]);
-            look::impact_warn(
+            look::impact(ui, None, &[look::ImpactPart::plain(不再列进.as_str())]);
+            look::impact(
                 ui,
+                Some(look::Tone::Caution),
                 &[
-                    ("工具此后有权更新或删除它们", true),
-                    ("：主库那一份变了就用它覆盖，选择集不要了就删掉。", false),
+                    look::ImpactPart::strong("工具此后有权更新或删除它们"),
+                    look::ImpactPart::plain("：主库那一份变了就用它覆盖，选择集不要了就删掉。"),
                 ],
             );
             let 不要了 = ask.files.iter().filter(|file| !file.still_wanted).count();
             if 不要了 > 0 {
-                look::impact_warn(
+                look::impact(
                     ui,
-                    &[(
-                        &format!(
-                            "其中 {} 份选择集已经不要了：收回之后下一趟同步会删掉它们。",
-                            thousands(不要了 as u64)
-                        ),
-                        false,
-                    )],
+                    Some(look::Tone::Caution),
+                    &[look::ImpactPart::plain(&format!(
+                        "其中 {} 份选择集已经不要了：收回之后下一趟同步会删掉它们。",
+                        thousands(不要了 as u64)
+                    ))],
                 );
             }
             look::impact(
                 ui,
-                &[(
+                None,
+                &[look::ImpactPart::plain(
                     "这一下只改清单，并在沉淀库里记一笔审计（谁、何时、哪几份）；\
                      设备上的文件与主库一个字节都不动。",
-                    false,
                 )],
             );
         });
@@ -4777,9 +4796,17 @@ impl Screen {
                     ),
                     None => "移除之后选中的变体会变；少多少，按「算一遍容量」之后才看得见。".to_string(),
                 };
-                look::impact(ui, &[(会怎样.as_str(), false)]);
-                look::impact(ui, &[("排过的差量预览跟着作废，同步前要重新生成。", false)]);
-                look::impact(ui, &[("设备上的文件与主库都不受影响。", false)]);
+                look::impact(ui, None, &[look::ImpactPart::plain(会怎样.as_str())]);
+                look::impact(
+                    ui,
+                    None,
+                    &[look::ImpactPart::plain("排过的差量预览跟着作废，同步前要重新生成。")],
+                );
+                look::impact(
+                    ui,
+                    None,
+                    &[look::ImpactPart::plain("设备上的文件与主库都不受影响。")],
+                );
             });
         match shown.pressed {
             None => {}
@@ -6446,7 +6473,22 @@ fn trim_ui(ui: &mut egui::Ui, room: &Room) -> Option<String> {
                         None,
                         宽,
                         |ui| {
-                            ui.add(egui::Label::new(等宽(trim.variant.clone())).truncate());
+                            // 稿 `.trim` 那一行：**作品名**在前、平台在后，变体的键当副行。
+                            // 名字与平台都是**核心库说的**（[`romcat_core::sublibrary::Trim`]，
+                            // `Catalog::trim_names` 取的：认出作品的取作品名，认不出的取正题），
+                            // 这儿不凑「这个变体叫什么」（ADR-0024、挂单 `Q852`）。
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Label::new(font::strong(trim.title.clone())));
+                                let 副行 = match trim.platform.as_deref() {
+                                    Some(platform) => format!("{platform} · {}", trim.variant),
+                                    None => trim.variant.clone(),
+                                };
+                                ui.add(egui::Label::new(等宽(副行).weak()).truncate())
+                                    .on_hover_text(format!(
+                                        "{}\n变体的键：{}",
+                                        trim.title, trim.variant
+                                    ));
+                            });
                         },
                         |ui| {
                             ui.label(数目(human_bytes(trim.bytes)));
@@ -6477,8 +6519,8 @@ fn trim_ui(ui: &mut egui::Ui, room: &Room) -> Option<String> {
                         宽,
                         |ui| {
                             ui.colored_label(放下字, "排除到这一项就能放下").on_hover_text(
-                                "照计划器记的账估的：作品共用的媒体记在头一个变体名下，同一作品还有\
-                                 别的变体留着时，排除它未必省下那几份。按下「排除」之后会当场重算。",
+                                "照着上面这张表从上往下排除算出来的准数：作品共用的媒体（封面、截图）\
+                                 要那个作品的变体全都排除才算腾出，不计在头一个变体名下。",
                             );
                         },
                         |_| {},

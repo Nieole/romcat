@@ -11,16 +11,22 @@
 //! 交出来的原话，界面一个字都不改写——两处各写一套措辞，人在终端里看见的与在界面上
 //! 看见的迟早分家。
 //!
-//! ## 那三个数为什么盘没挂上也在
+//! **每一份中立库是四态**（ADR-0021 那条再修订，挂单 `Q613`）：开得了 ／ 结构版本对不上 ／
+//! **读不动** ／ 文件坏了。这四种的下一步各不相同（重扫、删掉重扫、去修权限或关掉占着它的
+//! 程序、删掉重扫），于是这一屏得把它们画得认得出不同——哪一份是哪一态由核心库判
+//! （[`workspace::CatalogState`]），这儿只挑一枚标签与那一句话。
 //!
-//! **主库原名**、变体数、上次扫描时刻全住在**中立库**里，不在主库上（ADR-0009）。外置盘
+//! ## 那四个数为什么盘没挂上也在
+//!
+//! **主库原名**、根数、变体数、上次扫描时刻全住在**中立库**里，不在主库上（ADR-0009）。外置盘
 //! 不常挂载（ADR-0018 的双机工作流），而开场正是盘不在位时最常看见的那一屏。
 //!
 //! ## 版式
 //!
 //! 照设计稿（`.scratch/gui-looks-like-the-design/prototype.html` 的 `#opening`）：**左栏**一句话
 //! 讲清这个工具做什么，外加三条承诺；**右栏**是工作目录，底下按三态画——有库一份一行、空的一张
-//! 卡片只摆一个主要操作（添加主库）、读不动只画核心库那句原话。添加主库那条向导是一层弹层，
+//! 卡片只摆一个主要操作（添加主库）、整个目录列不开时只画核心库那句原话（那与「里头某一份库读
+//! 不动」是两件事：前者连有哪几份都说不上来）。添加主库那条向导是一层弹层，
 //! **盖在这一屏上**，底下两栏照常画（挂单 `Q667`：遮罩挡着点击）。尺寸、间距、颜色全取令牌。
 
 use std::path::{Path, PathBuf};
@@ -561,6 +567,12 @@ fn row_ui(ui: &mut egui::Ui, 一份: &CatalogEntry, 主按钮: bool) -> bool {
                                 CatalogState::SchemaMismatch { .. } => {
                                     look::chip(ui, Tone::Caution, "版本不兼容");
                                 }
+                                // **四态的第四支在这里上屏**（ADR-0021 那条再修订）：它既不是
+                                // 「开不了」（文件坏了）也不是「版本不兼容」，那一枚标签说得出
+                                // 差别，人才不会把一份只是被锁着的库删掉重扫。
+                                CatalogState::Unreadable { .. } => {
+                                    look::chip(ui, Tone::Caution, "读不动");
+                                }
                                 CatalogState::Broken { .. } => {
                                     look::chip(ui, Tone::Caution, "打不开");
                                 }
@@ -569,9 +581,13 @@ fn row_ui(ui: &mut egui::Ui, 一份: &CatalogEntry, 主按钮: bool) -> bool {
                         });
                         match &一份.state {
                             CatalogState::Openable(Ok(facts)) => {
+                                // 稿上那一行是「2 个根 · {变体数} 个变体 · 上次扫描 …」（变体数是真库
+                                // 那个量级，见台账 `docs/library-facts.md`）：根在最前，人先看得出
+                                // 这份库横跨几块盘（挂单 `Q764`）。
                                 ui.label(
                                     egui::RichText::new(format!(
-                                        "{} 个变体 · {}",
+                                        "{} 个根 · {} 个变体 · {}",
+                                        thousands(facts.roots),
                                         thousands(facts.variants),
                                         facts.scanned_at.map_or_else(
                                             || "还没扫过".to_string(),
@@ -582,10 +598,20 @@ fn row_ui(ui: &mut egui::Ui, 一份: &CatalogEntry, 主按钮: bool) -> bool {
                                     .weak(),
                                 );
                             }
-                            // 核心库那句话原样画出来：它自己就说清了是哪个版本对哪个版本、
-                            // 该怎么办。
+                            // **版本对不上：这一行只印短话，细节挂在悬停里**（挂单 `Q841`）。
+                            // 从前那一句是五个分句的长话，在这张卡里折成六行，比别的行高出一大截。
+                            CatalogState::SchemaMismatch {
+                                said: 说的,
+                                details,
+                                ..
+                            } => {
+                                ui.label(egui::RichText::new(说的).small().color(提醒))
+                                    .on_hover_text(*details);
+                            }
+                            // 读不动与文件坏了那两句照印：前一句自己带着下一步（去修权限，或者关掉
+                            // 占用它的程序），后一句是核心库原话、判不准的也归它。
                             CatalogState::Openable(Err(说的))
-                            | CatalogState::SchemaMismatch { said: 说的, .. }
+                            | CatalogState::Unreadable { said: 说的 }
                             | CatalogState::Broken { said: 说的 } => {
                                 ui.label(egui::RichText::new(说的).small().color(提醒));
                             }

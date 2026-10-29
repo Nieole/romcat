@@ -979,6 +979,11 @@ struct Run {
     sha1_only: u64,
     /// 这一轮探出来的卡带事实，攒够一批写一次。
     carts: Vec<CartFactRow>,
+    /// 这一趟判的**落点平台**（变体的键 → 平台），攒够一批写一次。
+    ///
+    /// **与结论分开攒**：裁决落成的结论不判平台（`Projector::project` 交的是 `platform: None`），
+    /// 跟在一起写的话，人裁完一条就把识别判的那个落点盖没了（`Catalog::put_placements`）。
+    placements: Vec<(String, String)>,
     /// Switch 那一层这一趟干了什么（票 27）。
     switch: switch::Found,
     /// 靠 Switch 那一层才认出来的变体数（前面几层一条候选都没有）。
@@ -1043,6 +1048,11 @@ fn flush(
     state.switches.clear();
     catalog.write_identifications(batch)?;
     batch.clear();
+    // **落点平台排在结论之后**：它是往 `identification` 那一行上写一列，先把结论插进去。
+    // 与结论分开写是因为**裁决落成的结论不判平台**（`Projector::project` 交的是 `platform: None`）
+    // ——拿一条不带平台的结论去盖，人裁完一条，识别判的落点平台就跟着没了。
+    catalog.put_placements(&state.placements)?;
+    state.placements.clear();
     Ok(())
 }
 
@@ -1098,7 +1108,7 @@ fn identify_variant(
             variant_key: variant.key.clone(),
             state: State::Skipped,
             reason: Some(skip.recorded()),
-            platform: platform_of(variant, &units, state),
+            platform: judge_platforms(state, variant, &units).identified,
             standalone: skip.standalone(),
             // **识别这一层不说第几版**：那只有人说得出（ADR-0008），走裁决那条路。
             edition: None,
@@ -1397,7 +1407,7 @@ fn settle_after_verdict(
     // （[`ask_verdicts`] 不判它），退回目录声明的那个也是这一处。
     let carted = probe_carts(library, catalog, options, variant, units, state)?;
     record.read_bytes += carted.read_bytes;
-    record.platform = platform_of(variant, units, state);
+    record.platform = judge_platforms(state, variant, units).identified;
 
     // 二、能不能独立运行：Switch 容器头。
     if record.standalone.is_some() || !units.iter().any(|unit| switch::by_name(&unit.name)) {
@@ -1477,10 +1487,7 @@ fn collect(
                     }
                     None => {
                         visible.saw_inside = false;
-                        format!(
-                            "{} 穿不透，而这一趟没为它付全量解压的代价（`romcat scan --zst`）",
-                            kind.label()
-                        )
+                        format!("{} 穿不透，而这一趟{NOT_READ_NOTE}", kind.label())
                     }
                 };
                 units.push(blocked_unit(key, "", reason, true));
@@ -1999,6 +2006,15 @@ pub const VERDICT_DAT: &str = "本机裁决";
 /// 它落在 `reason` 而不是另立一个状态，是因为**结论本身没有变**——它照旧是未命中或
 /// 无判据，变的只是「为什么还停在这儿」，而那正是这一列装的东西。
 pub const VERDICT_UNKNOWN_REASON: &str = "裁决：都不对，而且认不出是什么";
+
+/// **「这一趟没为它付全量解压的代价」**——`zst` 默认不读（ADR-0014）那句理由里的那一截。
+///
+/// 它是理由里的一段，也是命令行认得出「该补哪一条命令」的那一处：两个壳问的是**同一个常量**，
+/// 谁也不去认一句话的字（ADR-0024）。从前这一截后面还缀着「（`romcat scan --zst`）」，而那句话
+/// 被界面原样画在侧边详情「为什么没定下来」那一行上（票 `core-answers-once/13`）。
+///
+/// 界面上**没有落点**：库屏的扫描没有「读 zst」这一项（挂单 `Q1797`）；命令由命令行补。
+pub const NOT_READ_NOTE: &str = "没为它付全量解压的代价";
 
 /// 一个变体拿得到的**内容判据**：第一命中层那一套（含头的 CRC-32 加大小）。
 ///
@@ -3279,10 +3295,11 @@ fn assemble(
     }
     scored.append(from_serial);
 
-    // **按哪个平台算**在这儿问一次（[`platform_of`]）：文件名那一层拿它挑中文条目、排序拿它
+    // **按哪个平台算**在这儿问一次（[`judge_platforms`]）：文件名那一层拿它挑中文条目、排序拿它
     // 论「平台对得上」、结论把它落库，三处是同一个答案。排序那一处从前比的是目录声明的
     // 那个——放错目录的卡在「平台对得上」那一档反而听目录的（票 `core-answers-once/02`）。
-    let 按哪个平台算 = platform_of(variant, units, state);
+    let 平台 = judge_platforms(state, variant, units);
+    let 按哪个平台算 = 平台.identified.clone();
 
     // ⭐ **文件名那一层**（票 11）：前面几层一条**自动通过**的候选都没有时才跑。
     //
@@ -3461,7 +3478,7 @@ fn assemble(
         reason,
         // 判出来的平台**落下来**：刮削读它，不再拿目录那一列判一次（票
         // `one-criterion-per-thing/03`）。
-        platform: 按哪个平台算,
+        platform: 平台.identified,
         // **识别这一层不说第几版**：自动识别只保证做到发行版级（ADR-0008），
         // 而「这是谁汉化的第几版」只有人说得出——它走裁决那条路（`Projector::project`）。
         // 发行版那一层的**修订**不在这儿：那是 DAT 条目名里的事实，落在 `release.revision`。
@@ -3477,37 +3494,65 @@ fn assemble(
     })
 }
 
-/// 平台交叉校验拿哪一个平台去校。
+/// 一个变体的一对平台说法：上面那一问的两条结论（`fn platform_of` 是判断本身）。
+struct Platforms {
+    /// 识别判定的平台（刮削交叉校验、两份报告按它分组）。
+    identified: Option<String>,
+    /// 落点平台（导出与同步把它放到哪个平台）。
+    placement: Option<String>,
+}
+
+/// 一个变体的一对平台说法（词表**平台**条）：**识别判定的平台**与**落点平台**。
 ///
-/// **一条回退链，三层**：
+/// **两个都由同一个决定打头**：**平台纠正**里定过的那一组（票 `gui-looks-like-the-design/28`）
+/// ——「按内容改」就按内容说的那个算，「保持目录的说法」就按目录那个算。人一条条看出来的
+/// 判断压得过工具猜出来的，与[[第几版]]那条回退链同一个形状。之后两条分道：
 ///
-/// 1. **人说了的听人说的**——**平台纠正**里定过的那一组（票 `gui-looks-like-the-design/28`）。
-///    「按内容改」就按内容说的那个算，「保持目录的说法」就按目录那个算。人一条条看出来的
-///    判断压得过工具猜出来的，与[[第几版]]那条回退链同一个形状。
-/// 2. **内容说的那个**：卡带内部头读出来的平台是从字节里来的，而目录只是强先验
-///    （ADR-0011：目录声明必须能被文件内容推翻）。真库里 `psp/` 目录下混着整包的
-///    FC / GB / SFC ROM——按目录判，它们的中文名会被整批判成「平台对不上」而一条不产出。
-/// 3. 头读不出来（没探过、不是卡带、光盘世代）才退回**目录声明**的那一个。
+/// - **识别判定的平台**再看**内容说的那个**：卡带内部头读出来的平台是从字节里来的，而目录只是
+///   强先验（ADR-0011：目录声明必须能被文件内容推翻）。真库里 `psp/` 目录下混着整包的 FC /
+///   GB / SFC ROM——按目录判，它们的中文名会被整批判成「平台对不上」而一条不产出。头读不出来
+///   （没探过、不是卡带、光盘世代）才退回**目录声明**的那一个。
+/// - **落点平台**（票 `core-answers-once/03`）没有纠正时直接退回**目录声明**：卡带头与目录的
+///   分歧只在库体检里报，**不自动搬家**（ADR-0011）。
 ///
-/// **判断只有这一处，结论落进中立库**（`identification.platform`，票
-/// `one-criterion-per-thing/03`）：刮削读那一列，不自己拿目录声明再判一次（ADR-0024 推论 3）。
-/// 「这个变体撞上了平台纠正的哪一组」同样不在这儿另判，问的是
+/// **判断只有这一处，两条结论各落进中立库的一列**（`identification.platform` /
+/// `identification.placement`，ADR-0024 推论 3）：刮削、两份报告、导出与同步读那两列，
+/// 不自己拿目录声明再判一次。「这个变体撞上了平台纠正的哪一组」同样不在这儿另判，问的是
 /// [`conflicting_platform`] 那一处（[`DecidedPlatforms::decide`]）。
-fn platform_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Option<String> {
-    if let Some(fixes) = &state.decided_platforms
-        && let Some(decided) = fixes.decide(&state.manifest, variant, units)
-    {
-        return Some(decided);
+fn platform_of(variant: &VariantRow, units: &[ContentUnit], state: &Run) -> Platforms {
+    let decided = state
+        .decided_platforms
+        .as_ref()
+        .and_then(|fixes| fixes.decide(&state.manifest, variant, units));
+    let identified = decided.clone().or_else(|| {
+        units
+            .iter()
+            .find_map(|unit| {
+                unit.cart
+                    .as_ref()
+                    .and_then(|facts| facts.platform.as_deref())
+            })
+            .map(ToString::to_string)
+    });
+    Platforms {
+        identified: identified.or_else(|| variant.platform.clone()),
+        placement: decided.or_else(|| variant.platform.clone()),
     }
-    units
-        .iter()
-        .find_map(|unit| {
-            unit.cart
-                .as_ref()
-                .and_then(|facts| facts.platform.as_deref())
-        })
-        .or(variant.platform.as_deref())
-        .map(ToString::to_string)
+}
+
+/// 判这个变体的一对平台说法，并把**落点平台**记进这一趟要落库的那一栏
+/// （[`Run::placements`]）。
+///
+/// 一句话干两件事而不是两处各问一遍：两个答案来自**同一个决定**（[`platform_of`] 那种对说法，
+/// ADR-0024 不许第二处判），分两处问就是两遍。
+fn judge_platforms(state: &mut Run, variant: &VariantRow, units: &[ContentUnit]) -> Platforms {
+    let platforms = platform_of(variant, units, state);
+    if let Some(placement) = &platforms.placement {
+        state
+            .placements
+            .push((variant.key.clone(), placement.clone()));
+    }
+    platforms
 }
 
 /// 这个变体拿哪几个名字去撞文件名那一层。
@@ -4058,6 +4103,15 @@ mod tests {
         }
     }
 
+    /// 这个变体**识别判定的平台**（[`platform_of`] 那一问的两个答案里的一个）。
+    fn 识别判定的平台(
+        variant: &VariantRow,
+        units: &[ContentUnit],
+        state: &Run,
+    ) -> Option<String> {
+        platform_of(variant, units, state).identified
+    }
+
     #[test]
     fn 平台交叉校验先听内容的再听目录的() {
         // ADR-0011：目录声明必须能被文件内容推翻。真库里 `psp/` 目录下混着整包的
@@ -4065,7 +4119,7 @@ mod tests {
         let variant = 变体("psp/整理包/超级马里奥.zip", Some("PSP"));
         let units = vec![一份内容("psp/整理包/超级马里奥.zip", Some("FC"))];
         assert_eq!(
-            platform_of(&variant, &units, &没纠正过()).as_deref(),
+            识别判定的平台(&variant, &units, &没纠正过()).as_deref(),
             Some("FC")
         );
     }
@@ -4075,12 +4129,12 @@ mod tests {
         let variant = 变体("PSV/游戏.7z", Some("PSV"));
         let units = vec![一份内容("PSV/游戏.7z", None)];
         assert_eq!(
-            platform_of(&variant, &units, &没纠正过()).as_deref(),
+            识别判定的平台(&variant, &units, &没纠正过()).as_deref(),
             Some("PSV")
         );
         // 连目录都说不出时就是说不出——那一道校验会记成「说不出」，不许当成「对得上」。
         assert_eq!(
-            platform_of(&变体("游戏.7z", None), &units, &没纠正过()),
+            识别判定的平台(&变体("游戏.7z", None), &units, &没纠正过()),
             None
         );
     }
@@ -4092,13 +4146,13 @@ mod tests {
         let variant = 变体("GBA/汉化/逆转裁判4.nds", Some("GBA"));
         let units = vec![一份内容("GBA/汉化/逆转裁判4.nds", None)];
         assert_eq!(
-            platform_of(&variant, &units, &没纠正过()).as_deref(),
+            识别判定的平台(&variant, &units, &没纠正过()).as_deref(),
             Some("GBA"),
             "没人定过的时候照旧退回目录说的那个"
         );
         let 定过 = 纠正过(&[("GBA", "NDS", PlatformDecision::ByContent)]);
         assert_eq!(
-            platform_of(&variant, &units, &定过).as_deref(),
+            识别判定的平台(&variant, &units, &定过).as_deref(),
             Some("NDS"),
             "人说按内容改，就按内容说的那个算"
         );
@@ -4111,13 +4165,13 @@ mod tests {
         let variant = 变体("3DS/合集/雷顿教授.nds", Some("3DS"));
         let units = vec![一份内容("3DS/合集/雷顿教授.nds", Some("NDS"))];
         assert_eq!(
-            platform_of(&variant, &units, &没纠正过()).as_deref(),
+            识别判定的平台(&variant, &units, &没纠正过()).as_deref(),
             Some("NDS"),
             "没人定过的时候内容说了算"
         );
         let 定过 = 纠正过(&[("3DS", "NDS", PlatformDecision::KeepDeclared)]);
         assert_eq!(
-            platform_of(&variant, &units, &定过).as_deref(),
+            识别判定的平台(&variant, &units, &定过).as_deref(),
             Some("3DS"),
             "人说保持目录的说法，就按目录那个算"
         );
@@ -4129,7 +4183,7 @@ mod tests {
         let units = vec![一份内容("GBA/汉化/逆转裁判4.nds", None)];
         let 定过别的组 = 纠正过(&[("FC", "FDS", PlatformDecision::ByContent)]);
         assert_eq!(
-            platform_of(&variant, &units, &定过别的组).as_deref(),
+            识别判定的平台(&variant, &units, &定过别的组).as_deref(),
             Some("GBA"),
             "一组一个决定，别的组一个字都不受影响"
         );
@@ -4137,7 +4191,7 @@ mod tests {
         let 说不准 = 变体("GBA/汉化/逆转裁判4.zip", Some("GBA"));
         let 说不准的内容 = vec![一份内容("GBA/汉化/逆转裁判4.zip", None)];
         assert_eq!(
-            platform_of(
+            识别判定的平台(
                 &说不准,
                 &说不准的内容,
                 &纠正过(&[("GBA", "NDS", PlatformDecision::ByContent)])
@@ -4157,7 +4211,7 @@ mod tests {
         unit.in_container = true;
         let 定过 = 纠正过(&[("GBA", "NDS", PlatformDecision::ByContent)]);
         assert_eq!(
-            platform_of(&variant, &[unit], &定过).as_deref(),
+            识别判定的平台(&variant, &[unit], &定过).as_deref(),
             Some("NDS")
         );
     }

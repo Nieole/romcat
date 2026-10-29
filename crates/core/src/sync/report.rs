@@ -510,7 +510,8 @@ impl Plan {
                         "  {}{}{}",
                         pad(&human_bytes(trim.bytes), 12),
                         pad(&human_bytes(trim.cumulative), 12),
-                        trim.variant,
+                        // 与 `sublibrary show` 那一份同一行写法：作品名与平台在上、变体的键在下。
+                        crate::sublibrary::trim_line(trim),
                     );
                 }
                 if let Some(last) = self.trim_suggestions.last()
@@ -771,6 +772,7 @@ mod tests {
                     mtime_ns: Some(1),
                 },
                 variant: "GB/一.zip".to_string(),
+                work: None,
                 convert: None,
             }],
             ..Desired::default()
@@ -819,6 +821,7 @@ mod tests {
                     mtime_ns: Some(1),
                 },
                 variant: "库/GB/tetris.zip".to_string(),
+                work: None,
                 convert: None,
             }],
             ..Desired::default()

@@ -303,6 +303,9 @@ pub struct Wizard {
     impact: Option<merge::Impact>,
     /// 排好的计划。
     planned: Option<merge::Regrouping>,
+    /// **平台清单**：第二步组头上那个平台全名问它（开窗那一刻挑好的那一份，挂单 `Q1031`）。
+    /// 与浏览屏那一份同一份，向导开的时候拿过来。
+    manifest: romcat_core::platform::Manifest,
     /// 这一层自己那句错。
     error: Option<String>,
 }
@@ -341,6 +344,7 @@ impl Wizard {
         query: &WorkQuery,
         rules: &Rules,
         priorities: &Priorities,
+        manifest: &romcat_core::platform::Manifest,
         anchors: &[WorkAnchor],
     ) -> Self {
         let mut rows = Vec::new();
@@ -376,6 +380,7 @@ impl Wizard {
             picks: BTreeMap::new(),
             impact: None,
             planned: None,
+            manifest: manifest.clone(),
             error,
         }
     }
@@ -957,8 +962,11 @@ impl Wizard {
                             ui.horizontal(|ui| {
                                 super::work::platform_chip(ui, &platform);
                                 ui.label(
-                                    font::strong(super::work::platform_full_name(&platform))
-                                        .color(look::palette(ui).ink),
+                                    font::strong(super::work::platform_full_name(
+                                        &self.manifest,
+                                        &platform,
+                                    ))
+                                    .color(look::palette(ui).ink),
                                 );
                                 look::help(ui, &format!("{} 个变体", thousands(还剩 as u64)));
                             });
@@ -1070,63 +1078,62 @@ impl Wizard {
         };
         look::impact(
             ui,
+            None,
             &[
-                ("写入 ", false),
-                (&format!("{} 条裁决", thousands(impact.verdicts)), true),
-                (
-                    &format!(
-                        "：每个归入的变体一条，发行版信息不变，只把作品改为「{保留的}」。\
-                         裁决按文件内容记录，改名或移动文件后仍然有效。"
-                    ),
-                    false,
-                ),
+                look::ImpactPart::plain("写入 "),
+                look::ImpactPart::strong(&format!("{} 条裁决", thousands(impact.verdicts))),
+                look::ImpactPart::plain(&format!(
+                    "：每个归入的变体一条，发行版信息不变，只把作品改为「{保留的}」。\
+                     裁决按文件内容记录，改名或移动文件后仍然有效。"
+                )),
             ],
         );
         look::impact(
             ui,
+            None,
             &[
-                ("前端条目 ", false),
-                (
-                    &format!(
-                        "{} → {}",
-                        thousands(impact.entries_before),
-                        thousands(impact.entries_after)
-                    ),
-                    true,
-                ),
-                (
-                    "：下次导出时合并为一个条目，默认启动各平台的首选变体。",
-                    false,
-                ),
+                look::ImpactPart::plain("前端条目 "),
+                look::ImpactPart::strong(&format!(
+                    "{} → {}",
+                    thousands(impact.entries_before),
+                    thousands(impact.entries_after)
+                )),
+                look::ImpactPart::plain("：下次导出时合并为一个条目，默认启动各平台的首选变体。"),
             ],
         );
         if !impact.sublibraries.is_empty() {
-            look::impact_warn(
+            look::impact(
                 ui,
+                Some(look::Tone::Caution),
                 &[
-                    (
-                        &format!("子库「{}」", impact.sublibraries.join("」「")),
-                        true,
-                    ),
-                    (
+                    look::ImpactPart::strong(&format!(
+                        "子库「{}」",
+                        impact.sublibraries.join("」「")
+                    )),
+                    look::ImpactPart::plain(
                         "的选择集不变，但前端条目会变化，同步前需要重新生成差量预览。",
-                        false,
                     ),
                 ],
             );
         }
-        look::impact(ui, &[("收藏、合集和手动修改过的元数据不受影响。", false)]);
+        look::impact(
+            ui,
+            None,
+            &[look::ImpactPart::plain(
+                "收藏、合集和手动修改过的元数据不受影响。",
+            )],
+        );
         // **撤得回哪几样要说全**：批只装沉淀库的裁决，别名、字段选值与首选变体是另外三笔
         // 中立库的账（挂单 `Q1012`）。稿上那句只说「可以整批撤销」。
         look::impact(
             ui,
+            None,
             &[
-                ("可以在「待确认 → 裁决记录」中", false),
-                ("整批撤销", true),
-                (
+                look::ImpactPart::plain("可以在「待确认 → 裁决记录」中"),
+                look::ImpactPart::strong("整批撤销"),
+                look::ImpactPart::plain(
                     "，变体回到原来的作品。别名、上面选的字段值与首选变体不跟着撤，\
                      在作品详情页里各自撤得掉。",
-                    false,
                 ),
             ],
         );
@@ -1971,16 +1978,14 @@ impl Split {
         let 去 = self.target_title().unwrap_or_else(|| "…".to_string());
         look::impact(
             ui,
+            None,
             &[
-                ("写入 ", false),
-                ("1 条裁决", true),
-                (
-                    &format!(
-                        "：把这个变体的作品改为「{去}」，发行版信息不变。\
-                         裁决按文件内容记录，文件改名或移动后仍然有效。"
-                    ),
-                    false,
-                ),
+                look::ImpactPart::plain("写入 "),
+                look::ImpactPart::strong("1 条裁决"),
+                look::ImpactPart::plain(&format!(
+                    "：把这个变体的作品改为「{去}」，发行版信息不变。\
+                     裁决按文件内容记录，文件改名或移动后仍然有效。"
+                )),
             ],
         );
         // 照稿 `DLG.split` 那一条：还剩几个 + 首选变体改成谁。
@@ -1996,23 +2001,28 @@ impl Split {
             ));
         }
         if self.left > 0 {
-            look::impact(ui, &[(&剩, false)]);
+            look::impact(ui, None, &[look::ImpactPart::plain(&剩)]);
         } else {
-            look::impact_warn(ui, &[(&剩, false)]);
+            look::impact(
+                ui,
+                Some(look::Tone::Caution),
+                &[look::ImpactPart::plain(&剩)],
+            );
         }
         look::impact(
             ui,
-            &[(
+            None,
+            &[look::ImpactPart::plain(
                 "收藏、合集按内容记录，跟着变体走；手动修改过的元数据留在原来的作品上。",
-                false,
             )],
         );
         look::impact(
             ui,
+            None,
             &[
-                ("可以在「待确认 → 裁决记录」中", false),
-                ("撤销", true),
-                ("，变体回到原来的作品。", false),
+                look::ImpactPart::plain("可以在「待确认 → 裁决记录」中"),
+                look::ImpactPart::strong("撤销"),
+                look::ImpactPart::plain("，变体回到原来的作品。"),
             ],
         );
     }

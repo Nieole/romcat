@@ -2161,37 +2161,57 @@ pub fn help(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(egui::RichText::new(text).small().weak())
 }
 
-/// 弹层里「会怎样」的一条（设计稿 `.impact li`）：行首一枚强调色圆点，后面一句半号字，`(字, 要不要强调)`
-/// 一段段接起来（稿上 `<b>` 那几个字是强调字）。
+/// 「会怎样」那一行里的一段字：要画的那一段，以及要不要强调（稿上 `<b>` 那几个字是强调字）。
+///
+/// 从前这儿是裸元组 `(&str, bool)`：两个参数挨着传，写颠倒了编译照过（同 `NewRelease` 那一类形状）。
+#[derive(Debug, Clone, Copy)]
+pub struct ImpactPart<'a> {
+    /// 这一段字。
+    pub text: &'a str,
+    /// 要不要强调。
+    pub strong: bool,
+}
+
+impl<'a> ImpactPart<'a> {
+    /// 平常的一段字。
+    #[must_use]
+    pub const fn plain(text: &'a str) -> Self {
+        Self {
+            text,
+            strong: false,
+        }
+    }
+
+    /// 强调的一段字（稿上 `<b>`）。
+    #[must_use]
+    pub const fn strong(text: &'a str) -> Self {
+        Self { text, strong: true }
+    }
+}
+
+/// 弹层里「会怎样」的一条（设计稿 `.impact li`）：行首一枚圆点，后面一句半号字，
+/// 一串 [`ImpactPart`] 接起来。
+///
+/// `tone` 给 `None` 就是寻常那一档（强调色圆点）；给 `Some` 就是那一档的令牌色——
+/// 稿上标 `warn` 的（`.impact li.warn`）拿 `Tone::Caution`，说的是「这一条会少东西」那几句。
 ///
 /// 圆点多大、那一列多宽取令牌 `impact-dot` / `impact-column`；圆点对齐头一行的中线，字折行时不跟着往下挪。
 ///
 /// **住在这一层而不是某一屏里**：子库屏那三处弹层（删子库、删规则、移出此作品）与库屏
 /// 「移除根」画的是同一种东西，一屏一份的话那枚圆点、那一列宽与那一档字号就会各漂各的。
-pub fn impact(ui: &mut egui::Ui, parts: &[(&str, bool)]) {
-    let color = ui.visuals().selection.stroke.color;
-    impact_row(ui, color, parts);
-}
-
-/// 同上，**留神那一档**（设计稿 `.impact li.warn`）：圆点换成令牌 `mid`。
-///
-/// 稿上标 `warn` 的是「这一条会少东西」那几句——移除根那一层里「从库中去掉多少变体」
-/// 与「哪台子库会少多少」用的就是它。
-pub fn impact_warn(ui: &mut egui::Ui, parts: &[(&str, bool)]) {
-    let color = tone_colors(Tone::Caution, ui.visuals()).0;
-    impact_row(ui, color, parts);
-}
-
-/// 画一条，圆点用交进来的那个颜色。
-fn impact_row(ui: &mut egui::Ui, dot_color: Color32, parts: &[(&str, bool)]) {
+pub fn impact(ui: &mut egui::Ui, tone: Option<Tone>, parts: &[ImpactPart<'_>]) {
+    let dot_color = match tone {
+        None => ui.visuals().selection.stroke.color,
+        Some(tone) => tone_colors(tone, ui.visuals()).0,
+    };
     let tokens = Tokens::builtin();
     let style = ui.style().clone();
     let mut job = egui::text::LayoutJob::default();
-    for (text, strong) in parts {
-        let rich = if *strong {
-            crate::font::strong(*text)
+    for part in parts {
+        let rich = if part.strong {
+            crate::font::strong(part.text)
         } else {
-            egui::RichText::new(*text)
+            egui::RichText::new(part.text)
         };
         rich.size(font_size(ui.ctx(), tokens.font.size_small_plus))
             .append_to(

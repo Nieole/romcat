@@ -43,7 +43,7 @@ fn 建库之前问得出会被拦下的那几样而且一个字节都不碰() {
     for 空的 in ["", "   "] {
         let 错 = Catalog::refuse_create(&新的(空的), 空的).expect_err("空白名字该拦下");
         assert!(
-            matches!(错, CatalogError::BlankLibraryName { .. }),
+            matches!(错, CatalogError::BlankLibraryName),
             "报的不是「名字是空白」那一句：{错:?}"
         );
     }
@@ -78,6 +78,45 @@ fn 建库之前问得出会被拦下的那几样而且一个字节都不碰() {
         1,
         "问了几遍，工作目录里却多出了库"
     );
+}
+
+#[test]
+fn 撞名与空名字那两句都说得出下一步() {
+    // 挂单 `Q615`：添加主库那条向导第一步拦下时说的是核心库原话，而原名里藏着两处毛病——
+    // 撞名那句只说「已经在了」，没告诉人下一步（换个名字，或者去开那一份）；空名字那句带着
+    // 一条**按空名字折出来的路径**（`catalog/-<哈希>.sqlite3` 那种怪东西），人只会以为自己
+    // 填错的是路径。
+    let 工作目录 = temp_dir("原名-两句新写法");
+    let 已有 = workspace::catalog_path(工作目录.path(), Slug::Named("主库"));
+    drop(Catalog::create(&已有, "主库").expect("能建中立库"));
+
+    // 撞名：下一步是「换个名字，或者去开那一份」。**不带命令**——界面原样画到屏上（ADR-0023）。
+    let 撞了 = Catalog::refuse_create(&已有, "主库").expect_err("撞名该拦下");
+    let 说的 = 撞了.to_string();
+    assert!(
+        说的.contains("换个名字") && 说的.contains("去开那一份"),
+        "撞名那句没说出下一步：{说的}"
+    );
+    assert!(
+        !说的.contains("romcat "),
+        "核心库那句拒绝话里带着命令行命令：{说的}"
+    );
+
+    // 空名字：那句话里没有一条按空名字折出来的路径。
+    let 空 = workspace::catalog_path(工作目录.path(), Slug::Named(""));
+    let 错 = Catalog::refuse_create(&空, "   ").expect_err("空白名字该拦下");
+    let 说的 = 错.to_string();
+    assert!(说的.contains("空白"), "空名字那句没说是空白：{说的}");
+    for 不该有 in [
+        ".sqlite3".to_string(),
+        "catalog".to_string(),
+        romcat_core::path::display(&空),
+    ] {
+        assert!(
+            !说的.contains(&不该有),
+            "空名字那句里带着一条按空名字折出来的路径（{不该有}）：{说的}"
+        );
+    }
 }
 
 #[test]
@@ -432,7 +471,7 @@ fn 改名成空白时当场报错那一行与路径锚都没动() {
             panic!("空白名字 {空的:?} 该当场报错，却改成了");
         };
         assert!(
-            matches!(错, CatalogError::BlankLibraryName { .. }),
+            matches!(错, CatalogError::BlankLibraryName),
             "报的不是「名字是空白」那一句：{错:?}"
         );
         assert!(format!("{错}").contains("空白"), "那句话没说清是空白：{错}");
@@ -602,7 +641,7 @@ fn 建库时名字是空白就当场报错盘上一个文件都不多() {
             panic!("空白名字 {空的:?} 该当场报错，却建出了库");
         };
         assert!(
-            matches!(错, CatalogError::BlankLibraryName { .. }),
+            matches!(错, CatalogError::BlankLibraryName),
             "报的不是「名字是空白」那一句：{错:?}"
         );
         assert!(format!("{错}").contains("空白"), "那句话没说清是空白：{错}");

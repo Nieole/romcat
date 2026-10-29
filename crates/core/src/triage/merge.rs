@@ -409,20 +409,23 @@ pub fn impact(catalog: &Catalog, regrouping: &Regrouping) -> Result<Impact, Cata
     let keys = regrouping.moving();
     let moving: BTreeSet<&str> = keys.iter().copied().collect();
     let entries = converge::Entries::load(catalog)?;
-    let mut before: BTreeSet<(String, converge::Anchor)> = BTreeSet::new();
-    let mut after: BTreeSet<(String, converge::Anchor)> = BTreeSet::new();
+    let mut before: BTreeSet<converge::EntryKey> = BTreeSet::new();
+    let mut after: BTreeSet<converge::EntryKey> = BTreeSet::new();
     for variant in catalog.variants()? {
         // 做不成条目的那几个（**补丁**、**附属内容**、**非游戏资产**）一开始就不算数。
-        let Ok((platform, anchor)) = entries.of(&variant) else {
+        let Ok(key) = entries.of(&variant) else {
             continue;
         };
-        before.insert((platform.clone(), anchor.clone()));
+        before.insert(key.clone());
         let anchor = if moving.contains(variant.key.as_str()) {
             converge::Anchor::Work(regrouping.into.clone())
         } else {
-            anchor
+            key.anchor
         };
-        after.insert((platform, anchor));
+        after.insert(converge::EntryKey {
+            platform: key.platform,
+            anchor,
+        });
     }
     Ok(Impact {
         verdicts: regrouping.verdicts(),

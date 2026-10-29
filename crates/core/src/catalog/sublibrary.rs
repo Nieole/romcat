@@ -52,7 +52,7 @@ use crate::path;
 use crate::sublibrary::target::{NameRefusal, vet_name};
 use crate::sublibrary::{
     Discarded, Exception, ExceptionDetail, ExceptionRow, LoadedSelection, Rule, StoredRule,
-    Sublibrary,
+    Sublibrary, TrimName,
 };
 use crate::sync::{FileKind, Manifest, ManifestFile, Stamp};
 
@@ -1248,6 +1248,47 @@ impl Catalog {
             .display;
         }
         Ok(details)
+    }
+
+    /// 删减建议那几行要的**库侧事实**：变体的键 → 它属于哪部作品、屏上叫什么、什么平台
+    /// （[`TrimName`]）。
+    ///
+    /// **屏上那个名字只在一处答**（ADR-0024）：认出作品的取**作品名**，认不出的取那个变体
+    /// 主文件剥出来的**正题**——与 [`WorkRow::title`](super::browse::WorkRow::title)、
+    /// [`Self::sublibrary_exception_details`] 那一支是同一处剥（`browse::loose_title`）。
+    /// 界面照印，不自己凑「这个变体叫什么」（挂单 `Q852`）。
+    ///
+    /// `rules` 是工作目录里那份**剥离规则**（[`sources::rules`](crate::sources::rules)）：
+    /// 与刮削、与浏览屏交的是同一份。交错了，同一份内容在几屏上就是两个名字。
+    ///
+    /// 库里查不着的键不出现在结果里（界面那一行退回键本身）。
+    ///
+    /// # Errors
+    /// 读库失败时返回错误。
+    pub fn trim_names(
+        &self,
+        keys: &[&str],
+        rules: &crate::filename::Rules,
+    ) -> Result<BTreeMap<String, TrimName>, CatalogError> {
+        // **作品名整份读回来一次**（`work` 表比变体少一个量级），再按行号认：真库上一条规则能选出
+        // 几万个变体，逐条去问「这作品叫什么」就是几万次查询（同 `sync::media` 那一处的取法）。
+        let works = self.work_names()?;
+        let mut out = BTreeMap::new();
+        for row in self.variants_of(keys)? {
+            let work = row.work_id.and_then(|id| works.get(&id)).cloned();
+            let title = work
+                .clone()
+                .unwrap_or_else(|| super::browse::loose_title(rules, &row.main_key));
+            out.insert(
+                row.key,
+                TrimName {
+                    work,
+                    title,
+                    platform: row.platform,
+                },
+            );
+        }
+        Ok(out)
     }
 
     /// 读一个子库的**按平台覆盖**（票 `gui-looks-like-the-design/21`）：平台名 → 覆盖成什么。一个都没有是空表。

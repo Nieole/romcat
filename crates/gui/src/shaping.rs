@@ -528,23 +528,25 @@ fn merge_body(ui: &mut egui::Ui, spot: &Spot) -> Option<usize> {
         Some((_, merged)) => {
             look::impact(
                 ui,
+                None,
                 &[
-                    ("主文件：", false),
-                    (&name_of(&merged.main), true),
-                    (
-                        &format!("（一共 {} 个文件成员）", thousands(数(merged.files()))),
-                        false,
-                    ),
+                    look::ImpactPart::plain("主文件："),
+                    look::ImpactPart::strong(&name_of(&merged.main)),
+                    look::ImpactPart::plain(&format!(
+                        "（一共 {} 个文件成员）",
+                        thousands(数(merged.files()))
+                    )),
                 ],
             );
             // **附属文件逐条列出来**（票面第 2 条「预览合成后的主文件与**附属文件**」）：
             // 只说个数的话，人看不出合进来的是不是他勾的那几份。长了就说「另有 N 个」。
             look::impact(
                 ui,
-                &[(
-                    &format!("附属文件 {} 个：", thousands(数(merged.companions.len()))),
-                    false,
-                )],
+                None,
+                &[look::ImpactPart::plain(&format!(
+                    "附属文件 {} 个：",
+                    thousands(数(merged.companions.len()))
+                ))],
             );
             // **缩进到与上面那一条「会怎样」的字同一条线上**：`look::impact` 把圆点摆进
             // `impact-column` 那一列，再由 `horizontal_top` 隔一个 `item_spacing.x` 才画字
@@ -569,10 +571,11 @@ fn merge_body(ui: &mut egui::Ui, spot: &Spot) -> Option<usize> {
             // 与这一层末尾那一句各说过一次了，第三遍只会把这几条「这一下会怎样」冲淡。
             look::impact(
                 ui,
-                &[(
-                    &format!("勾中的 {} 个变体合成 1 个。", thousands(数(picked.len()))),
-                    false,
-                )],
+                None,
+                &[look::ImpactPart::plain(&format!(
+                    "勾中的 {} 个变体合成 1 个。",
+                    thousands(数(picked.len()))
+                ))],
             );
         }
         None => {
@@ -654,7 +657,11 @@ fn name_of(key: &str) -> String {
 ///
 /// # Errors
 /// 沉淀库读不出来、或者中立库里还没有遍历记录时交回那句话。
-pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<(u64, PendingMark), String> {
+pub fn reshape(
+    site: &mut Site,
+    tasks: &mut Tasks,
+    manifest: &Manifest,
+) -> Result<(u64, PendingMark), String> {
     let ShapingInput { overrides, pending } = site
         .store
         .shaping_input(&site.library_identity)
@@ -675,15 +682,23 @@ pub fn reshape(site: &mut Site, tasks: &mut Tasks) -> Result<(u64, PendingMark),
         .store
         .not_same_works(&site.library_identity)
         .unwrap_or_default();
+    let manifest = manifest.clone();
     let id = match site.catalog.file().map(Path::to_path_buf) {
         Some(file) => tasks.queue(RESHAPE_TASK, move |task| {
             let mut catalog =
                 Catalog::open(&file).map_err(|why| Cutoff::failed(why.to_string()))?;
-            reshape_run(&mut catalog, &overrides, &dismissed, scan, task)
+            reshape_run(&mut catalog, &overrides, &dismissed, scan, &manifest, task)
         }),
         // 只活在内存里的那一份分不出第二份连接，就地跑完（同库体检那一处）。
         None => tasks.run_here(RESHAPE_TASK, |task| {
-            reshape_run(&mut site.catalog, &overrides, &dismissed, scan, task)
+            reshape_run(
+                &mut site.catalog,
+                &overrides,
+                &dismissed,
+                scan,
+                &manifest,
+                task,
+            )
         }),
     };
     Ok((id, pending))
@@ -695,12 +710,12 @@ fn reshape_run(
     overrides: &BTreeMap<String, String>,
     dismissed: &[NotSameWork],
     scan: i64,
+    manifest: &Manifest,
     task: &Handle,
 ) -> Result<Product, Cutoff> {
-    let manifest = Manifest::builtin();
     task.check()?;
     let failed = |error: CatalogError| Cutoff::failed(format!("重新成型没成：{error}"));
-    shape::reshape(catalog, &manifest, overrides, scan).map_err(failed)?;
+    shape::reshape(catalog, manifest, overrides, scan).map_err(failed)?;
     task.check()?;
     // **明细列全**：与「重新体检」那一趟同一套上限（`health::check_run`，挂单 `Q959`）。
     let limits = Limits {
@@ -708,7 +723,7 @@ fn reshape_run(
         max_duplicate_paths_per_group: Limits::FULL_DUPLICATE_PATHS_PER_GROUP,
         ..Limits::default()
     };
-    let aggregate = catalog.aggregate(&limits, &manifest).map_err(failed)?;
+    let aggregate = catalog.aggregate(&limits, manifest).map_err(failed)?;
     let report = HealthReport::build_full(&aggregate, &catalog.report_meta().map_err(failed)?);
     let duplicates = DuplicateDetails::build(&aggregate, &report);
     task.check()?;

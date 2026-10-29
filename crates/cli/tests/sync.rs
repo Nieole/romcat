@@ -686,3 +686,71 @@ fn 子库里的元数据路径全部相对子库根() {
     );
     assert!(text.contains("files: FC/魂斗罗.zip"), "{text}");
 }
+
+#[test]
+fn 差量预览里转不了的容器_核心那句只说事实_命令行补上读一趟与看卡在哪一类的命令() {
+    // 票 `core-answers-once/13`（挂单 `Q1349`）：核心那句 `capability::decide` 的理由从前带着
+    // 「（zst 要 `romcat scan --zst`）」与「`romcat report` 说得出它卡在哪一类」，而那几句
+    // 直接画在子库屏差量预览那几行的悬停里。**事实留在核心库，命令由命令行照种类补**
+    // （ADR-0023 修订段）。
+    let library = temp_dir("sync-cli-zst-lib");
+    let workspace = temp_dir("sync-cli-zst-ws");
+    let target = temp_dir("sync-cli-zst-card");
+    写(&library.path().join("SFC/幻想传说.zip"), &zip(4096));
+    // 一份 `.zst`：扫描默认不为它付全量解压的代价（ADR-0014），内部构成没读；
+    // 而 Snes9x 只吃 zip——要转它就转不了。
+    写(
+        &library.path().join("SFC/圣剑传说.zip.zst"),
+        b"not a real zstd frame, and this scan never reads one",
+    );
+    let out = romcat(
+        workspace.path(),
+        &[
+            "scan",
+            "--root-name",
+            "库",
+            &library.path().display().to_string(),
+            "--library",
+            "测试库",
+            "--no-checkpoint",
+            "--samples-per-class",
+            "0",
+            "--quiet",
+        ],
+    );
+    assert!(out.status.success(), "{}", 出来的话(&out));
+    for 一下 in [
+        vec![
+            "set",
+            "掌机",
+            "--target",
+            &target.path().display().to_string(),
+        ],
+        vec!["rule", "掌机", "--add", "平台=SFC"],
+        vec!["set", "掌机", "--capability", "独立模拟器-exfat"],
+    ] {
+        let out = 子库(workspace.path(), &一下);
+        assert!(out.status.success(), "{}", 出来的话(&out));
+    }
+
+    let out = 子库(workspace.path(), &["plan", "掌机"]);
+    let text = 出来的话(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("到了目标上打不开"),
+        "前提：那一份转不了、该报在「转不了」那一栏里：{text}"
+    );
+    // **核心那句只说事实**：那一行里不带终端命令。
+    let 那一行 = text
+        .lines()
+        .find(|line| line.contains("内部构成读不出来"))
+        .unwrap_or_else(|| panic!("报告里没有那句事实：{text}"));
+    assert!(
+        !那一行.contains("romcat "),
+        "核心那句里还带着终端命令：{那一行}"
+    );
+    // **命令由命令行补**：把它读进来那一趟，与说得出它卡在哪一类的那一份报告。
+    for 该有 in ["`romcat scan --zst`", "`romcat report`"] {
+        assert!(text.contains(该有), "命令行没补上「{该有}」：{text}");
+    }
+}
