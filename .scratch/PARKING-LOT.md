@@ -2922,7 +2922,7 @@ README 那两个数没有任何东西钉着（`Q380`，**第三次记了**：`Q1
 - **两条路：** 甲（本票）：不碰夹具，三条核心库测试钉着行为，对照材料写明为什么没有图。乙：加一部认出作品的街机（标题集合 No-Intro + MAME），重批浏览屏与详情页那几张。
 - **建议留：** 乙，但归下一次动截图夹具的票，别单为这一条重批。
 - **谁来裁：** 拿主意的人
-- **状态：** open
+- **状态：** settled（拿主意的人 2026-10-29 裁：乙；票 `cao-05b` 做掉，补一张**只这一态才摆**的街机现场）：`crates/gui/tests/snapshot.rs` 里新添 `街机的作品` / `街机的变体` / `街机现场()`——一部认出了作品的街机（街机平台，标题集合里 No-Intro 的 `Contra (World)` 与 MAME 的 `Contra`，内置那份 `priorities.toml` 的「街机 / 标题」按平台覆盖管着先后），走 `搭浏览现场(…, 街机: true)` 那条 `chain`，**共享的 `浏览的变体` / `浏览的作品` 一行没动**，于是别的基线一张都没重批（不带 `UPDATE_SNAPSHOTS` 跑一趟：旧基线 163 张全绿，只有新的两条报 `Missing snapshot`）。新增成对基线 `work/arcade-mame-light.png` / `work/arcade-mame-dark.png`（作品详情页停在「标题」那一面）：浏览屏列表挑 `Contra (World)`、详情页按变体所在的平台挑 `Contra`，图上看得见面包屑、大标题、「显示标题」那一格与标题表两行。测试：`crates/gui/tests/snapshot.rs::详情页_街机按平台挑显示标题_浅色` / `_暗色`（拍之前还断言列表上是 `Contra (World)`、面包屑是 `浏览 / Contra`）。对照材料：`/Users/nicoer/dev/game-wt/logs/cao-05b-compare/CHANGED.md`（新增，无旧图；四个拿不准的样式问题）。裁决证据也补在票 `core-answers-once/05` 的截图那一条验收底下。
 
 ### Q1341 — 集成分支尖端 clippy 红了一处（gd-23 带进 `snapshot.rs` 的 `map(&号)`）
 
