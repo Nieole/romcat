@@ -33,6 +33,18 @@ ADR-0010 定的 MAME 权威落到认出作品的街机上。没有平台语境�
     override_note`：旧句「它只管没认出作品的变体……眼下不看平台」换成实话），按平台单独那一栏本来就没有
     截图基线。对照材料与留给拿主意的人点头的两个问题（那句怎么落地、要不要为详情页补一张街机基线）在
     `/Users/nicoer/dev/game-wt/logs/cao-05-compare/CHANGED.md`。
+  - 补（票 `cao-05b`，2026-10-29，收挂单 `Q1340`）：上面第二个问题拿主意的人点了头——**为详情页补一张街机基线**。
+    截图夹具里只给这一态多摆一部**认出了作品的街机**（`crates/gui/tests/snapshot.rs` 的 `街机的作品` /
+    `街机的变体`，走 `街机现场()`；共享的 `浏览的变体` / `浏览的作品` 一行没动），新增两张成对的基线：
+    `work/arcade-mame-light.png`、`work/arcade-mame-dark.png`（作品详情页停在「标题」那一面）。守的就是这一票：
+    同一部作品，浏览屏列表（无平台语境）挑 No-Intro 的 `Contra (World)`，详情页按变体所在的平台挑 MAME 的
+    `Contra`——图上看得见面包屑「浏览 / Contra」、大标题 `Contra`、副行「还叫什么」`Contra (World)`、
+    「显示标题」那一格 `Contra`、标题表两行 `Contra`(MAME) / `Contra (World)`(No-Intro)。测试：
+    `crates/gui/tests/snapshot.rs::详情页_街机按平台挑显示标题_浅色` / `_暗色`，拍之前另有三条断言钉着这个态
+    （点开之前列表上是 `Contra (World)` 且不画 `Contra`、打开之后面包屑是 `浏览 / Contra`、这一面真是「标题」）。
+    不带 `UPDATE_SNAPSHOTS` 跑一趟：旧基线 163 张全绿、只有这两条报 `Missing snapshot`；生成之后
+    `git status --short` 里只有这两张 `??`。对照材料（新增，无旧图可并排）与四个拿不准的样式问题在
+    `/Users/nicoer/dev/game-wt/logs/cao-05b-compare/CHANGED.md`。
 - [x] 门禁全绿（本机不分大小写的盘上 `sync_run` 那五条已知红除外，`Q479`）
   - 证据：日志 `/Users/nicoer/dev/game-wt/logs/cao-05-gate3.log`，头两行是 `/Users/nicoer/dev/game-wt/slot2`
     与 `q8/cao-05`，末行原文 `EXIT=0`，底下那句 `7 条全绿。`。七条照原话：`绿 fmt 5s`、`绿 glossary 1s`、
